@@ -164,132 +164,182 @@ exports.verifyOtpInfluencer = async (req, res) => {
   }
 };
 
+const escapeRegExp = (s = '') => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const safeParse = (v) => {
+  if (!v) return null;
+  if (typeof v === 'string') { try { return JSON.parse(v); } catch { return null; } }
+  if (typeof v === 'object') return v;
+  return null;
+};
+
+const mapPayload = (provider, input) => {
+  const p = safeParse(input);
+  if (!p) return null;
+
+  // Your samples: { error, profile: { ... } }
+  const root = p.profile || p;
+  const prof = root.profile || {};
+
+  return {
+    provider,
+    userId: root.userId || prof.userId,
+    username: prof.username,
+    fullname: prof.fullname,
+    handle: prof.handle, // (present in your YouTube sample)
+    url: prof.url,
+    picture: prof.picture,
+    followers: prof.followers,
+    engagements: prof.engagements,
+    engagementRate: prof.engagementRate,
+    averageViews: prof.averageViews,
+
+    isPrivate: root.isPrivate,
+    isVerified: root.isVerified,
+    accountType: root.accountType,
+    secUid: root.secUid,
+
+    city: root.city,
+    state: root.state,
+    country: root.country,
+    ageGroup: root.ageGroup,
+    gender: root.gender,
+    language: root.language,
+
+    statsByContentType: root.statsByContentType,
+    stats: root.stats,
+    recentPosts: root.recentPosts,
+    popularPosts: root.popularPosts,
+
+    // normalized counts
+    postsCount: root.postsCount || root.postsCounts,
+    avgLikes: root.avgLikes,
+    avgComments: root.avgComments,
+    avgViews: root.avgViews,
+    avgReelsPlays: root.avgReelsPlays,
+    totalLikes: root.totalLikes,
+    totalViews: root.totalViews,
+
+    // description/bio
+    bio: root.description || root.bio,
+    interests: root.interests,
+    hashtags: root.hashtags,
+    mentions: root.mentions,
+    brandAffinity: root.brandAffinity,
+
+    audience: root.audience,
+    audienceCommenters: root.audienceCommenters,
+    lookalikes: root.lookalikes || root.audienceLookalikes,
+
+    sponsoredPosts: root.sponsoredPosts,
+    paidPostPerformance: root.paidPostPerformance,
+    paidPostPerformanceViews: root.paidPostPerformanceViews,
+    sponsoredPostsMedianViews: root.sponsoredPostsMedianViews,
+    sponsoredPostsMedianLikes: root.sponsoredPostsMedianLikes,
+    nonSponsoredPostsMedianViews: root.nonSponsoredPostsMedianViews,
+    nonSponsoredPostsMedianLikes: root.nonSponsoredPostsMedianLikes,
+
+    audienceExtra: root.audienceExtra,
+    providerRaw: p
+  };
+};
+
 exports.registerInfluencer = async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ message: 'Profile image is required' });
-    }
-
     let {
       name,
       email,
       password,
       phone,
-      socialMedia,
-      gender,
-      platformId,
-      manualPlatformName,
-      profileLink,
-      malePercentage,
-      femalePercentage,
-      categories,
-      audienceAgeRangeId,
-      audienceId,
+
+      // minimal audience/location you kept
+      audienceRange,
       countryId,
       callingId,
-      bio
+
+      // multi-platform payload inputs
+      platforms,     // preferred: [{ provider: 'youtube'|'tiktok'|'instagram', data: <payload> }]
+      youtube,       // optional: raw JSON or JSON-string
+      tiktok,        // optional: raw JSON or JSON-string
+      instagram      // optional: raw JSON or JSON-string
     } = req.body;
 
+    // 1) Basic validations
     const normalizedEmail = String(email || '').trim().toLowerCase();
     if (!normalizedEmail) {
       return res.status(400).json({ message: 'Email is required' });
     }
+    if (!password || String(password).length < 8) {
+      return res.status(400).json({ message: 'Password must be at least 8 characters' });
+    }
+    if (!name || !phone || !audienceRange || !countryId || !callingId) {
+      return res.status(400).json({ message: 'Missing required fields (name, phone, audienceRange, countryId, callingId)' });
+    }
 
-    // Ensure email was verified for Influencer role
+    // 2) Ensure email was verified for Influencer role
     const verifiedRec = await VerifyEmail.findOne({
       email: normalizedEmail,
       role: 'Influencer',
       verified: true
     });
-
     if (!verifiedRec) {
       return res.status(400).json({ message: 'Email not verified' });
     }
 
-    // Prevent duplicate registration
+    // 3) Prevent duplicate registration (case-insensitive)
     const emailRegexCI = new RegExp(`^${escapeRegExp(normalizedEmail)}$`, 'i');
     const already = await Influencer.findOne({ email: emailRegexCI }, '_id');
     if (already) {
       return res.status(400).json({ message: 'Already registered' });
     }
 
-    if (typeof categories === 'string') {
-      try {
-        categories = JSON.parse(categories);
-      } catch {
-        return res.status(400).json({ message: 'categories must be a JSON array' });
-      }
-    }
-
-    let platformDoc = await Platform.findOne({ platformId });
-    if (!platformDoc) {
-      return res.status(400).json({ message: 'Invalid platformId' });
-    }
-    if (platformDoc.name === 'Other') {
-      if (!manualPlatformName?.trim()) {
-        return res.status(400).json({
-          message: 'manualPlatformName is required when platform is Other'
-        });
-      }
-      platformDoc = await new Platform({ name: manualPlatformName.trim() }).save();
-    }
-
-    if (!Array.isArray(categories) || categories.length < 1 || categories.length > 3) {
-      return res.status(400).json({
-        message: 'You must select between 1 and 3 categories'
-      });
-    }
-    const interestDocs = await Interest.find({ _id: { $in: categories } });
-    if (interestDocs.length !== categories.length) {
-      return res.status(400).json({ message: 'Invalid category IDs' });
-    }
-
-    const [ageRangeDoc, countRangeDoc, countryDoc, callingDoc] = await Promise.all([
-      Audience.findOne({ audienceId: audienceAgeRangeId }),
-      AudienceRange.findById(audienceId),
+    // 4) Validate Country + CallingCode refs
+    const [countryDoc, callingDoc] = await Promise.all([
       Country.findById(countryId),
       Country.findById(callingId)
     ]);
-    if (!ageRangeDoc || !countRangeDoc || !countryDoc || !callingDoc) {
-      return res.status(400).json({ message: 'Invalid reference IDs' });
+    if (!countryDoc || !callingDoc) {
+      return res.status(400).json({ message: 'Invalid countryId or callingId' });
     }
 
-    // Create a fresh Influencer doc (we no longer upsert during OTP)
-    const inf = new Influencer({ email: normalizedEmail });
+    // 5) Map platform payloads → socialProfiles[]
+    const profiles = [];
+    if (Array.isArray(platforms)) {
+      for (const item of platforms) {
+        if (!item || !item.provider) continue;
+        const mapped = mapPayload(String(item.provider).toLowerCase(), item.data);
+        if (mapped) profiles.push(mapped);
+      }
+    } else {
+      const y = mapPayload('youtube', youtube);
+      const tt = mapPayload('tiktok', tiktok);
+      const ig = mapPayload('instagram', instagram);
+      if (y) profiles.push(y);
+      if (tt) profiles.push(tt);
+      if (ig) profiles.push(ig);
+    }
+    if (!profiles.length) {
+      return res.status(400).json({ message: 'No valid platform payloads provided' });
+    }
 
-    inf.name = name;
-    inf.password = password;
-    inf.phone = phone;
-    inf.socialMedia = socialMedia;
-    inf.gender = Number(gender);
+    // 6) Create Influencer doc (password is hashed by schema pre-save)
+    const inf = new Influencer({
+      name,
+      email: normalizedEmail,
+      password,
+      phone,
 
-    inf.platformId = platformDoc._id;
-    inf.platformName = platformDoc.name;
+      primaryPlatform: profiles[0]?.provider || null,
+      socialProfiles: profiles,
 
-    inf.profileLink = profileLink;
-    inf.profileImage = `/uploads/profile_images/${req.file.filename}`;
+      audienceRange,
+      countryId,
+      country: countryDoc.countryName,     // derive from Country doc
+      callingId,
+      callingcode: callingDoc.callingCode  // derive from Country doc
+    });
 
-    inf.audienceBifurcation = {
-      malePercentage: Number(malePercentage),
-      femalePercentage: Number(femalePercentage)
-    };
-
-    inf.categories = interestDocs.map(d => d._id);
-    inf.categoryName = interestDocs.map(d => d.name);
-
-    inf.audienceAgeRangeId = ageRangeDoc._id;
-    inf.audienceAgeRange = ageRangeDoc.range;
-
-    inf.audienceId = countRangeDoc._id;
-    inf.audienceRange = countRangeDoc.range;
-
-    inf.countryId = countryId;
-    inf.country = countryDoc.countryName;
-    inf.callingId = callingId;
-    inf.callingcode = callingDoc.callingCode;
-
-    inf.bio = bio;
-
+    // 7) Initialize free subscription
     const freePlan = await subscriptionHelper.getFreePlan('Influencer');
     if (freePlan) {
       inf.subscription = {
@@ -308,12 +358,14 @@ exports.registerInfluencer = async (req, res) => {
 
     await inf.save();
 
-    // Clean up verification record so we don't keep "verified" state around
+    // 8) Clean up verification record
     await VerifyEmail.deleteOne({ email: normalizedEmail, role: 'Influencer' });
 
     return res.status(201).json({
       message: 'Influencer registered successfully',
       influencerId: inf.influencerId,
+      primaryPlatform: inf.primaryPlatform,
+      socialProfilesCount: inf.socialProfiles.length,
       subscription: inf.subscription
     });
   } catch (err) {

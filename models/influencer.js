@@ -4,126 +4,246 @@ const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
 const { edgeNgrams, charNgrams } = require('../utils/searchTokens');
 
+/* --------------------------------- Utils --------------------------------- */
 const emailRegex = /^[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,6}$/;
 const phoneRegex = /^[0-9]{10}$/;
 
-// Payment sub-schema
-const paymentSchema = new mongoose.Schema({
-  paymentId: { type: String, default: () => uuidv4() },
-  type: { type: Number, enum: [0, 1], required: true }, 
-  bank: {
-    accountHolder: { type: String, required: function () { return this.type === 1; } },
-    accountNumber: { type: String, required: function () { return this.type === 1; } },
-    ifsc: { type: String },
-    swift: { type: String },
-    bankName: { type: String, required: function () { return this.type === 1; } },
-    branch: { type: String },
-    countryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Country', required: function () { return this.type === 1; } },
-    countryName: { type: String, required: function () { return this.type === 1; } }
-  },
-  paypal: {
-    email: { type: String, match: [emailRegex, 'Invalid PayPal email'], required: function () { return this.type === 0; } },
-    username: { type: String }
-  },
-  isDefault: { type: Boolean, default: false }
-}, { _id: false, timestamps: true });
+/* -------------------------- Shared sub-schemas --------------------------- */
+const weightItemSchema = new mongoose.Schema(
+  { code: String, name: String, weight: Number },
+  { _id: false }
+);
 
-const influencerSchema = new mongoose.Schema({
-  influencerId: { type: String, required: true, unique: true, default: uuidv4 },
-  name: { type: String, required: function () { return this.otpVerified; } },
-  email: { type: String, required: true, unique: true, match: [emailRegex, 'Invalid email'] },
-  password: { type: String, minlength: 8, required: function () { return this.otpVerified; } },
-  phone: { type: String, match: [phoneRegex, 'Invalid phone'], required: function () { return this.otpVerified; } },
-  socialMedia: { type: String, required: function () { return this.otpVerified; } },
-  gender: { type: Number, enum: [0, 1, 2], required: function () { return this.otpVerified; } },
-  profileLink: { type: String, required: function () { return this.otpVerified; } },
-  profileImage: { type: String, required: function () { return this.otpVerified; } },
-  audienceBifurcation: {
-    malePercentage: { type: Number, min: 0, max: 100, required: function () { return this.otpVerified; } },
-    femalePercentage: { type: Number, min: 0, max: 100, required: function () { return this.otpVerified; } }
+const userLiteSchema = new mongoose.Schema(
+  {
+    userId: String,
+    fullname: String,
+    username: String,
+    url: String,
+    picture: String,
+    followers: Number,
+    engagements: Number
   },
-  categories: {
-    type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Interest', required: true }],
-    validate: {
-      validator: function (arr) {
-        if (!this.otpVerified) return true;
-        return Array.isArray(arr) && arr.length >= 1 && arr.length <= 3;
-      },
-      message: 'You must select between 1 and 3 categories.'
+  { _id: false }
+);
+
+const sponsorSchema = new mongoose.Schema(
+  { domain: String, logo_url: String, name: String },
+  { _id: false }
+);
+
+const postSchema = new mongoose.Schema(
+  {
+    id: String,
+    text: String,
+    url: String,
+    created: String,
+    likes: Number,
+    comments: Number,
+    views: Number,
+    video: String,
+    image: String,
+    thumbnail: String,
+    type: String,
+    title: String,
+    mentions: [String],
+    hashtags: [String],
+    sponsors: [sponsorSchema]
+  },
+  { _id: false }
+);
+
+const audienceSchema = new mongoose.Schema(
+  {
+    notable: Number,
+    genders: [weightItemSchema],
+    geoCountries: [weightItemSchema],
+    ages: [weightItemSchema],
+    gendersPerAge: [{ code: String, male: Number, female: Number }],
+    languages: [weightItemSchema],
+    notableUsers: [userLiteSchema],
+    audienceLookalikes: [userLiteSchema],
+    geoCities: [{ name: String, weight: Number }],
+    geoStates: [{ name: String, weight: Number }],
+    credibility: Number,
+    interests: [{ name: String, weight: Number }],
+    brandAffinity: [{ name: String, weight: Number }],
+    audienceReachability: [weightItemSchema],
+    audienceTypes: [weightItemSchema],
+    ethnicities: [weightItemSchema]
+  },
+  { _id: false }
+);
+
+/* ----------------------- Social profile sub-schema ----------------------- */
+/** Holds the full normalized payload + raw for youtube/tiktok/instagram */
+const socialProfileSchema = new mongoose.Schema(
+  {
+    provider: { type: String, enum: ['youtube', 'tiktok', 'instagram'], required: true, index: true },
+
+    // Identity
+    userId: String,
+    username: String,
+    fullname: String,
+    handle: String, // present in your YouTube sample
+    url: String,
+    picture: String,
+
+    // Metrics
+    followers: Number,
+    engagements: Number,
+    engagementRate: Number,
+    averageViews: Number,
+
+    // State/meta
+    isPrivate: Boolean,
+    isVerified: Boolean,
+    accountType: String, // instagram
+    secUid: String,      // tiktok
+
+    // Localization
+    city: String,
+    state: String,
+    country: String,
+    ageGroup: String,
+    gender: String,
+    language: { code: String, name: String },
+
+    // Content stats & posts
+    statsByContentType: mongoose.Schema.Types.Mixed,
+    stats: mongoose.Schema.Types.Mixed,
+    recentPosts: [postSchema],
+    popularPosts: [postSchema],
+
+    // Counts (normalized)
+    postsCount: Number,
+    avgLikes: Number,
+    avgComments: Number,
+    avgViews: Number,
+    avgReelsPlays: Number,
+    totalLikes: Number,
+    totalViews: Number,
+
+    // Bio/tags/brand
+    bio: String, // also maps from "description"
+    interests: [{ id: Number, name: String }],
+    hashtags: [{ tag: String, weight: Number }],
+    mentions: [{ tag: String, weight: Number }],
+    brandAffinity: [{ id: Number, name: String }],
+
+    // Audience
+    audience: audienceSchema,
+    audienceCommenters: audienceSchema,
+    lookalikes: [userLiteSchema],
+
+    // Paid/sponsored
+    sponsoredPosts: [postSchema],
+    paidPostPerformance: Number,
+    paidPostPerformanceViews: Number,
+    sponsoredPostsMedianViews: Number,
+    sponsoredPostsMedianLikes: Number,
+    nonSponsoredPostsMedianViews: Number,
+    nonSponsoredPostsMedianLikes: Number,
+
+    // Misc extras
+    audienceExtra: mongoose.Schema.Types.Mixed,
+
+    // Keep untouched provider payload too
+    providerRaw: mongoose.Schema.Types.Mixed
+  },
+  { _id: false, timestamps: true }
+);
+
+/* -------------------------- Payment sub-schema --------------------------- */
+const paymentSchema = new mongoose.Schema(
+  {
+    paymentId: { type: String, default: () => uuidv4() },
+    // 0: PayPal, 1: Bank
+    type: { type: Number, enum: [0, 1], required: true },
+    bank: {
+      accountHolder: { type: String, required: function () { return this.type === 1; } },
+      accountNumber: { type: String, required: function () { return this.type === 1; } },
+      ifsc: { type: String },
+      swift: { type: String },
+      bankName: { type: String, required: function () { return this.type === 1; } },
+      branch: { type: String },
+      countryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Country', required: function () { return this.type === 1; } },
+      countryName: { type: String, required: function () { return this.type === 1; } }
     },
-    required: function () { return this.otpVerified; }
-  },
-  categoryName: {
-    type: [String],
-    default: [],
-    validate: {
-      validator: function (arr) {
-        if (!this.otpVerified) return true;
-        return Array.isArray(arr) && arr.length === this.categories.length;
-      },
-      message: 'categoryName entries must correspond 1:1 with categories.'
+    paypal: {
+      email: { type: String, match: [emailRegex, 'Invalid PayPal email'], required: function () { return this.type === 0; } },
+      username: { type: String }
     },
-    required: function () { return this.otpVerified; }
+    isDefault: { type: Boolean, default: false }
   },
-  platformId: { type: mongoose.Schema.Types.ObjectId, ref: 'Platform', required: function () { return this.otpVerified; } },
-  platformName: { type: String, required: function () { return this.otpVerified; } },
-  audienceAgeRangeId: { type: mongoose.Schema.Types.ObjectId, ref: 'Audience', required: function () { return this.otpVerified; } },
-  audienceAgeRange: { type: String, required: function () { return this.otpVerified; } },
-  audienceId: { type: mongoose.Schema.Types.ObjectId, ref: 'AudienceRange', required: function () { return this.otpVerified; } },
-  audienceRange: { type: String, required: function () { return this.otpVerified; } },
-  countryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Country', required: function () { return this.otpVerified; } },
-  country: { type: String, required: function () { return this.otpVerified; } },
-  callingId: { type: mongoose.Schema.Types.ObjectId, ref: 'Country', required: function () { return this.otpVerified; } },
-  callingcode: { type: String, required: function () { return this.otpVerified; } },
-  bio: { type: String, default: '' },
+  { _id: false, timestamps: true }
+);
 
-  // 🔎 Autocomplete tokens (indexed array). Each token is LOWERCASE.
-  _ac: { type: [String], index: true },
+/* --------------------------- Influencer schema --------------------------- */
+/** Keep only what you asked for at top-level; rest lives in socialProfiles[] */
+const influencerSchema = new mongoose.Schema(
+  {
+    influencerId: { type: String, required: true, unique: true, default: uuidv4 },
+    name: { type: String, required: function () { return this.otpVerified; } },
+    email: { type: String, required: true, unique: true, match: [emailRegex, 'Invalid email'] },
+    password: { type: String, minlength: 8, required: function () { return this.otpVerified; } },
+    phone: { type: String, match: [phoneRegex, 'Invalid phone'], required: function () { return this.otpVerified; } },
 
-  createdAt: { type: Date, default: Date.now },
+    // Multi-platform storage (full payloads are here)
+    primaryPlatform: { type: String, enum: ['youtube', 'tiktok', 'instagram', 'other', null], default: null },
+    socialProfiles: { type: [socialProfileSchema], default: [] },
 
-  // Legacy OTP fields (kept for backward compatibility; not used in new OTP flow)
-  otpCode: { type: String },
-  otpExpiresAt: { type: Date },
-  otpVerified: { type: Boolean, default: false },
+    // Minimal audience/location you kept
+    countryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Country', required: function () { return this.otpVerified; } },
+    country: { type: String, required: function () { return this.otpVerified; } },
+    callingId: { type: mongoose.Schema.Types.ObjectId, ref: 'Country', required: function () { return this.otpVerified; } },
+    callingcode: { type: String, required: function () { return this.otpVerified; } },
 
-  passwordResetCode: { type: String },
-  passwordResetExpiresAt: { type: Date },
-  passwordResetVerified: { type: Boolean, default: false },
+    // Search tokens
+    _ac: { type: [String], index: true },
 
-  paymentMethods: { type: [paymentSchema], default: [] },
+    // (You kept this even with timestamps; ok to keep)
+    createdAt: { type: Date, default: Date.now },
 
-  // Keep your original subscription structure
-  subscription: {
-    planName: { type: String, required: true, default: 'free' },
-    planId: { type: String, required: true, default: 'a58683f0-8d6e-41b0-addd-a718c2622142' },
-    startedAt: { type: Date, default: Date.now },
-    expiresAt: { type: Date },
-    features: {
-      type: [new mongoose.Schema({
-        key: { type: String, required: true },
-        limit: { type: Number, required: true },
-        used: { type: Number, required: true }
-      }, { _id: false })],
-      default: []
-    }
+    // OTP / reset / subscription / payments — preserved
+    otpCode: { type: String },
+    otpExpiresAt: { type: Date },
+    otpVerified: { type: Boolean, default: false },
+
+    passwordResetCode: { type: String },
+    passwordResetExpiresAt: { type: Date },
+    passwordResetVerified: { type: Boolean, default: false },
+
+    paymentMethods: { type: [paymentSchema], default: [] },
+
+    subscription: {
+      planName: { type: String, required: true, default: 'free' },
+      planId: { type: String, required: true, default: 'a58683f0-8d6e-41b0-addd-a718c2622142' },
+      startedAt: { type: Date, default: Date.now },
+      expiresAt: { type: Date },
+      features: {
+        type: [
+          new mongoose.Schema(
+            { key: { type: String, required: true }, limit: { type: Number, required: true }, used: { type: Number, required: true } },
+            { _id: false }
+          )
+        ],
+        default: []
+      }
+    },
+
+    subscriptionExpired: { type: Boolean, default: false },
+    failedLoginAttempts: { type: Number, default: 0 },
+    lockUntil: { type: Date, default: null }
   },
-
-  subscriptionExpired: { type: Boolean, default: false },
-  failedLoginAttempts: { type: Number, default: 0 },
-  lockUntil: { type: Date, default: null }
-}, { timestamps: true });
+  { timestamps: true, minimize: true }
+);
 
 /* ---------------------- Helpful Indexes for Filters ---------------------- */
-influencerSchema.index({ countryId: 1 });
-influencerSchema.index({ platformId: 1 });
-influencerSchema.index({ gender: 1 });
-influencerSchema.index({ audienceRange: 1 });
-influencerSchema.index({ 'audienceBifurcation.malePercentage': 1 });
-influencerSchema.index({ 'audienceBifurcation.femalePercentage': 1 });
-influencerSchema.index({ name: 1 });              // for stable alphabetical sorts
+influencerSchema.index({ email: 1 }, { unique: true });
+influencerSchema.index({ 'socialProfiles.provider': 1 });
 
-/* -------------------- Keep only one default payment method -------------------- */
+/* -------------------- Only one default payment method -------------------- */
 influencerSchema.pre('validate', function (next) {
   if (Array.isArray(this.paymentMethods)) {
     this.paymentMethods.forEach(pm => { if (!pm.paymentId) pm.paymentId = uuidv4(); });
@@ -134,7 +254,7 @@ influencerSchema.pre('validate', function (next) {
 });
 
 /* ------------------------- Autocomplete Token Builder ------------------------- */
-const AC_FIELDS = ['name', 'categoryName', 'platformName', 'country', 'socialMedia', 'bio'];
+const AC_FIELDS = ['name', 'country'];
 const normalize = (s) => (typeof s === 'string' ? s.toLowerCase().trim() : '');
 
 function buildACTokens(doc) {
@@ -145,17 +265,27 @@ function buildACTokens(doc) {
     bag.push(...edgeNgrams(norm));
     bag.push(...charNgrams(norm, 2, 4));
   };
+
   for (const f of AC_FIELDS) {
     const v = doc[f];
-    if (!v) continue;
-    if (Array.isArray(v)) v.forEach(pushFor);
-    else pushFor(v);
+    if (v) pushFor(v);
   }
+
+  if (Array.isArray(doc.socialProfiles)) {
+    for (const p of doc.socialProfiles) {
+      pushFor(p.username);
+      pushFor(p.fullname);
+      pushFor(p.handle);
+      pushFor(p.provider);
+      pushFor(p.country);
+      pushFor(p.city);
+    }
+  }
+
   const deduped = Array.from(new Set(bag.filter(Boolean)));
   return deduped.slice(0, 2000);
 }
 
-/* ----------------- Recompute _ac on saves and updates ----------------- */
 influencerSchema.pre('save', function (next) {
   this._ac = buildACTokens(this);
   next();
@@ -170,12 +300,10 @@ influencerSchema.pre('save', async function (next) {
   } catch (e) { next(e); }
 });
 
-/* ------------------------------- Methods ------------------------------- */
 influencerSchema.methods.comparePassword = function (candidatePassword) {
   return bcrypt.compare(candidatePassword, this.password);
 };
 
-// Partial unique index on paymentMethods.paymentId
 influencerSchema.index(
   { 'paymentMethods.paymentId': 1 },
   { unique: true, partialFilterExpression: { 'paymentMethods.paymentId': { $exists: true, $ne: null } } }
