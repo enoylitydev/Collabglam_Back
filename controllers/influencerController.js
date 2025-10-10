@@ -9,14 +9,14 @@ const { v4: uuidv4 } = require('uuid');
 const fs = require('fs');
 const Brand = require('../models/brand');
 const Influencer = require('../models/influencer');
-const Interest = require('../models/interest');
+const Category = require('../models/categories');
 const AudienceRange = require('../models/audience');
 const Country = require('../models/country');
 const subscriptionHelper = require('../utils/subscriptionHelper');
 const Platform = require('../models/platform');
 const Audience = require('../models/audienceRange');
 const Campaign = require('../models/campaign');
-const { escapeRegExp } = require('../utils/searchTokens');
+const { escapeRegExp,edgeNgrams, charNgrams } = require('../utils/searchTokens');
 const VerifyEmail = require('../models/verifyEmail');
 
 const SMTP_HOST = process.env.SMTP_HOST;
@@ -164,7 +164,7 @@ exports.verifyOtpInfluencer = async (req, res) => {
   }
 };
 
-const escapeRegExp = (s = '') => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 
 const safeParse = (v) => {
   if (!v) return null;
@@ -173,11 +173,115 @@ const safeParse = (v) => {
   return null;
 };
 
+// Build an in-memory index for Category → Subcategory lookups
+async function buildCategoryIndex() {
+  const rows = await Category.find({}, 'id name subcategories').lean();
+  const bySubId = new Map();           // subcategoryId(UUID) -> { categoryId, categoryName, subcategoryId, subcategoryName }
+  const bySubName = new Map();         // subcategoryName (lower) -> above
+  const byCatId = new Map();           // categoryId (Number) -> { id, name, subcategories[] }
+
+  for (const r of rows) {
+    byCatId.set(r.id, r);
+    for (const s of (r.subcategories || [])) {
+      const node = {
+        categoryId: r.id,
+        categoryName: r.name,
+        subcategoryId: s.subcategoryId,
+        subcategoryName: s.name
+      };
+      bySubId.set(String(s.subcategoryId), node);
+      bySubName.set(String(s.name).toLowerCase(), node);
+    }
+  }
+  return { bySubId, bySubName, byCatId };
+}
+
+// Normalize an array of "raw" category inputs from provider payloads
+// Accepts formats:
+//   - [{ subcategoryId, subcategoryName?, categoryId? }]  (preferred)
+//   - [{ categoryId, subcategoryName }] (maps by name within category)
+//   - ["subcategory name", ...]                           (legacy free-text)
+//   - [{ id, name }]                                      (legacy "interests" — tries to resolve by name; `id` treated as categoryId if possible)
+function normalizeCategories(raw, idx) {
+  if (!raw) return [];
+  const list = Array.isArray(raw) ? raw : [raw];
+  const out = [];
+
+  for (const item of list) {
+    if (!item) continue;
+
+    // String → assume subcategory name
+    if (typeof item === 'string') {
+      const hit = idx.bySubName.get(item.toLowerCase());
+      if (hit) out.push(hit);
+      continue;
+    }
+
+    // Has subcategoryId → direct resolve
+    if (item.subcategoryId && UUIDv4Regex.test(String(item.subcategoryId))) {
+      const hit = idx.bySubId.get(String(item.subcategoryId));
+      if (hit) out.push(hit);
+      continue;
+    }
+
+    // Has (categoryId + subcategoryName)
+    if (typeof item.categoryId === 'number' && item.subcategoryName) {
+      const cat = idx.byCatId.get(item.categoryId);
+      if (cat && Array.isArray(cat.subcategories)) {
+        const sub = cat.subcategories.find(
+          s => String(s.name).toLowerCase() === String(item.subcategoryName).toLowerCase()
+        );
+        if (sub) {
+          out.push({
+            categoryId: cat.id,
+            categoryName: cat.name,
+            subcategoryId: sub.subcategoryId,
+            subcategoryName: sub.name
+          });
+        }
+      }
+      continue;
+    }
+
+    // Legacy { id, name } (interests) → try as subcategory name
+    if (typeof item.id === 'number' || typeof item.name === 'string') {
+      const byName = item.name ? idx.bySubName.get(String(item.name).toLowerCase()) : null;
+      if (byName) {
+        out.push(byName);
+        continue;
+      }
+      // If only category id provided with no subcategory, we skip (cannot resolve)
+      continue;
+    }
+  }
+
+  // Deduplicate by subcategoryId
+  const seen = new Set();
+  const deduped = [];
+  for (const node of out) {
+    if (!seen.has(node.subcategoryId)) {
+      seen.add(node.subcategoryId);
+      deduped.push(node);
+    }
+  }
+  return deduped;
+}
+
+// Pull possible taxonomy arrays from provider raw payloads
+function extractRawCategoriesFromProviderRaw(providerRaw) {
+  const p = safeParse(providerRaw) || providerRaw || {};
+  const root = p.profile || p;
+  const prof = root.profile || {};
+  // Prefer new "categories", fall back to legacy "interests"
+  return prof.categories || root.categories || prof.interests || root.interests || [];
+}
+
+/* ================================ MAP PAYLOAD ================================ */
+// unchanged signature but we STOP writing legacy `interests` and defer category mapping
 const mapPayload = (provider, input) => {
   const p = safeParse(input);
   if (!p) return null;
 
-  // Your samples: { error, profile: { ... } }
   const root = p.profile || p;
   const prof = root.profile || {};
 
@@ -186,7 +290,7 @@ const mapPayload = (provider, input) => {
     userId: root.userId || prof.userId,
     username: prof.username,
     fullname: prof.fullname,
-    handle: prof.handle, // (present in your YouTube sample)
+    handle: prof.handle,
     url: prof.url,
     picture: prof.picture,
     followers: prof.followers,
@@ -211,7 +315,6 @@ const mapPayload = (provider, input) => {
     recentPosts: root.recentPosts,
     popularPosts: root.popularPosts,
 
-    // normalized counts
     postsCount: root.postsCount || root.postsCounts,
     avgLikes: root.avgLikes,
     avgComments: root.avgComments,
@@ -220,9 +323,11 @@ const mapPayload = (provider, input) => {
     totalLikes: root.totalLikes,
     totalViews: root.totalViews,
 
-    // description/bio
     bio: root.description || root.bio,
-    interests: root.interests,
+
+    // NOTE: categories will be populated later from providerRaw via normalization
+    categories: [],
+
     hashtags: root.hashtags,
     mentions: root.mentions,
     brandAffinity: root.brandAffinity,
@@ -243,6 +348,8 @@ const mapPayload = (provider, input) => {
     providerRaw: p
   };
 };
+
+/* ============================== CONTROLLER API ============================== */
 
 exports.registerInfluencer = async (req, res) => {
   try {
@@ -288,7 +395,7 @@ exports.registerInfluencer = async (req, res) => {
 
     // 3) Prevent duplicate registration (case-insensitive)
     const emailRegexCI = new RegExp(`^${escapeRegExp(normalizedEmail)}$`, 'i');
-    const already = await Influencer.findOne({ email: emailRegexCI }, '_id');
+    const already = await mongoose.model('Influencer').findOne({ email: emailRegexCI }, '_id');
     if (already) {
       return res.status(400).json({ message: 'Already registered' });
     }
@@ -322,8 +429,15 @@ exports.registerInfluencer = async (req, res) => {
       return res.status(400).json({ message: 'No valid platform payloads provided' });
     }
 
-    // 6) Create Influencer doc (password is hashed by schema pre-save)
-    const inf = new Influencer({
+    // 6) Resolve categories/subcategories for each profile (NEW)
+    const idx = await buildCategoryIndex();
+    for (const prof of profiles) {
+      const rawCats = extractRawCategoriesFromProviderRaw(prof.providerRaw);
+      prof.categories = normalizeCategories(rawCats, idx); // array of {categoryId, categoryName, subcategoryId, subcategoryName}
+    }
+
+    // 7) Create Influencer doc (password is hashed by schema pre-save)
+    const inf = new (mongoose.model('Influencer'))({
       name,
       email: normalizedEmail,
       password,
@@ -334,12 +448,12 @@ exports.registerInfluencer = async (req, res) => {
 
       audienceRange,
       countryId,
-      country: countryDoc.countryName,     // derive from Country doc
+      country: countryDoc.countryName,
       callingId,
-      callingcode: callingDoc.callingCode  // derive from Country doc
+      callingcode: callingDoc.callingCode
     });
 
-    // 7) Initialize free subscription
+    // 8) Initialize free subscription
     const freePlan = await subscriptionHelper.getFreePlan('Influencer');
     if (freePlan) {
       inf.subscription = {
@@ -358,7 +472,7 @@ exports.registerInfluencer = async (req, res) => {
 
     await inf.save();
 
-    // 8) Clean up verification record
+    // 9) Clean up verification record
     await VerifyEmail.deleteOne({ email: normalizedEmail, role: 'Influencer' });
 
     return res.status(201).json({

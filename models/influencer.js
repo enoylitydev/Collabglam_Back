@@ -7,6 +7,8 @@ const { edgeNgrams, charNgrams } = require('../utils/searchTokens');
 /* --------------------------------- Utils --------------------------------- */
 const emailRegex = /^[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,6}$/;
 const phoneRegex = /^[0-9]{10}$/;
+const UUIDv4Regex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 
 /* -------------------------- Shared sub-schemas --------------------------- */
 const weightItemSchema = new mongoose.Schema(
@@ -66,11 +68,29 @@ const audienceSchema = new mongoose.Schema(
     geoCities: [{ name: String, weight: Number }],
     geoStates: [{ name: String, weight: Number }],
     credibility: Number,
-    interests: [{ name: String, weight: Number }],
+    interests: [{ name: String, weight: Number }], // (unchanged: audience insight, not taxonomy)
     brandAffinity: [{ name: String, weight: Number }],
     audienceReachability: [weightItemSchema],
     audienceTypes: [weightItemSchema],
     ethnicities: [weightItemSchema]
+  },
+  { _id: false }
+);
+
+/* ----------------------- Category link sub-schema ----------------------- */
+/** Replaces legacy `interests` on social profiles */
+const categoryLinkSchema = new mongoose.Schema(
+  {
+    categoryId: { type: Number, required: true, index: true },
+    categoryName: { type: String, required: true, trim: true },
+
+    subcategoryId: {
+      type: String,
+      required: true,
+      index: true,
+      match: [UUIDv4Regex, 'Invalid subcategoryId (must be UUID v4)'],
+    },
+    subcategoryName: { type: String, required: true, trim: true },
   },
   { _id: false }
 );
@@ -85,7 +105,7 @@ const socialProfileSchema = new mongoose.Schema(
     userId: String,
     username: String,
     fullname: String,
-    handle: String, // present in your YouTube sample
+    handle: String,
     url: String,
     picture: String,
 
@@ -126,7 +146,10 @@ const socialProfileSchema = new mongoose.Schema(
 
     // Bio/tags/brand
     bio: String, // also maps from "description"
-    interests: [{ id: Number, name: String }],
+
+    // ✨ NEW: Categories (replaces legacy `interests`)
+    categories: { type: [categoryLinkSchema], default: [] },
+
     hashtags: [{ tag: String, weight: Number }],
     mentions: [{ tag: String, weight: Number }],
     brandAffinity: [{ id: Number, name: String }],
@@ -180,7 +203,6 @@ const paymentSchema = new mongoose.Schema(
 );
 
 /* --------------------------- Influencer schema --------------------------- */
-/** Keep only what you asked for at top-level; rest lives in socialProfiles[] */
 const influencerSchema = new mongoose.Schema(
   {
     influencerId: { type: String, required: true, unique: true, default: uuidv4 },
@@ -202,7 +224,6 @@ const influencerSchema = new mongoose.Schema(
     // Search tokens
     _ac: { type: [String], index: true },
 
-    // (You kept this even with timestamps; ok to keep)
     createdAt: { type: Date, default: Date.now },
 
     // OTP / reset / subscription / payments — preserved
@@ -242,6 +263,8 @@ const influencerSchema = new mongoose.Schema(
 /* ---------------------- Helpful Indexes for Filters ---------------------- */
 influencerSchema.index({ email: 1 }, { unique: true });
 influencerSchema.index({ 'socialProfiles.provider': 1 });
+// NEW: fast deref by subcategory UUID
+influencerSchema.index({ 'socialProfiles.categories.subcategoryId': 1 });
 
 /* -------------------- Only one default payment method -------------------- */
 influencerSchema.pre('validate', function (next) {
@@ -279,6 +302,14 @@ function buildACTokens(doc) {
       pushFor(p.provider);
       pushFor(p.country);
       pushFor(p.city);
+
+      // NEW: include taxonomy in AC
+      if (Array.isArray(p.categories)) {
+        for (const c of p.categories) {
+          pushFor(c.categoryName);
+          pushFor(c.subcategoryName);
+        }
+      }
     }
   }
 

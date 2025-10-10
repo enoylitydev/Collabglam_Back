@@ -1,6 +1,6 @@
 // controllers/interestController.js
 
-const Interest = require('../models/interest');
+const Interest = require('../models/categories');
 
 /**
  * GET /interests

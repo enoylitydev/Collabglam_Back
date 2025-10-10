@@ -1,59 +1,76 @@
-// scripts/interestScripts.js
+// scripts/upsert-categories.js
 require('dotenv').config();
 const mongoose = require('mongoose');
-const Interest = require('../models/interest');     // ← uses models/interst
-const interestsData = require('../data/interest'); // ← uses data/interest
+const { v4: uuidv4 } = require('uuid');
 
-async function populateInterests() {
-  try {
-    // 1) CONNECT TO MONGODB
-    const uri = process.env.MONGO_URI || process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/Influencer';
-    await mongoose.connect(uri);
-    console.log('✔️ Connected to MongoDB');
+const Category = require('../models/categories');
+const SOURCE = require('../data/categories');
 
-    // Ensure indexes on the model (unique id & name)
-    await Interest.init();
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/yourdb';
 
-    // 2) OPTIONAL: Clear existing docs if you want a fresh slate
-    // await Interest.deleteMany({});
-    // console.log('🗑️ Cleared existing Interest documents');
+async function upsertCategory(one) {
+  const existing = await Category.findOne({ id: one.id });
 
-    // 3) PREPARE DATA
-    // data/interest exports an array directly ( [{ id, name }, ...] )
-    const items = Array.isArray(interestsData)
-      ? interestsData
-      : (interestsData?.interests || []);
+  // Desired subcategory names in order
+  const desiredNames = one.subcategories.map((s) => s.trim());
 
-    if (!Array.isArray(items) || items.length === 0) {
-      throw new Error('No interests found in data/interest.js');
-    }
-
-    // 4) BULK UPSERT (safer than insertMany for re-runs)
-    const ops = items.map(({ id, name }) => ({
-      updateOne: {
-        filter: { id },
-        update: { $set: { name } },
-        upsert: true,
-      },
-    }));
-
-    const result = await Interest.bulkWrite(ops, { ordered: false });
-
-    console.log('✅ Interests seed complete.');
-    console.log({
-      matched: result.matchedCount || 0,
-      modified: result.modifiedCount || 0,
-      upserted:
-        result.upsertedCount ||
-        (result.upsertedIds ? Object.keys(result.upsertedIds).length : 0),
+  if (!existing) {
+    // Create new with fresh UUIDs
+    const doc = await Category.create({
+      id: one.id,
+      name: one.name,
+      subcategories: desiredNames.map((name) => ({ name, subcategoryId: uuidv4() })),
     });
-  } catch (err) {
-    console.error('❌ Error populating interests:', err);
-    process.exitCode = 1;
-  } finally {
-    await mongoose.disconnect();
-    console.log('🔒 MongoDB connection closed');
+    return { id: one.id, created: true, updated: false, removed: 0, added: desiredNames.length };
   }
+
+  // Merge: keep UUIDs if name matches; generate for new names; drop missing
+  const byName = new Map(
+    (existing.subcategories || []).map((s) => [s.name.trim(), { name: s.name.trim(), subcategoryId: s.subcategoryId }])
+  );
+
+  const merged = desiredNames.map((name) => {
+    const hit = byName.get(name);
+    return hit ? hit : { name, subcategoryId: uuidv4() };
+  });
+
+  const removed = (existing.subcategories || []).filter(
+    (s) => !desiredNames.includes(s.name.trim())
+  ).length;
+
+  existing.name = one.name;               // keep canonical name
+  existing.subcategories = merged;        // replace in desired order
+  await existing.save();
+
+  const added = merged.filter((s) => !byName.has(s.name)).length;
+
+  return { id: one.id, created: false, updated: true, removed, added };
 }
 
-populateInterests();
+(async function run() {
+  await mongoose.connect(MONGODB_URI, { autoIndex: true });
+  console.log('Connected:', MONGODB_URI);
+
+  const results = [];
+  for (const cat of SOURCE) {
+    // Safety: ensure 8 subcategories each, trim whitespace
+    cat.subcategories = (cat.subcategories || []).map((s) => s.trim());
+    const res = await upsertCategory(cat);
+    results.push(res);
+  }
+
+  // Optional: clean up categories that are no longer in the source list (by id)
+  const validIds = new Set(SOURCE.map((c) => c.id));
+  const obsolete = await Category.find({ id: { $nin: [...validIds] } }).select('id name');
+  if (obsolete.length) {
+    console.warn('Found categories not in source list. Leaving them untouched:', obsolete.map(o => o.id));
+  }
+
+  console.table(results);
+  await mongoose.disconnect();
+  process.exit(0);
+})().catch(async (err) => {
+  console.error(err);
+  try { await mongoose.disconnect(); } catch {}
+  process.exit(1);
+});

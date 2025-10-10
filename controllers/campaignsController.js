@@ -7,7 +7,7 @@ const multer = require('multer');
 
 const Campaign = require('../models/campaign');
 const Brand = require('../models/brand');
-const Interest = require('../models/interest');
+const Interest = require('../models/categories');
 const ApplyCampaign = require('../models/applyCampaign');
 const Influencer = require('../models/influencer');
 const Contract = require('../models/contract');
