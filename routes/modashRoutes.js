@@ -1,9 +1,9 @@
+// routes/index.js (or wherever you mount routes)
 const express = require('express');
-const { getAllCountries } = require('../controllers/modashController');
-
 const router = express.Router();
+const modashController = require('../controllers/modashController');
 
-// GET /api/countries
-router.get('/getAll', getAllCountries);
+// proxy endpoint
+router.post('/resolve-profile', modashController.resolveProfile);
 
 module.exports = router;

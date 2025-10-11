@@ -1,6 +1,7 @@
 // controllers/influencerController.js
 
 require('dotenv').config();
+const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
 const multer = require('multer');
@@ -360,7 +361,6 @@ exports.registerInfluencer = async (req, res) => {
       phone,
 
       // minimal audience/location you kept
-      audienceRange,
       countryId,
       callingId,
 
@@ -379,8 +379,8 @@ exports.registerInfluencer = async (req, res) => {
     if (!password || String(password).length < 8) {
       return res.status(400).json({ message: 'Password must be at least 8 characters' });
     }
-    if (!name || !phone || !audienceRange || !countryId || !callingId) {
-      return res.status(400).json({ message: 'Missing required fields (name, phone, audienceRange, countryId, callingId)' });
+    if (!name || !phone || !countryId || !callingId) {
+      return res.status(400).json({ message: 'Missing required fields (name, phone, countryId, callingId)' });
     }
 
     // 2) Ensure email was verified for Influencer role
@@ -446,7 +446,6 @@ exports.registerInfluencer = async (req, res) => {
       primaryPlatform: profiles[0]?.provider || null,
       socialProfiles: profiles,
 
-      audienceRange,
       countryId,
       country: countryDoc.countryName,
       callingId,
