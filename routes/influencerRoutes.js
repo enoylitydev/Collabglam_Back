@@ -21,7 +21,8 @@ updatePaymentMethod,
 suggestInfluencers,
 updateProfile,
 requestEmailUpdate,
-verifyotp
+verifyotp,
+saveQuickOnboarding
 } = require('../controllers/influencerController');
 
 
@@ -31,6 +32,9 @@ const {searchBrands} = require('../controllers/brandController');
 router.post('/request-otp', requestOtpInfluencer);
 router.post('/verify-otp', verifyOtpInfluencer);
 router.post('/register', uploadProfileImage,registerInfluencer);
+router.post('/onboarding', saveQuickOnboarding);
+
+
 router.post('/login',    login);
 router.post('/get-campaign',getCampaignsByInfluencer);
 router.post('/getlist',verifyToken,getList);

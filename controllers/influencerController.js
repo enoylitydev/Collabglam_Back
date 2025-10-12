@@ -1,5 +1,4 @@
 // controllers/influencerController.js
-
 require('dotenv').config();
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
@@ -8,24 +7,27 @@ const multer = require('multer');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const fs = require('fs');
+
+// Models
 const Brand = require('../models/brand');
 const Influencer = require('../models/influencer');
 const Category = require('../models/categories');
-const AudienceRange = require('../models/audience');
 const Country = require('../models/country');
-const subscriptionHelper = require('../utils/subscriptionHelper');
-const Platform = require('../models/platform');
-const Audience = require('../models/audienceRange');
-const Campaign = require('../models/campaign');
-const { escapeRegExp,edgeNgrams, charNgrams } = require('../utils/searchTokens');
+const Language = require('../models/language');
 const VerifyEmail = require('../models/verifyEmail');
 
+// Utils
+const subscriptionHelper = require('../utils/subscriptionHelper');
+const { escapeRegExp } = require('../utils/searchTokens');
+
+// SMTP
 const SMTP_HOST = process.env.SMTP_HOST;
 const SMTP_PORT = parseInt(process.env.SMTP_PORT, 10);
 const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASS = process.env.SMTP_PASS;
 const JWT_SECRET = process.env.JWT_SECRET;
 
+// Mailer
 const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
   port: SMTP_PORT,
@@ -33,10 +35,9 @@ const transporter = nodemailer.createTransport({
   auth: { user: SMTP_USER, pass: SMTP_PASS }
 });
 
+// Uploads
 const uploadDir = path.join(__dirname, '../uploads/profile_images');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
@@ -60,13 +61,11 @@ const upload = multer({
 
 exports.uploadProfileImage = upload.single('profileImage');
 
-// Request OTP (upsert, now defensive)
-exports.requestOtpInfluencer = async (req, res) => {
-  const { email, role='Influencer' } = req.body;
+/* ========================== OTP: Request & Verify ========================== */
 
-  if (!email || !role) {
-    return res.status(400).json({ message: 'Both email and role are required' });
-  }
+exports.requestOtpInfluencer = async (req, res) => {
+  const { email, role = 'Influencer' } = req.body;
+  if (!email || !role) return res.status(400).json({ message: 'Both email and role are required' });
 
   const normalizedEmail = String(email).trim().toLowerCase();
   const normalizedRole = String(role).trim();
@@ -75,31 +74,22 @@ exports.requestOtpInfluencer = async (req, res) => {
   }
 
   try {
-    // If already registered for that role, block OTP
+    // block if already registered for that role
     const emailRegexCI = new RegExp(`^${escapeRegExp(normalizedEmail)}$`, 'i');
     const alreadyRegistered =
       normalizedRole === 'Influencer'
         ? await Influencer.findOne({ email: emailRegexCI }, '_id')
         : await Brand.findOne({ email: emailRegexCI }, '_id');
 
-    if (alreadyRegistered) {
-      return res.status(409).json({ message: 'User already present' });
-    }
+    if (alreadyRegistered) return res.status(409).json({ message: 'User already present' });
 
-    // Issue OTP via VerifyEmail record (do NOT upsert Influencer/Brand)
+    // create/update verification record
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
     await VerifyEmail.findOneAndUpdate(
       { email: normalizedEmail, role: normalizedRole },
-      {
-        $set: {
-          otpCode: code,
-          otpExpiresAt: expiresAt,
-          verified: false
-        },
-        $inc: { attempts: 1 }
-      },
+      { $set: { otpCode: code, otpExpiresAt: expiresAt, verified: false }, $inc: { attempts: 1 } },
       { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true }
     );
 
@@ -112,30 +102,23 @@ exports.requestOtpInfluencer = async (req, res) => {
       });
     } catch (mailErr) {
       console.warn('Failed to send OTP email:', mailErr.message);
-      // continue: we still return success to avoid leaking existence
+      // best-effort: still return success to avoid email enumeration
     }
 
     return res.json({ message: 'OTP sent to email' });
   } catch (err) {
-    if (err.code === 11000) {
-      return res.status(409).json({ message: 'Conflict while creating/updating verification record.' });
-    }
+    if (err.code === 11000) return res.status(409).json({ message: 'Conflict while creating/updating verification record.' });
     console.error('Error in requestOtpInfluencer:', err);
     return res.status(500).json({ message: 'Internal server error' });
   }
 };
 
-
 exports.verifyOtpInfluencer = async (req, res) => {
-  const { email, role='Influencer', otp } = req.body;
-
-  if (!email || !role || otp == null) {
-    return res.status(400).json({ message: 'email, role and otp are required' });
-  }
+  const { email, role = 'Influencer', otp } = req.body;
+  if (!email || !role || otp == null) return res.status(400).json({ message: 'email, role and otp are required' });
 
   const normalizedEmail = String(email).trim().toLowerCase();
   const normalizedRole = String(role).trim();
-
   if (!['Influencer', 'Brand'].includes(normalizedRole)) {
     return res.status(400).json({ message: 'role must be "Influencer" or "Brand"' });
   }
@@ -148,9 +131,7 @@ exports.verifyOtpInfluencer = async (req, res) => {
       otpExpiresAt: { $gt: new Date() }
     });
 
-    if (!doc) {
-      return res.status(400).json({ message: 'Invalid or expired OTP' });
-    }
+    if (!doc) return res.status(400).json({ message: 'Invalid or expired OTP' });
 
     doc.verified = true;
     doc.verifiedAt = new Date();
@@ -165,8 +146,7 @@ exports.verifyOtpInfluencer = async (req, res) => {
   }
 };
 
-
-
+/* ================================ Helpers ================================ */
 const safeParse = (v) => {
   if (!v) return null;
   if (typeof v === 'string') { try { return JSON.parse(v); } catch { return null; } }
@@ -174,12 +154,11 @@ const safeParse = (v) => {
   return null;
 };
 
-// Build an in-memory index for Category → Subcategory lookups
 async function buildCategoryIndex() {
   const rows = await Category.find({}, 'id name subcategories').lean();
-  const bySubId = new Map();           // subcategoryId(UUID) -> { categoryId, categoryName, subcategoryId, subcategoryName }
-  const bySubName = new Map();         // subcategoryName (lower) -> above
-  const byCatId = new Map();           // categoryId (Number) -> { id, name, subcategories[] }
+  const bySubId = new Map();
+  const bySubName = new Map();
+  const byCatId = new Map();
 
   for (const r of rows) {
     byCatId.set(r.id, r);
@@ -197,12 +176,8 @@ async function buildCategoryIndex() {
   return { bySubId, bySubName, byCatId };
 }
 
-// Normalize an array of "raw" category inputs from provider payloads
-// Accepts formats:
-//   - [{ subcategoryId, subcategoryName?, categoryId? }]  (preferred)
-//   - [{ categoryId, subcategoryName }] (maps by name within category)
-//   - ["subcategory name", ...]                           (legacy free-text)
-//   - [{ id, name }]                                      (legacy "interests" — tries to resolve by name; `id` treated as categoryId if possible)
+const UUIDv4Regex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 function normalizeCategories(raw, idx) {
   if (!raw) return [];
   const list = Array.isArray(raw) ? raw : [raw];
@@ -211,21 +186,18 @@ function normalizeCategories(raw, idx) {
   for (const item of list) {
     if (!item) continue;
 
-    // String → assume subcategory name
     if (typeof item === 'string') {
       const hit = idx.bySubName.get(item.toLowerCase());
       if (hit) out.push(hit);
       continue;
     }
 
-    // Has subcategoryId → direct resolve
     if (item.subcategoryId && UUIDv4Regex.test(String(item.subcategoryId))) {
       const hit = idx.bySubId.get(String(item.subcategoryId));
       if (hit) out.push(hit);
       continue;
     }
 
-    // Has (categoryId + subcategoryName)
     if (typeof item.categoryId === 'number' && item.subcategoryName) {
       const cat = idx.byCatId.get(item.categoryId);
       if (cat && Array.isArray(cat.subcategories)) {
@@ -244,19 +216,13 @@ function normalizeCategories(raw, idx) {
       continue;
     }
 
-    // Legacy { id, name } (interests) → try as subcategory name
     if (typeof item.id === 'number' || typeof item.name === 'string') {
       const byName = item.name ? idx.bySubName.get(String(item.name).toLowerCase()) : null;
-      if (byName) {
-        out.push(byName);
-        continue;
-      }
-      // If only category id provided with no subcategory, we skip (cannot resolve)
+      if (byName) out.push(byName);
       continue;
     }
   }
 
-  // Deduplicate by subcategoryId
   const seen = new Set();
   const deduped = [];
   for (const node of out) {
@@ -268,17 +234,13 @@ function normalizeCategories(raw, idx) {
   return deduped;
 }
 
-// Pull possible taxonomy arrays from provider raw payloads
 function extractRawCategoriesFromProviderRaw(providerRaw) {
   const p = safeParse(providerRaw) || providerRaw || {};
   const root = p.profile || p;
   const prof = root.profile || {};
-  // Prefer new "categories", fall back to legacy "interests"
   return prof.categories || root.categories || prof.interests || root.interests || [];
 }
 
-/* ================================ MAP PAYLOAD ================================ */
-// unchanged signature but we STOP writing legacy `interests` and defer category mapping
 const mapPayload = (provider, input) => {
   const p = safeParse(input);
   if (!p) return null;
@@ -326,8 +288,7 @@ const mapPayload = (provider, input) => {
 
     bio: root.description || root.bio,
 
-    // NOTE: categories will be populated later from providerRaw via normalization
-    categories: [],
+    categories: [], // will be normalized later
 
     hashtags: root.hashtags,
     mentions: root.mentions,
@@ -350,7 +311,7 @@ const mapPayload = (provider, input) => {
   };
 };
 
-/* ============================== CONTROLLER API ============================== */
+/* ============================== Registration ============================== */
 
 exports.registerInfluencer = async (req, res) => {
   try {
@@ -360,56 +321,48 @@ exports.registerInfluencer = async (req, res) => {
       password,
       phone,
 
-      // minimal audience/location you kept
+      // minimal audience/location
       countryId,
       callingId,
 
+      // NEW: profile basics & languages from Step 1
+      city,
+      gender,
+      dateOfBirth,            // "YYYY-MM-DD"
+      selectedLanguages,      // string[] Language._id
+
       // multi-platform payload inputs
-      platforms,     // preferred: [{ provider: 'youtube'|'tiktok'|'instagram', data: <payload> }]
-      youtube,       // optional: raw JSON or JSON-string
-      tiktok,        // optional: raw JSON or JSON-string
-      instagram      // optional: raw JSON or JSON-string
+      platforms,              // [{ provider, data }]
+      youtube,
+      tiktok,
+      instagram,
+
+      // preferred platform from Step 3
+      preferredProvider
     } = req.body;
 
     // 1) Basic validations
     const normalizedEmail = String(email || '').trim().toLowerCase();
-    if (!normalizedEmail) {
-      return res.status(400).json({ message: 'Email is required' });
-    }
-    if (!password || String(password).length < 8) {
-      return res.status(400).json({ message: 'Password must be at least 8 characters' });
-    }
+    if (!normalizedEmail) return res.status(400).json({ message: 'Email is required' });
+    if (!password || String(password).length < 8) return res.status(400).json({ message: 'Password must be at least 8 characters' });
     if (!name || !phone || !countryId || !callingId) {
       return res.status(400).json({ message: 'Missing required fields (name, phone, countryId, callingId)' });
     }
 
-    // 2) Ensure email was verified for Influencer role
-    const verifiedRec = await VerifyEmail.findOne({
-      email: normalizedEmail,
-      role: 'Influencer',
-      verified: true
-    });
-    if (!verifiedRec) {
-      return res.status(400).json({ message: 'Email not verified' });
-    }
+    // 2) Email must be verified for Influencer
+    const verifiedRec = await VerifyEmail.findOne({ email: normalizedEmail, role: 'Influencer', verified: true });
+    if (!verifiedRec) return res.status(400).json({ message: 'Email not verified' });
 
     // 3) Prevent duplicate registration (case-insensitive)
     const emailRegexCI = new RegExp(`^${escapeRegExp(normalizedEmail)}$`, 'i');
-    const already = await mongoose.model('Influencer').findOne({ email: emailRegexCI }, '_id');
-    if (already) {
-      return res.status(400).json({ message: 'Already registered' });
-    }
+    const already = await Influencer.findOne({ email: emailRegexCI }, '_id');
+    if (already) return res.status(400).json({ message: 'Already registered' });
 
-    // 4) Validate Country + CallingCode refs
-    const [countryDoc, callingDoc] = await Promise.all([
-      Country.findById(countryId),
-      Country.findById(callingId)
-    ]);
-    if (!countryDoc || !callingDoc) {
-      return res.status(400).json({ message: 'Invalid countryId or callingId' });
-    }
+    // 4) Validate Country + Calling refs
+    const [countryDoc, callingDoc] = await Promise.all([ Country.findById(countryId), Country.findById(callingId) ]);
+    if (!countryDoc || !callingDoc) return res.status(400).json({ message: 'Invalid countryId or callingId' });
 
-    // 5) Map platform payloads → socialProfiles[]
+    // 5) Map platform payloads
     const profiles = [];
     if (Array.isArray(platforms)) {
       for (const item of platforms) {
@@ -425,34 +378,55 @@ exports.registerInfluencer = async (req, res) => {
       if (tt) profiles.push(tt);
       if (ig) profiles.push(ig);
     }
-    if (!profiles.length) {
-      return res.status(400).json({ message: 'No valid platform payloads provided' });
-    }
+    if (!profiles.length) return res.status(400).json({ message: 'No valid platform payloads provided' });
 
-    // 6) Resolve categories/subcategories for each profile (NEW)
+    // 6) Resolve categories/subcategories for each profile
     const idx = await buildCategoryIndex();
     for (const prof of profiles) {
       const rawCats = extractRawCategoriesFromProviderRaw(prof.providerRaw);
-      prof.categories = normalizeCategories(rawCats, idx); // array of {categoryId, categoryName, subcategoryId, subcategoryName}
+      prof.categories = normalizeCategories(rawCats, idx);
     }
 
-    // 7) Create Influencer doc (password is hashed by schema pre-save)
-    const inf = new (mongoose.model('Influencer'))({
+    // 7) Resolve selected languages → subdocs
+    let languageDocs = [];
+    if (Array.isArray(selectedLanguages) && selectedLanguages.length) {
+      const langs = await Language.find({ _id: { $in: selectedLanguages } }, 'code name').lean();
+      const byId = new Map(langs.map(l => [String(l._id), l]));
+      languageDocs = selectedLanguages
+        .map(id => byId.get(String(id)))
+        .filter(Boolean)
+        .map(l => ({ languageId: l._id, code: l.code, name: l.name }));
+    }
+
+    // 8) Compute primary platform (honor preferredProvider when valid)
+    const validProviders = new Set(profiles.map(p => p.provider));
+    let primaryPlatform = profiles[0]?.provider || null;
+    if (preferredProvider && validProviders.has(preferredProvider)) primaryPlatform = preferredProvider;
+
+    // 9) Create Influencer doc
+    const inf = new Influencer({
       name,
       email: normalizedEmail,
       password,
       phone,
 
-      primaryPlatform: profiles[0]?.provider || null,
+      primaryPlatform,
       socialProfiles: profiles,
 
       countryId,
       country: countryDoc.countryName,
       callingId,
-      callingcode: callingDoc.callingCode
+      callingcode: callingDoc.callingCode,
+
+      city: city || '',
+      gender: gender || '',
+      dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : undefined,
+      languages: languageDocs,
+
+      otpVerified: true
     });
 
-    // 8) Initialize free subscription
+    // 10) Initialize free subscription
     const freePlan = await subscriptionHelper.getFreePlan('Influencer');
     if (freePlan) {
       inf.subscription = {
@@ -460,18 +434,14 @@ exports.registerInfluencer = async (req, res) => {
         planName: freePlan.name,
         startedAt: new Date(),
         expiresAt: subscriptionHelper.computeExpiry(freePlan),
-        features: freePlan.features.map(f => ({
-          key: f.key,
-          limit: typeof f.value === 'number' ? f.value : 0,
-          used: 0
-        }))
+        features: freePlan.features.map(f => ({ key: f.key, limit: typeof f.value === 'number' ? f.value : 0, used: 0 }))
       };
       inf.subscriptionExpired = false;
     }
 
     await inf.save();
 
-    // 9) Clean up verification record
+    // 11) Clean up verification record
     await VerifyEmail.deleteOne({ email: normalizedEmail, role: 'Influencer' });
 
     return res.status(201).json({
@@ -486,6 +456,82 @@ exports.registerInfluencer = async (req, res) => {
     return res.status(500).json({ message: 'Internal server error' });
   }
 };
+
+/* ====================== Save Quick Questions Onboarding ====================== */
+
+exports.saveQuickOnboarding = async (req, res) => {
+  try {
+    const {
+      influencerId,
+      email,
+
+      // shape from frontend QuickQuestions (can be partial)
+      formats = [],
+      budgets = {},                    // object { format: range } or array [{format,range}]
+      projectLength = '',
+      capacity = '',
+
+      categoryId,                      // Category._id
+      subcategories = [],              // UUID strings
+      collabTypes = [],
+      allowlisting = false,
+      cadences = [],
+
+      selectedPrompts = [],            // [{ group, prompt }]
+      promptAnswers = {}               // { [prompt]: answer }
+    } = req.body;
+
+    if (!influencerId && !email) {
+      return res.status(400).json({ message: 'influencerId or email is required' });
+    }
+
+    const query = influencerId
+      ? { influencerId }
+      : { email: new RegExp(`^${escapeRegExp(String(email).trim().toLowerCase())}$`, 'i') };
+
+    const inf = await Influencer.findOne(query);
+    if (!inf) return res.status(404).json({ message: 'Influencer not found' });
+
+    // budgets object → array
+    let budgetArr = [];
+    if (Array.isArray(budgets)) {
+      budgetArr = budgets;
+    } else if (budgets && typeof budgets === 'object') {
+      budgetArr = Object.entries(budgets).map(([format, range]) => ({ format, range }));
+    }
+
+    // validate categoryId (optional)
+    let categoryObjectId = undefined;
+    if (categoryId) {
+      if (!mongoose.Types.ObjectId.isValid(categoryId)) {
+        return res.status(400).json({ message: 'Invalid categoryId' });
+      }
+      categoryObjectId = new mongoose.Types.ObjectId(categoryId);
+    }
+
+    inf.onboarding = {
+      formats,
+      budgets: budgetArr,
+      projectLength,
+      capacity,
+      categoryId: categoryObjectId,
+      subcategories: Array.isArray(subcategories) ? subcategories : [],
+      collabTypes: Array.isArray(collabTypes) ? collabTypes : [],
+      allowlisting: !!allowlisting,
+      cadences: Array.isArray(cadences) ? cadences : [],
+      selectedPrompts: Array.isArray(selectedPrompts) ? selectedPrompts : [],
+      promptAnswers: (promptAnswers && typeof promptAnswers === 'object') ? promptAnswers : {}
+    };
+
+    await inf.save();
+
+    return res.json({ message: 'Onboarding saved', influencerId: inf.influencerId });
+  } catch (err) {
+    console.error('saveQuickOnboarding error:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
 
 exports.login = async (req, res) => {
   const { email, password } = req.body;
@@ -874,11 +920,6 @@ exports.addPaymentMethod = async (req, res) => {
     return res.status(500).json({ message: 'Internal server error' });
   }
 };
-
-
-
-
-
 
 exports.deletePaymentMethod = async (req, res) => {
   try {

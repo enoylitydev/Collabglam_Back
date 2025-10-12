@@ -9,7 +9,6 @@ const emailRegex = /^[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,6}$/;
 const phoneRegex = /^[0-9]{10}$/;
 const UUIDv4Regex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-
 /* -------------------------- Shared sub-schemas --------------------------- */
 const weightItemSchema = new mongoose.Schema(
   { code: String, name: String, weight: Number },
@@ -68,7 +67,7 @@ const audienceSchema = new mongoose.Schema(
     geoCities: [{ name: String, weight: Number }],
     geoStates: [{ name: String, weight: Number }],
     credibility: Number,
-    interests: [{ name: String, weight: Number }], // (unchanged: audience insight, not taxonomy)
+    interests: [{ name: String, weight: Number }],
     brandAffinity: [{ name: String, weight: Number }],
     audienceReachability: [weightItemSchema],
     audienceTypes: [weightItemSchema],
@@ -78,25 +77,22 @@ const audienceSchema = new mongoose.Schema(
 );
 
 /* ----------------------- Category link sub-schema ----------------------- */
-/** Replaces legacy `interests` on social profiles */
 const categoryLinkSchema = new mongoose.Schema(
   {
     categoryId: { type: Number, required: true, index: true },
     categoryName: { type: String, required: true, trim: true },
-
     subcategoryId: {
       type: String,
       required: true,
       index: true,
-      match: [UUIDv4Regex, 'Invalid subcategoryId (must be UUID v4)'],
+      match: [UUIDv4Regex, 'Invalid subcategoryId (must be UUID v4)']
     },
-    subcategoryName: { type: String, required: true, trim: true },
+    subcategoryName: { type: String, required: true, trim: true }
   },
   { _id: false }
 );
 
 /* ----------------------- Social profile sub-schema ----------------------- */
-/** Holds the full normalized payload + raw for youtube/tiktok/instagram */
 const socialProfileSchema = new mongoose.Schema(
   {
     provider: { type: String, enum: ['youtube', 'tiktok', 'instagram'], required: true, index: true },
@@ -147,7 +143,7 @@ const socialProfileSchema = new mongoose.Schema(
     // Bio/tags/brand
     bio: String, // also maps from "description"
 
-    // ✨ NEW: Categories (replaces legacy `interests`)
+    // ✨ Categories (taxonomy)
     categories: { type: [categoryLinkSchema], default: [] },
 
     hashtags: [{ tag: String, weight: Number }],
@@ -175,6 +171,43 @@ const socialProfileSchema = new mongoose.Schema(
     providerRaw: mongoose.Schema.Types.Mixed
   },
   { _id: false, timestamps: true }
+);
+
+/* -------------------------- NEW: Language sub-schema -------------------------- */
+const languageRefSchema = new mongoose.Schema(
+  {
+    languageId: { type: mongoose.Schema.Types.ObjectId, ref: 'Language', required: true, index: true },
+    code: { type: String, required: true },
+    name: { type: String, required: true }
+  },
+  { _id: false }
+);
+
+/* -------------------------- NEW: Onboarding sub-schema ------------------------ */
+const onboardingSchema = new mongoose.Schema(
+  {
+    // STEP 4.1
+    formats: { type: [String], default: [] },                // ['Reels/Shorts', 'Stories', ...]
+    budgets: { type: [{ format: String, range: String }], default: [] },
+    projectLength: { type: String },
+    capacity: { type: String },
+
+    // STEP 4.2
+    categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category' },
+    subcategories: {
+      type: [String], // UUID v4
+      validate: { validator: (arr) => Array.isArray(arr) && arr.every(s => typeof s === 'string') },
+      default: []
+    },
+    collabTypes: { type: [String], default: [] },
+    allowlisting: { type: Boolean, default: false },
+    cadences: { type: [String], default: [] },
+
+    // STEP 4.3
+    selectedPrompts: { type: [{ group: String, prompt: String }], default: [] },
+    promptAnswers: { type: mongoose.Schema.Types.Mixed, default: {} }
+  },
+  { _id: false }
 );
 
 /* -------------------------- Payment sub-schema --------------------------- */
@@ -211,22 +244,33 @@ const influencerSchema = new mongoose.Schema(
     password: { type: String, minlength: 8, required: function () { return this.otpVerified; } },
     phone: { type: String, match: [phoneRegex, 'Invalid phone'], required: function () { return this.otpVerified; } },
 
-    // Multi-platform storage (full payloads are here)
+    // Multi-platform storage
     primaryPlatform: { type: String, enum: ['youtube', 'tiktok', 'instagram', 'other', null], default: null },
     socialProfiles: { type: [socialProfileSchema], default: [] },
 
-    // Minimal audience/location you kept
+    // Minimal audience/location
     countryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Country', required: function () { return this.otpVerified; } },
     country: { type: String, required: function () { return this.otpVerified; } },
     callingId: { type: mongoose.Schema.Types.ObjectId, ref: 'Country', required: function () { return this.otpVerified; } },
     callingcode: { type: String, required: function () { return this.otpVerified; } },
+
+    // NEW basics from Step 1
+    city: { type: String, trim: true },
+    dateOfBirth: { type: Date },
+    gender: { type: String, enum: ['Female', 'Male', 'Non-binary', 'Prefer not to say', ''], default: '' },
+
+    // NEW languages
+    languages: { type: [languageRefSchema], default: [] },
+
+    // NEW quick onboarding
+    onboarding: { type: onboardingSchema, default: {} },
 
     // Search tokens
     _ac: { type: [String], index: true },
 
     createdAt: { type: Date, default: Date.now },
 
-    // OTP / reset / subscription / payments — preserved
+    // OTP / reset / subscription / payments
     otpCode: { type: String },
     otpExpiresAt: { type: Date },
     otpVerified: { type: Boolean, default: false },
@@ -263,8 +307,10 @@ const influencerSchema = new mongoose.Schema(
 /* ---------------------- Helpful Indexes for Filters ---------------------- */
 influencerSchema.index({ email: 1 }, { unique: true });
 influencerSchema.index({ 'socialProfiles.provider': 1 });
-// NEW: fast deref by subcategory UUID
 influencerSchema.index({ 'socialProfiles.categories.subcategoryId': 1 });
+influencerSchema.index({ 'languages.languageId': 1 });
+influencerSchema.index({ 'onboarding.categoryId': 1 });
+influencerSchema.index({ city: 1 });
 
 /* -------------------- Only one default payment method -------------------- */
 influencerSchema.pre('validate', function (next) {
@@ -294,6 +340,14 @@ function buildACTokens(doc) {
     if (v) pushFor(v);
   }
 
+  // NEW: languages
+  if (Array.isArray(doc.languages)) {
+    for (const l of doc.languages) {
+      pushFor(l.name);
+      pushFor(l.code);
+    }
+  }
+
   if (Array.isArray(doc.socialProfiles)) {
     for (const p of doc.socialProfiles) {
       pushFor(p.username);
@@ -303,7 +357,6 @@ function buildACTokens(doc) {
       pushFor(p.country);
       pushFor(p.city);
 
-      // NEW: include taxonomy in AC
       if (Array.isArray(p.categories)) {
         for (const c of p.categories) {
           pushFor(c.categoryName);
