@@ -17,7 +17,7 @@ router.get('/influencer/getById', getByInfluencerId);
 router.get('/campaign/getById', getCampaignById);
 router.post('/campaign/getByBrandId', getCampaignsByBrandId);
 
-router.post('/influencer/byId', adminGetInfluencerById);
+router.get('/influencer/byId', adminGetInfluencerById);
 router.post('/influencer/list', adminGetInfluencerList);
 
 

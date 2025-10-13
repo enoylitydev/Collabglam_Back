@@ -400,7 +400,7 @@ exports.adminGetInfluencerList = async (req, res) => {
     const sortBy = (req.body.sortBy || 'createdAt').trim();
     const sortOrder = String(req.body.sortOrder || 'desc').toLowerCase();
 
-    // 2) Build filter (search across name/email/phone/primaryPlatform/_ac/influencerId)
+    // 2) Build filter (search across name/email/phone/primaryPlatform/_ac/influencerId/planName)
     const filter = {};
     if (search) {
       const re = new RegExp(escapeRegex(search), 'i');
@@ -409,8 +409,9 @@ exports.adminGetInfluencerList = async (req, res) => {
         { email: re },
         { phone: re },
         { primaryPlatform: re },
-        { _ac: re },             // tokenized autocomplete array
-        { influencerId: re }
+        { influencerId: re },
+        { _ac: re }, // tokenized autocomplete array
+        { 'subscription.planName': re }
       ];
     }
 
@@ -418,17 +419,60 @@ exports.adminGetInfluencerList = async (req, res) => {
     const total = await Influencer.countDocuments(filter);
 
     // 4) Sorting
-    const ALLOWED_SORT = new Set(['name', 'email', 'phone', 'primaryPlatform', 'createdAt']);
+    const ALLOWED_SORT = new Set([
+      'name',
+      'email',
+      'phone',
+      'primaryPlatform',
+      'createdAt',
+      'planName',     // maps to subscription.planName
+      'expiresAt'     // maps to subscription.expiresAt
+    ]);
     const field = ALLOWED_SORT.has(sortBy) ? sortBy : 'createdAt';
     const dir   = sortOrder === 'asc' ? 1 : -1;
 
-    // 5) Fetch data (only necessary fields)
-    const influencers = await Influencer.find(filter)
-      .select('influencerId name email phone primaryPlatform') // minimal projection
-      .sort({ [field]: dir, createdAt: -1 })                   // tie-breaker
+    // Build sort object (handle nested plan fields)
+    const sortObj = {};
+    if (field === 'planName') {
+      sortObj['subscription.planName'] = dir;
+    } else if (field === 'expiresAt') {
+      sortObj['subscription.expiresAt'] = dir;
+    } else {
+      sortObj[field] = dir;
+    }
+    // tie-breaker
+    sortObj.createdAt = -1;
+
+    // 5) Fetch data (only necessary fields + plan & expiry)
+    const docs = await Influencer.find(filter)
+      .select('influencerId name email phone primaryPlatform subscription.planName subscription.expiresAt subscriptionExpired createdAt')
+      .sort(sortObj)
       .skip((page - 1) * limit)
       .limit(limit)
       .lean();
+
+    // 5a) Shape response and compute expiry flag robustly
+    const now = new Date();
+    const influencers = docs.map(d => {
+      const planName  = d.subscription?.planName ?? 'free';
+      const expiresAt = d.subscription?.expiresAt ?? null;
+
+      // Treat as expired if explicit flag set OR expiry date in the past
+      const isExpired =
+        Boolean(d.subscriptionExpired) ||
+        (expiresAt ? new Date(expiresAt) < now : false);
+
+      return {
+        influencerId: d.influencerId,
+        name: d.name || '',
+        email: d.email || '',
+        phone: d.phone || '',
+        primaryPlatform: d.primaryPlatform ?? null,
+        planName,
+        expiresAt,
+        subscriptionExpired: isExpired
+      };
+    });
 
     // 6) Respond
     return res.status(200).json({
