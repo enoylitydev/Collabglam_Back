@@ -1,6 +1,10 @@
 const express = require('express');
 const router = express.Router();
-const {login,getAllBrands,getList,getAllCampaigns,getBrandById,getByInfluencerId, getCampaignById,getCampaignsByBrandId,adminGetInfluencers} = require('../controllers/adminController');  
+const {login,getAllBrands,getList,getAllCampaigns,getBrandById,
+    getByInfluencerId, getCampaignById,getCampaignsByBrandId,adminGetInfluencerById,
+    adminGetInfluencerList
+
+} = require('../controllers/adminController');  
 
 // POST /admin/create
 router.post('/login', login);    
@@ -13,7 +17,8 @@ router.get('/influencer/getById', getByInfluencerId);
 router.get('/campaign/getById', getCampaignById);
 router.post('/campaign/getByBrandId', getCampaignsByBrandId);
 
-router.post('/influencer/getAll', adminGetInfluencers);
+router.post('/influencer/byId', adminGetInfluencerById);
+router.post('/influencer/list', adminGetInfluencerList);
 
 
 module.exports = router;
