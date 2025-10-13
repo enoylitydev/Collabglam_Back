@@ -265,9 +265,6 @@ const influencerSchema = new mongoose.Schema(
     // NEW quick onboarding
     onboarding: { type: onboardingSchema, default: {} },
 
-    // Search tokens
-    _ac: { type: [String], index: true },
-
     createdAt: { type: Date, default: Date.now },
 
     // OTP / reset / subscription / payments
@@ -369,11 +366,6 @@ function buildACTokens(doc) {
   const deduped = Array.from(new Set(bag.filter(Boolean)));
   return deduped.slice(0, 2000);
 }
-
-influencerSchema.pre('save', function (next) {
-  this._ac = buildACTokens(this);
-  next();
-});
 
 influencerSchema.pre('save', async function (next) {
   if (!this.isModified('password')) return next();

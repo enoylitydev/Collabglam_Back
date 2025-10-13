@@ -647,7 +647,7 @@ exports.getById = async (req, res) => {
   try {
     // Exclude sensitive/internal fields up front
     const projection =
-      '-password -__v -_id -_ac -paymentMethods -platformId -audienceAgeRangeId -audienceId -countryId -callingId -categories -subscription.planId';
+      '-password -__v -_id -paymentMethods -platformId -audienceAgeRangeId -audienceId -countryId -callingId -categories -subscription.planId';
 
     const doc = await Influencer.findOne({ influencerId: id }, projection).lean();
     if (!doc) {
@@ -1138,12 +1138,6 @@ exports.searchInfluencers = async (req, res) => {
 
     const q = search.trim().toLowerCase();
     const rx = new RegExp('^' + escapeRegExp(q));
-
-    const docs = await Influencer
-      .find({ _ac: { $regex: rx } }, 'name influencerId')
-      .limit(10)
-      .lean();
-
     if (docs.length === 0) {
       return res.status(404).json({ message: 'No influencers found' });
     }
@@ -1204,7 +1198,6 @@ exports.suggestInfluencers = async (req, res) => {
 
     const rx = new RegExp('^' + escapeRegExp(q));
     const candidates = await Influencer.find(
-      { _ac: { $regex: rx } },
       { name: 1, categoryName: 1, platformName: 1, country: 1, socialMedia: 1 }
     ).limit(100).lean();
 

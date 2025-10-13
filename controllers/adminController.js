@@ -365,3 +365,207 @@ exports.getCampaignsByBrandId = async (req, res) => {
     return res.status(500).json({ message: 'Internal server error' });
   }
 };
+
+
+exports.adminGetInfluencers = async (req, res) => {
+  try {
+    // 1) Parse and normalize inputs
+    const {
+      page: p = 1,
+      limit: l = 10,
+      search = '',
+      sortBy = 'createdAt',
+      sortOrder = 'desc',
+
+      provider,
+      primaryPlatform,
+      otpVerified,
+      countryId,
+      country,
+      city,
+      gender,
+      languageCodes,
+      languageIds,
+      categoryIds,
+      subcategoryIds,
+      minFollowers,
+      maxFollowers,
+      createdFrom,
+      createdTo
+    } = req.body || {};
+
+    const page  = Math.max(parseInt(p, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(l, 10) || 10, 1), 100);
+    const dir   = (String(sortOrder).toLowerCase() === 'asc') ? 1 : -1;
+
+    // 2) Build $match filter (for aggregate)
+    const match = {};
+
+    // 2a) Free-text search: uses name/email + prebuilt autocomplete tokens (_ac) + common social fields
+    if (search && String(search).trim()) {
+      const term = String(search).trim();
+      const re   = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+
+      // Email-like or UUID-like short-circuits
+      const ors = [
+        { name: re },
+        { email: re },
+        { _ac: re }, // array of tokens; regex matches any element
+        { 'socialProfiles.username': re },
+        { 'socialProfiles.fullname': re },
+        { 'socialProfiles.handle': re },
+        { 'socialProfiles.provider': re },
+        { 'socialProfiles.country': re },
+        { 'socialProfiles.city': re },
+        { 'socialProfiles.categories.categoryName': re },
+        { 'socialProfiles.categories.subcategoryName': re },
+        { 'languages.name': re },
+        { 'languages.code': re },
+        { influencerId: re }
+      ];
+      match.$or = ors;
+    }
+
+    // 2b) Scalar filters
+    if (provider)        match['socialProfiles.provider'] = provider;
+    if (primaryPlatform !== undefined && primaryPlatform !== null)
+      match.primaryPlatform = primaryPlatform;
+
+    if (countryId)       match.countryId = countryId;
+    if (country)         match.country   = country;
+    if (city)            match.city      = city;
+    if (gender)          match.gender    = gender;
+
+    // otpVerified (can be boolean or 0/1)
+    if (otpVerified !== undefined && otpVerified !== null && otpVerified !== '')
+      match.otpVerified = (otpVerified === true || otpVerified === 1 || otpVerified === '1');
+
+    // Language filters
+    if (Array.isArray(languageCodes) && languageCodes.length) {
+      match['languages.code'] = { $in: languageCodes.map(String) };
+    }
+    if (Array.isArray(languageIds) && languageIds.length) {
+      match['languages.languageId'] = { $in: languageIds.map(String) };
+    }
+
+    // Category/Subcategory filters
+    if (Array.isArray(categoryIds) && categoryIds.length) {
+      match['socialProfiles.categories.categoryId'] = { $in: categoryIds };
+    }
+    if (Array.isArray(subcategoryIds) && subcategoryIds.length) {
+      match['socialProfiles.categories.subcategoryId'] = { $in: subcategoryIds };
+    }
+
+    // CreatedAt range
+    if (createdFrom || createdTo) {
+      match.createdAt = {};
+      if (createdFrom) match.createdAt.$gte = new Date(createdFrom);
+      if (createdTo)   match.createdAt.$lte = new Date(createdTo);
+    }
+
+    // Followers range (across any social profile)
+    const followerRange =
+      (minFollowers !== undefined && minFollowers !== null) ||
+      (maxFollowers !== undefined && maxFollowers !== null);
+
+    if (followerRange) {
+      const range = {};
+      if (minFollowers !== undefined && minFollowers !== null) range.$gte = Number(minFollowers);
+      if (maxFollowers !== undefined && maxFollowers !== null) range.$lte = Number(maxFollowers);
+
+      match.socialProfiles = match.socialProfiles || {};
+      match.socialProfiles.$elemMatch = { followers: range };
+    }
+
+    // 3) Sorting plan
+    const TOP_LEVEL_SORT = new Set(['name', 'email', 'createdAt', 'otpVerified', 'country', 'city']);
+    const METRIC_SORT_MAP = {
+      followers:       { path: 'socialProfiles.followers',       field: 'metricFollowers' },
+      engagements:     { path: 'socialProfiles.engagements',     field: 'metricEngagements' },
+      engagementRate:  { path: 'socialProfiles.engagementRate',  field: 'metricEngagementRate' },
+      averageViews:    { path: 'socialProfiles.averageViews',    field: 'metricAverageViews' },
+      postsCount:      { path: 'socialProfiles.postsCount',      field: 'metricPostsCount' },
+      avgLikes:        { path: 'socialProfiles.avgLikes',        field: 'metricAvgLikes' },
+      avgComments:     { path: 'socialProfiles.avgComments',     field: 'metricAvgComments' },
+      avgViews:        { path: 'socialProfiles.avgViews',        field: 'metricAvgViews' },
+      totalLikes:      { path: 'socialProfiles.totalLikes',      field: 'metricTotalLikes' },
+      totalViews:      { path: 'socialProfiles.totalViews',      field: 'metricTotalViews' }
+    };
+
+    const isTopLevelSort = TOP_LEVEL_SORT.has(sortBy);
+    const metricConf = METRIC_SORT_MAP[sortBy];
+
+    // 4) Build aggregation
+    const pipeline = [
+      { $match: match }
+    ];
+
+    // 4a) If sorting by a derived metric, compute max across socialProfiles.*
+    if (metricConf) {
+      pipeline.push({
+        $addFields: {
+          [metricConf.field]: {
+            $max: {
+              $map: {
+                input: { $ifNull: ['$socialProfiles', []] },
+                as: 'sp',
+                in: { $ifNull: [`$$sp.${metricConf.path.split('.').pop()}`, null] }
+              }
+            }
+          }
+        }
+      });
+      pipeline.push({ $sort: { [metricConf.field]: dir, createdAt: -1 } });
+    } else if (isTopLevelSort) {
+      pipeline.push({ $sort: { [sortBy]: dir, createdAt: -1 } });
+    } else {
+      // Fallback to createdAt desc if invalid sortBy
+      pipeline.push({ $sort: { createdAt: -1 } });
+    }
+
+    // 4b) Count documents (facet)
+    pipeline.push(
+      {
+        $facet: {
+          data: [
+            { $skip: (page - 1) * limit },
+            { $limit: limit },
+            {
+              $project: {
+                password: 0,
+                __v: 0
+              }
+            }
+          ],
+          meta: [
+            { $count: 'total' }
+          ]
+        }
+      },
+      {
+        $project: {
+          data: 1,
+          total: { $ifNull: [{ $arrayElemAt: ['$meta.total', 0] }, 0] }
+        }
+      }
+    );
+
+    // 5) Execute
+    const [result] = await Influencer.aggregate(pipeline).allowDiskUse(true);
+    const influencers = result?.data || [];
+    const total = result?.total || 0;
+
+    return res.status(200).json({
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit),
+      sortBy,
+      sortOrder: dir === 1 ? 'asc' : 'desc',
+      influencers
+    });
+  } catch (err) {
+    console.error('Error in adminGetInfluencers:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
