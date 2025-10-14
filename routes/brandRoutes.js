@@ -7,7 +7,7 @@ const { register, login,
    getBrandById, getAllBrands, requestOtp, verifyOtp, 
   requestPasswordResetOtp, verifyPasswordResetOtp,
    resetPassword,updateProfile,requestEmailUpdate,
-  verifyEmailUpdate} = require('../controllers/brandController');
+  verifyEmailUpdate,getMetaOptions} = require('../controllers/brandController');
 
 const { searchInfluencers } = require('../controllers/influencerController');
 
@@ -46,6 +46,8 @@ router.post('/update',verifyToken,updateProfile);
 router.post('/requestEmailUpdate',verifyToken,requestEmailUpdate);
 
 router.post('/verifyEmailUpdate',verifyToken,verifyEmailUpdate);
+
+router.get('/metaOptions',verifyToken,getMetaOptions);
 
 
 module.exports = router;

@@ -34,6 +34,7 @@ const filtersRoutes       = require('./routes/filterRoutes');
 const mediaKitRoutes      = require('./routes/mediaKitRoutes');
 const modashRoutes        = require('./routes/modashRoutes');
 const languageRoutes     = require('./routes/languageRoutes');
+const businessRoutes      = require('./routes/businessRoutes');
 
 // Models needed inside WS handlers
 const ChatRoom = require('./models/chat');
@@ -245,6 +246,7 @@ app.use('/filters', filtersRoutes);
 app.use('/media-kit', mediaKitRoutes);
 app.use('/modash', modashRoutes);
 app.use('/languages', languageRoutes);
+app.use('/business', businessRoutes);
 
 /* -------------------------------------------------
   Mongo & start
