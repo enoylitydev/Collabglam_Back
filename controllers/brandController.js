@@ -8,11 +8,10 @@ const Brand = require('../models/brand');
 const Influencer = require('../models/influencer'); // needed by requestOtp
 const Country = require('../models/country');
 const Milestone = require('../models/milestone');
-const Subscription = require('../models/subscription');
 const subscriptionHelper = require('../utils/subscriptionHelper');
 const VerifyEmail = require('../models/verifyEmail');
-const Category = require('../models/categories');        // <-- DB-backed categories
-const BusinessType = require('../models/businessType');  // <-- DB-backed business types
+const Category = require('../models/categories');        // DB-backed categories
+const BusinessType = require('../models/businessType');  // DB-backed business types
 const { escapeRegExp } = require('../utils/searchTokens'); // for exact match, case-insensitive
 
 // ---- helpers ----
@@ -20,7 +19,7 @@ const emailRegex = /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i;
 const exactEmailRegex = (email) => new RegExp(`^${escapeRegExp(String(email).trim())}$`, 'i');
 const toNormEmail = (e) => String(e || '').trim().toLowerCase();
 
-const COMPANY_SIZE_ENUM = ['1-10', '11-50', '51-200', '200+']; // still local
+const COMPANY_SIZE_ENUM = ['1-10', '11-50', '51-200', '200+'];
 
 // ---- simple normalizers ----
 const normalizeUrl = (u) => {
@@ -35,15 +34,15 @@ const normalizeInsta = (h) => {
 
 // ---- env / mailer ----
 const SMTP_HOST = process.env.SMTP_HOST;
-theSMTP_PORT = parseInt(process.env.SMTP_PORT, 10);
+const SMTP_PORT = parseInt(process.env.SMTP_PORT || '587', 10);
 const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASS = process.env.SMTP_PASS;
 const JWT_SECRET = process.env.JWT_SECRET;
 
 const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
-  port: theSMTP_PORT,
-  secure: theSMTP_PORT === 465,
+  port: SMTP_PORT,
+  secure: SMTP_PORT === 465,
   auth: { user: SMTP_USER, pass: SMTP_PASS },
 });
 
@@ -191,7 +190,7 @@ exports.register = async (req, res) => {
       countryId,
       callingId,
 
-      // NEW inputs (DB-backed)
+      // NEW inputs
       category,        // can be ObjectId | numeric id | name
       categoryId,      // optional explicit ObjectId or numeric id
       businessType,    // optional: ObjectId | name
@@ -211,7 +210,7 @@ exports.register = async (req, res) => {
       return res.status(400).json({ message: 'All fields are required' });
     }
 
-    // NEW required checks (category via DB)
+    // required: category via DB
     const catInput = categoryId ?? category;
     const categoryDoc = await resolveCategory(catInput);
     if (!categoryDoc) {
@@ -259,14 +258,15 @@ exports.register = async (req, res) => {
       return res.status(400).json({ message: 'Invalid company size' });
     }
 
-    // Resolve businessType if provided (optional)
-    let businessTypeDoc = null;
+    // Resolve businessType if provided (optional) → store NAME
+    let businessTypeName = undefined;
     const btInput = businessTypeId ?? businessType;
-    if (btInput != null) {
-      businessTypeDoc = await resolveBusinessType(btInput);
-      if (!businessTypeDoc) {
+    if (btInput != null && String(btInput).trim()) {
+      const btDoc = await resolveBusinessType(btInput);
+      if (!btDoc) {
         return res.status(400).json({ message: 'Invalid business type' });
       }
+      businessTypeName = btDoc.name;
     }
 
     // Create brand
@@ -280,9 +280,10 @@ exports.register = async (req, res) => {
       countryId,
       callingId,
 
-      // DB-backed references
+      // DB-backed references + snapshots
       category: categoryDoc._id,
-      businessType: businessTypeDoc ? businessTypeDoc._id : undefined,
+      categoryName: categoryDoc.name,
+      businessType: businessTypeName, // name string (optional)
 
       // optionals
       website: websiteNorm,
@@ -434,8 +435,7 @@ exports.getBrandById = async (req, res) => {
 
     const brandDoc = await Brand.findOne({ brandId })
       .select('-password -_id -__v')
-      .populate('category', 'name id')
-      .populate('businessType', 'name')
+      .populate('category', 'name id') // still useful to return full category object
       .lean();
 
     if (!brandDoc) return res.status(404).json({ message: 'Brand not found.' });
@@ -454,9 +454,8 @@ exports.getBrandById = async (req, res) => {
 exports.getAllBrands = async (req, res) => {
   try {
     const brands = await Brand.find()
-      .select('-password -_id -__v')
+      .select('-password -__v')
       .populate('category', 'name id')
-      .populate('businessType', 'name')
       .lean();
     return res.status(200).json({ brands });
   } catch (error) {
@@ -625,7 +624,6 @@ exports.searchBrands = async (req, res) => {
 // ---------- 12) Update profile ----------
 exports.updateProfile = async (req, res) => {
   try {
-    // read brandId from body
     const { brandId, name, phone, countryId, callingId } = req.body || {};
 
     if (!brandId) {
@@ -666,7 +664,6 @@ exports.updateProfile = async (req, res) => {
 
     const safe = brand.toObject();
     delete safe.password;
-    delete safe._id;
     delete safe.__v;
 
     return res.status(200).json({ message: 'Profile updated', brand: safe });

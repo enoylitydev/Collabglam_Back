@@ -60,16 +60,17 @@ const brandSchema = new mongoose.Schema(
     email: { type: String, required: true, unique: true, match: [emailRegex, 'Invalid email'] },
     createdAt: { type: Date, default: Date.now },
 
-    // ---------------- NEW REFERENCES ----------------
+    // ---------------- REFERENCES + SNAPSHOTS ----------------
     category: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Category',
       required: true,
     },
-    businessType: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'BusinessType',
-    },
+    // denormalized snapshot for convenience/search
+    categoryName: { type: String, required: true, trim: true },
+
+    // store business type name directly (no ref)
+    businessType: { type: String, trim: true },
 
     website: {
       type: String,
