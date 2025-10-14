@@ -47,7 +47,7 @@ router.post('/requestEmailUpdate',verifyToken,requestEmailUpdate);
 
 router.post('/verifyEmailUpdate',verifyToken,verifyEmailUpdate);
 
-router.get('/metaOptions',verifyToken,getMetaOptions);
+updatesrouter.get('/metaOptions',getMetaOptions);
 
 
 module.exports = router;
