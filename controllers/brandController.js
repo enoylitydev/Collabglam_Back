@@ -13,11 +13,28 @@ const VerifyEmail = require('../models/verifyEmail');
 const { escapeRegExp } = require('../utils/searchTokens'); // for exact match, case-insensitive
 
 // ---- helpers ----
-const emailRegex =
-  /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i;
-const exactEmailRegex = (email) =>
-  new RegExp(`^${escapeRegExp(String(email).trim())}$`, 'i');
+const emailRegex = /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i;
+const exactEmailRegex = (email) => new RegExp(`^${escapeRegExp(String(email).trim())}$`, 'i');
 const toNormEmail = (e) => String(e || '').trim().toLowerCase();
+
+// ---- NEW: local enums (keep in sync with model) ----
+const CATEGORY_ENUM = [
+  'Beauty', 'Tech', 'Food', 'Fashion', 'Fitness', 'Travel', 'Education',
+  'Gaming', 'Home', 'Auto', 'Finance', 'Health', 'Lifestyle', 'Other',
+];
+const COMPANY_SIZE_ENUM = ['1-10', '11-50', '51-200', '200+'];
+const BUSINESS_TYPE_ENUM = ['Direct-to-Consumer', 'Agency', 'Marketplace', 'SaaS', 'Other'];
+
+// ---- simple normalizers ----
+const normalizeUrl = (u) => {
+  const s = String(u || '').trim();
+  if (!s) return undefined;
+  return /^https?:\/\//i.test(s) ? s : `https://${s}`;
+};
+const normalizeInsta = (h) => {
+  const s = String(h || '').trim().replace(/^@/, '').toLowerCase();
+  return s || undefined;
+};
 
 // ---- env / mailer ----
 const SMTP_HOST = process.env.SMTP_HOST;
@@ -136,12 +153,38 @@ exports.verifyOtp = async (req, res) => {
   }
 };
 
-// ---------- 3) Complete registration (Brand) ----------
 exports.register = async (req, res) => {
   try {
-    const { name, email, password, phone, countryId, callingId } = req.body;
+    const {
+      name,
+      email,
+      password,
+      phone,
+      countryId,
+      callingId,
+
+      // NEW fields
+      category,                // required
+      website,                 // optional
+      instagramHandle,         // optional
+      logoUrl,                 // optional
+      companySize,             // optional
+      businessType,            // optional
+      referralCode,            // optional
+      isVerifiedRepresentative // required: must be true
+    } = req.body;
+
+    // required checks
     if (!name || !email || !password || !phone || !countryId || !callingId) {
       return res.status(400).json({ message: 'All fields are required' });
+    }
+
+    // NEW required checks
+    if (!category || !CATEGORY_ENUM.includes(String(category))) {
+      return res.status(400).json({ message: 'Invalid or missing brand category' });
+    }
+    if (isVerifiedRepresentative !== true) {
+      return res.status(400).json({ message: 'You must confirm you are an official representative of this brand' });
     }
 
     const normalizedEmail = toNormEmail(email);
@@ -172,6 +215,19 @@ exports.register = async (req, res) => {
       return res.status(400).json({ message: 'Invalid country or calling code' });
     }
 
+    // Normalize optionals
+    const websiteNorm = normalizeUrl(website);
+    const logoUrlNorm = normalizeUrl(logoUrl);
+    const instaNorm = normalizeInsta(instagramHandle);
+
+    // Validate enums if provided
+    if (companySize && !COMPANY_SIZE_ENUM.includes(String(companySize))) {
+      return res.status(400).json({ message: 'Invalid company size' });
+    }
+    if (businessType && !BUSINESS_TYPE_ENUM.includes(String(businessType))) {
+      return res.status(400).json({ message: 'Invalid business type' });
+    }
+
     // Create brand
     const brand = new Brand({
       name,
@@ -182,6 +238,16 @@ exports.register = async (req, res) => {
       callingcode: callingDoc.callingCode,
       countryId,
       callingId,
+
+      // NEW fields
+      category: String(category),
+      website: websiteNorm,
+      instagramHandle: instaNorm,
+      logoUrl: logoUrlNorm,
+      companySize: companySize ? String(companySize) : undefined,
+      businessType: businessType ? String(businessType) : undefined,
+      referralCode: referralCode ? String(referralCode).trim() : undefined,
+      isVerifiedRepresentative: true,
     });
 
     // Free plan
@@ -190,6 +256,7 @@ exports.register = async (req, res) => {
       brand.subscription = {
         planId: freePlan.planId,
         planName: freePlan.name,
+        role: 'Brand',
         startedAt: new Date(),
         expiresAt: subscriptionHelper.computeExpiry(freePlan),
         features: (freePlan.features || []).map((f) => ({
@@ -203,7 +270,7 @@ exports.register = async (req, res) => {
 
     await brand.save();
 
-    // Clean up verification record (like Influencer)
+    // Clean up verification record
     await VerifyEmail.deleteOne({ email: normalizedEmail, role: 'Brand' });
 
     return res.status(201).json({
@@ -213,6 +280,13 @@ exports.register = async (req, res) => {
     });
   } catch (error) {
     console.error('Error in register:', error);
+
+    // Friendly validation surfacing
+    if (error?.name === 'ValidationError') {
+      const first = Object.values(error.errors)[0];
+      return res.status(400).json({ message: first?.message || 'Validation error' });
+    }
+
     return res.status(500).json({ message: 'Internal server error during registration' });
   }
 };
