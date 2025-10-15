@@ -33,7 +33,8 @@ const invitationRoutes    = require('./routes/invitationRoutes');
 const filtersRoutes       = require('./routes/filterRoutes');
 const mediaKitRoutes      = require('./routes/mediaKitRoutes');
 const modashRoutes        = require('./routes/modashRoutes');
-const languageRoutes     = require('./routes/languageRoutes');
+const languageRoutes      = require('./routes/languageRoutes');
+const businessRoutes      = require('./routes/businessRoutes');
 
 // Models needed inside WS handlers
 const ChatRoom = require('./models/chat');
@@ -44,14 +45,10 @@ const unseenMessageNotifier = require('./jobs/unseenMessageNotifier');
 const app    = express();
 const server = http.createServer(app);
 
-/* -------------------------------------------------
-   Serve static uploads so attachment URLs work
-------------------------------------------------- */
+// ====== Static uploads (so attachment URLs work) ======
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-/* -------------------------------------------------
-   WebSocket (ws) setup
-------------------------------------------------- */
+// ====== WebSocket (ws) setup ======
 const wss   = new WebSocket.Server({ server, path: '/ws' });
 const rooms = new Map(); // roomId -> Set<ws>
 
@@ -59,9 +56,7 @@ function broadcastToRoom(roomId, payloadString) {
   const clients = rooms.get(roomId);
   if (!clients) return;
   for (const client of clients) {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(payloadString);
-    }
+    if (client.readyState === WebSocket.OPEN) client.send(payloadString);
   }
 }
 
@@ -109,7 +104,6 @@ wss.on('connection', (ws) => {
         joinedRoom = roomId;
         if (!rooms.has(roomId)) rooms.set(roomId, new Set());
         rooms.get(roomId).add(ws);
-        // (optional) send ack
         ws.send(JSON.stringify({ type: 'joined', roomId }));
         break;
       }
@@ -168,7 +162,6 @@ wss.on('connection', (ws) => {
       }
 
       case 'typing': {
-        // optional typing indicator
         const { roomId, senderId, isTyping } = data;
         if (!roomId || !senderId) return;
         const payload = JSON.stringify({
@@ -210,20 +203,27 @@ app.set('wss', wss);
 app.set('wsRooms', rooms);
 app.set('broadcastToRoom', broadcastToRoom);
 
-/* -------------------------------------------------
-   Express middleware
-------------------------------------------------- */
+// ====== Express middleware ======
 app.use(cors({
   origin: process.env.FRONTEND_ORIGIN || 'http://localhost:3000',
-
   credentials: true
 }));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
-/* -------------------------------------------------
-   REST routes
-------------------------------------------------- */
+// Increase JSON/urlencoded limits to avoid PayloadTooLargeError on /register
+// You can tune via env: JSON_LIMIT=8mb (default 8mb)
+const JSON_LIMIT = process.env.JSON_LIMIT || '8mb';
+app.use(express.json({ limit: JSON_LIMIT }));
+app.use(express.urlencoded({ extended: true, limit: JSON_LIMIT, parameterLimit: 100000 }));
+
+// Friendly 413 response instead of crashing stack traces
+app.use((err, req, res, next) => {
+  if (err && (err.type === 'entity.too.large' || err.status === 413)) {
+    return res.status(413).json({ message: 'Payload too large. Try reducing the request size or increase JSON_LIMIT.' });
+  }
+  return next(err);
+});
+
+// ====== REST routes ======
 app.use('/influencer', influencerRoutes);
 app.use('/country', countryRoutes);
 app.use('/brand', brandRoutes);
@@ -248,10 +248,9 @@ app.use('/filters', filtersRoutes);
 app.use('/media-kit', mediaKitRoutes);
 app.use('/modash', modashRoutes);
 app.use('/languages', languageRoutes);
+app.use('/business', businessRoutes);
 
-/* -------------------------------------------------
-  Mongo & start
-------------------------------------------------- */
+/* Mongo & start */
 const PORT = process.env.PORT || 5000;
 
 mongoose.connect(process.env.MONGODB_URI)

@@ -1,5 +1,6 @@
 // controllers/brandController.js
 require('dotenv').config();
+const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
 
@@ -7,21 +8,33 @@ const Brand = require('../models/brand');
 const Influencer = require('../models/influencer'); // needed by requestOtp
 const Country = require('../models/country');
 const Milestone = require('../models/milestone');
-const Subscription = require('../models/subscription');
 const subscriptionHelper = require('../utils/subscriptionHelper');
 const VerifyEmail = require('../models/verifyEmail');
+const Category = require('../models/categories');        // DB-backed categories
+const BusinessType = require('../models/businessType');  // DB-backed business types
 const { escapeRegExp } = require('../utils/searchTokens'); // for exact match, case-insensitive
 
 // ---- helpers ----
-const emailRegex =
-  /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i;
-const exactEmailRegex = (email) =>
-  new RegExp(`^${escapeRegExp(String(email).trim())}$`, 'i');
+const emailRegex = /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i;
+const exactEmailRegex = (email) => new RegExp(`^${escapeRegExp(String(email).trim())}$`, 'i');
 const toNormEmail = (e) => String(e || '').trim().toLowerCase();
+
+const COMPANY_SIZE_ENUM = ['1-10', '11-50', '51-200', '200+'];
+
+// ---- simple normalizers ----
+const normalizeUrl = (u) => {
+  const s = String(u || '').trim();
+  if (!s) return undefined;
+  return /^https?:\/\//i.test(s) ? s : `https://${s}`;
+};
+const normalizeInsta = (h) => {
+  const s = String(h || '').trim().replace(/^@/, '').toLowerCase();
+  return s || undefined;
+};
 
 // ---- env / mailer ----
 const SMTP_HOST = process.env.SMTP_HOST;
-const SMTP_PORT = parseInt(process.env.SMTP_PORT, 10);
+const SMTP_PORT = parseInt(process.env.SMTP_PORT || '587', 10);
 const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASS = process.env.SMTP_PASS;
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -33,10 +46,40 @@ const transporter = nodemailer.createTransport({
   auth: { user: SMTP_USER, pass: SMTP_PASS },
 });
 
+// ---- resolvers for DB-backed options ----
+const isObjectId = (v) => mongoose.Types.ObjectId.isValid(String(v));
+
+async function resolveCategory(input) {
+  if (!input && input !== 0) return null;
+  const raw = String(input).trim();
+
+  // ObjectId
+  if (isObjectId(raw)) return Category.findById(raw);
+
+  // numeric 'id' field
+  if (/^\d+$/.test(raw)) {
+    return Category.findOne({ id: Number(raw) });
+  }
+
+  // name (case-insensitive, exact)
+  return Category.findOne({ name: new RegExp(`^${escapeRegExp(raw)}$`, 'i') });
+}
+
+async function resolveBusinessType(input) {
+  if (!input && input !== 0) return null;
+  const raw = String(input).trim();
+
+  // ObjectId
+  if (isObjectId(raw)) return BusinessType.findById(raw);
+
+  // name (case-insensitive, exact)
+  return BusinessType.findOne({ name: new RegExp(`^${escapeRegExp(raw)}$`, 'i') });
+}
+
 // ---------- 1) Request OTP (signup) ----------
 exports.requestOtp = async (req, res) => {
   try {
-    const { email, role="Brand" } = req.body;
+    const { email, role = "Brand" } = req.body;
     if (!email || !role) {
       return res.status(400).json({ message: 'Both email and role are required' });
     }
@@ -99,7 +142,7 @@ exports.requestOtp = async (req, res) => {
 // ---------- 2) Verify OTP (signup) ----------
 exports.verifyOtp = async (req, res) => {
   try {
-    const { email, otp, role="Brand" } = req.body;
+    const { email, otp, role = "Brand" } = req.body;
     if (!email || otp == null || !role) {
       return res.status(400).json({ message: 'email, otp and role are required' });
     }
@@ -136,12 +179,45 @@ exports.verifyOtp = async (req, res) => {
   }
 };
 
-// ---------- 3) Complete registration (Brand) ----------
+// ---------- 3) Register ----------
 exports.register = async (req, res) => {
   try {
-    const { name, email, password, phone, countryId, callingId } = req.body;
+    const {
+      name,
+      email,
+      password,
+      phone,
+      countryId,
+      callingId,
+
+      // NEW inputs
+      category,        // can be ObjectId | numeric id | name
+      categoryId,      // optional explicit ObjectId or numeric id
+      businessType,    // optional: ObjectId | name
+      businessTypeId,  // optional explicit ObjectId
+
+      // optionals
+      website,
+      instagramHandle,
+      logoUrl,
+      companySize,
+      referralCode,
+      isVerifiedRepresentative // required: must be true
+    } = req.body;
+
+    // required checks
     if (!name || !email || !password || !phone || !countryId || !callingId) {
       return res.status(400).json({ message: 'All fields are required' });
+    }
+
+    // required: category via DB
+    const catInput = categoryId ?? category;
+    const categoryDoc = await resolveCategory(catInput);
+    if (!categoryDoc) {
+      return res.status(400).json({ message: 'Invalid or missing brand category' });
+    }
+    if (isVerifiedRepresentative !== true) {
+      return res.status(400).json({ message: 'You must confirm you are an official representative of this brand' });
     }
 
     const normalizedEmail = toNormEmail(email);
@@ -172,6 +248,27 @@ exports.register = async (req, res) => {
       return res.status(400).json({ message: 'Invalid country or calling code' });
     }
 
+    // Normalize optionals
+    const websiteNorm = normalizeUrl(website);
+    const logoUrlNorm = normalizeUrl(logoUrl);
+    const instaNorm = normalizeInsta(instagramHandle);
+
+    // Validate enums if provided
+    if (companySize && !COMPANY_SIZE_ENUM.includes(String(companySize))) {
+      return res.status(400).json({ message: 'Invalid company size' });
+    }
+
+    // Resolve businessType if provided (optional) → store NAME
+    let businessTypeName = undefined;
+    const btInput = businessTypeId ?? businessType;
+    if (btInput != null && String(btInput).trim()) {
+      const btDoc = await resolveBusinessType(btInput);
+      if (!btDoc) {
+        return res.status(400).json({ message: 'Invalid business type' });
+      }
+      businessTypeName = btDoc.name;
+    }
+
     // Create brand
     const brand = new Brand({
       name,
@@ -182,6 +279,19 @@ exports.register = async (req, res) => {
       callingcode: callingDoc.callingCode,
       countryId,
       callingId,
+
+      // DB-backed references + snapshots
+      category: categoryDoc._id,
+      categoryName: categoryDoc.name,
+      businessType: businessTypeName, // name string (optional)
+
+      // optionals
+      website: websiteNorm,
+      instagramHandle: instaNorm,
+      logoUrl: logoUrlNorm,
+      companySize: companySize ? String(companySize) : undefined,
+      referralCode: referralCode ? String(referralCode).trim() : undefined,
+      isVerifiedRepresentative: true,
     });
 
     // Free plan
@@ -190,6 +300,7 @@ exports.register = async (req, res) => {
       brand.subscription = {
         planId: freePlan.planId,
         planName: freePlan.name,
+        role: 'Brand',
         startedAt: new Date(),
         expiresAt: subscriptionHelper.computeExpiry(freePlan),
         features: (freePlan.features || []).map((f) => ({
@@ -203,7 +314,7 @@ exports.register = async (req, res) => {
 
     await brand.save();
 
-    // Clean up verification record (like Influencer)
+    // Clean up verification record
     await VerifyEmail.deleteOne({ email: normalizedEmail, role: 'Brand' });
 
     return res.status(201).json({
@@ -213,6 +324,13 @@ exports.register = async (req, res) => {
     });
   } catch (error) {
     console.error('Error in register:', error);
+
+    // Friendly validation surfacing
+    if (error?.name === 'ValidationError') {
+      const first = Object.values(error.errors)[0];
+      return res.status(400).json({ message: first?.message || 'Validation error' });
+    }
+
     return res.status(500).json({ message: 'Internal server error during registration' });
   }
 };
@@ -317,7 +435,9 @@ exports.getBrandById = async (req, res) => {
 
     const brandDoc = await Brand.findOne({ brandId })
       .select('-password -_id -__v')
+      .populate('category', 'name id') // still useful to return full category object
       .lean();
+
     if (!brandDoc) return res.status(404).json({ message: 'Brand not found.' });
 
     const milestoneDoc = await Milestone.findOne({ brandId }).lean();
@@ -334,7 +454,8 @@ exports.getBrandById = async (req, res) => {
 exports.getAllBrands = async (req, res) => {
   try {
     const brands = await Brand.find()
-      .select('-password -_id -__v')
+      .select('-password -__v')
+      .populate('category', 'name id')
       .lean();
     return res.status(200).json({ brands });
   } catch (error) {
@@ -503,7 +624,6 @@ exports.searchBrands = async (req, res) => {
 // ---------- 12) Update profile ----------
 exports.updateProfile = async (req, res) => {
   try {
-    // read brandId from body
     const { brandId, name, phone, countryId, callingId } = req.body || {};
 
     if (!brandId) {
@@ -544,7 +664,6 @@ exports.updateProfile = async (req, res) => {
 
     const safe = brand.toObject();
     delete safe.password;
-    delete safe._id;
     delete safe.__v;
 
     return res.status(200).json({ message: 'Profile updated', brand: safe });
@@ -726,5 +845,20 @@ exports.verifyEmailUpdate = async (req, res) => {
   } catch (err) {
     console.error('Error in verifyEmailUpdate:', err);
     return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// ---------- 15) Meta: categories + business types ----------
+exports.getMetaOptions = async (_req, res) => {
+  try {
+    const [categories, businessTypes] = await Promise.all([
+      Category.find().select('name id').sort({ id: 1, name: 1 }).lean(),
+      BusinessType.find().select('name').sort({ name: 1 }).lean(),
+    ]);
+
+    return res.status(200).json({ categories, businessTypes });
+  } catch (err) {
+    console.error('Error in getMetaOptions:', err);
+    return res.status(500).json({ message: 'Failed to fetch options' });
   }
 };

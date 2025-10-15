@@ -193,22 +193,29 @@ const onboardingSchema = new mongoose.Schema(
     capacity: { type: String },
 
     // STEP 4.2
-    categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category' },
-    subcategories: {
-      type: [String], // UUID v4
-      validate: { validator: (arr) => Array.isArray(arr) && arr.every(s => typeof s === 'string') },
-      default: []
-    },
+    // Store BOTH the numeric category id (from Category.id) and the readable name.
+    categoryId: { type: Number, index: true },               // <-- changed: numeric category id
+    categoryName: { type: String, trim: true },              // <-- added: stored category name
+
+    // Store full subcategory link objects (id + name + parent category info)
+    subcategories: { type: [categoryLinkSchema], default: [] }, // <-- changed: used to be [String]
+
     collabTypes: { type: [String], default: [] },
     allowlisting: { type: Boolean, default: false },
     cadences: { type: [String], default: [] },
 
     // STEP 4.3
     selectedPrompts: { type: [{ group: String, prompt: String }], default: [] },
-    promptAnswers: { type: mongoose.Schema.Types.Mixed, default: {} }
+
+    // Strongly typed answers: one row per prompt
+    promptAnswers: {
+      type: [{ group: String, prompt: String, answer: String }],
+      default: []
+    }
   },
   { _id: false }
 );
+
 
 /* -------------------------- Payment sub-schema --------------------------- */
 const paymentSchema = new mongoose.Schema(
@@ -265,9 +272,6 @@ const influencerSchema = new mongoose.Schema(
     // NEW quick onboarding
     onboarding: { type: onboardingSchema, default: {} },
 
-    // Search tokens
-    _ac: { type: [String], index: true },
-
     createdAt: { type: Date, default: Date.now },
 
     // OTP / reset / subscription / payments
@@ -322,58 +326,6 @@ influencerSchema.pre('validate', function (next) {
   next();
 });
 
-/* ------------------------- Autocomplete Token Builder ------------------------- */
-const AC_FIELDS = ['name', 'country'];
-const normalize = (s) => (typeof s === 'string' ? s.toLowerCase().trim() : '');
-
-function buildACTokens(doc) {
-  const bag = [];
-  const pushFor = (val) => {
-    const norm = normalize(val);
-    if (!norm) return;
-    bag.push(...edgeNgrams(norm));
-    bag.push(...charNgrams(norm, 2, 4));
-  };
-
-  for (const f of AC_FIELDS) {
-    const v = doc[f];
-    if (v) pushFor(v);
-  }
-
-  // NEW: languages
-  if (Array.isArray(doc.languages)) {
-    for (const l of doc.languages) {
-      pushFor(l.name);
-      pushFor(l.code);
-    }
-  }
-
-  if (Array.isArray(doc.socialProfiles)) {
-    for (const p of doc.socialProfiles) {
-      pushFor(p.username);
-      pushFor(p.fullname);
-      pushFor(p.handle);
-      pushFor(p.provider);
-      pushFor(p.country);
-      pushFor(p.city);
-
-      if (Array.isArray(p.categories)) {
-        for (const c of p.categories) {
-          pushFor(c.categoryName);
-          pushFor(c.subcategoryName);
-        }
-      }
-    }
-  }
-
-  const deduped = Array.from(new Set(bag.filter(Boolean)));
-  return deduped.slice(0, 2000);
-}
-
-influencerSchema.pre('save', function (next) {
-  this._ac = buildACTokens(this);
-  next();
-});
 
 influencerSchema.pre('save', async function (next) {
   if (!this.isModified('password')) return next();

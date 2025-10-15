@@ -234,6 +234,60 @@ function normalizeCategories(raw, idx) {
   return deduped;
 }
 
+function normalizePromptAnswers(selectedPrompts = [], promptAnswers = {}) {
+  // Build a prompt->group lookup from selectedPrompts
+  const groupByPrompt = new Map();
+  if (Array.isArray(selectedPrompts)) {
+    for (const sp of selectedPrompts) {
+      if (sp && sp.prompt) groupByPrompt.set(String(sp.prompt), sp.group || '');
+    }
+  }
+
+  // If already array of { group?, prompt, answer }, just normalize
+  if (Array.isArray(promptAnswers)) {
+    return promptAnswers
+      .map((row) => {
+        if (!row || !row.prompt) return null;
+        return {
+          prompt: String(row.prompt),
+          answer: row.answer != null ? String(row.answer) : '',
+          group: row.group != null ? String(row.group) : (groupByPrompt.get(String(row.prompt)) || '')
+        };
+      })
+      .filter(Boolean);
+  }
+
+  // If object map { [prompt]: answer }, convert to array
+  if (promptAnswers && typeof promptAnswers === 'object') {
+    return Object.entries(promptAnswers).map(([prompt, answer]) => ({
+      prompt: String(prompt),
+      answer: answer != null ? String(answer) : '',
+      group: groupByPrompt.get(String(prompt)) || ''
+    }));
+  }
+
+  // Fallback
+  return [];
+}
+
+async function resolveCategoryBasics(categoryIdRaw) {
+  if (!categoryIdRaw) return { categoryId: undefined, categoryName: undefined };
+
+  // Try Mongo ObjectId first
+  let doc = null;
+  if (mongoose.Types.ObjectId.isValid(categoryIdRaw)) {
+    doc = await Category.findById(categoryIdRaw, 'id name').lean();
+  }
+
+  // If not found, try numeric 'id'
+  if (!doc && (/^\d+$/).test(String(categoryIdRaw))) {
+    doc = await Category.findOne({ id: Number(categoryIdRaw) }, 'id name').lean();
+  }
+
+  if (!doc) return { categoryId: undefined, categoryName: undefined };
+  return { categoryId: doc.id, categoryName: doc.name };
+}
+
 function extractRawCategoriesFromProviderRaw(providerRaw) {
   const p = safeParse(providerRaw) || providerRaw || {};
   const root = p.profile || p;
@@ -471,14 +525,14 @@ exports.saveQuickOnboarding = async (req, res) => {
       projectLength = '',
       capacity = '',
 
-      categoryId,                      // Category._id
-      subcategories = [],              // UUID strings
+      categoryId,                      // Accepts Category._id (ObjectId) OR numeric Category.id
+      subcategories = [],              // UUID strings / names / objects -> will normalize
       collabTypes = [],
       allowlisting = false,
       cadences = [],
 
       selectedPrompts = [],            // [{ group, prompt }]
-      promptAnswers = {}               // { [prompt]: answer }
+      promptAnswers = {}               // object map or array -> will normalize to [{group,prompt,answer}]
     } = req.body;
 
     if (!influencerId && !email) {
@@ -500,27 +554,39 @@ exports.saveQuickOnboarding = async (req, res) => {
       budgetArr = Object.entries(budgets).map(([format, range]) => ({ format, range }));
     }
 
-    // validate categoryId (optional)
-    let categoryObjectId = undefined;
-    if (categoryId) {
-      if (!mongoose.Types.ObjectId.isValid(categoryId)) {
-        return res.status(400).json({ message: 'Invalid categoryId' });
-      }
-      categoryObjectId = new mongoose.Types.ObjectId(categoryId);
+    // Resolve category basics (numeric id + name)
+    const { categoryId: catNumId, categoryName: catName } = await resolveCategoryBasics(categoryId);
+
+    // Build the global category index and normalize subcategories into categoryLinkSchema objects
+    const idx = await buildCategoryIndex();
+    let subLinks = normalizeCategories(subcategories, idx);
+
+    // If a category was selected, keep subcategories that belong to that category
+    if (typeof catNumId === 'number') {
+      subLinks = subLinks.filter(s => s.categoryId === catNumId);
     }
 
+    // Normalize prompt answers to typed array
+    const answersArray = normalizePromptAnswers(selectedPrompts, promptAnswers);
+
+    // Persist onboarding in the new shape
     inf.onboarding = {
-      formats,
+      formats: Array.isArray(formats) ? formats : [],
       budgets: budgetArr,
       projectLength,
       capacity,
-      categoryId: categoryObjectId,
-      subcategories: Array.isArray(subcategories) ? subcategories : [],
+
+      categoryId: typeof catNumId === 'number' ? catNumId : undefined,
+      categoryName: catName || undefined,
+
+      subcategories: subLinks,  // full objects with {categoryId,categoryName,subcategoryId,subcategoryName}
+
       collabTypes: Array.isArray(collabTypes) ? collabTypes : [],
       allowlisting: !!allowlisting,
       cadences: Array.isArray(cadences) ? cadences : [],
+
       selectedPrompts: Array.isArray(selectedPrompts) ? selectedPrompts : [],
-      promptAnswers: (promptAnswers && typeof promptAnswers === 'object') ? promptAnswers : {}
+      promptAnswers: answersArray
     };
 
     await inf.save();
@@ -531,7 +597,6 @@ exports.saveQuickOnboarding = async (req, res) => {
     return res.status(500).json({ message: 'Internal server error' });
   }
 };
-
 
 exports.login = async (req, res) => {
   const { email, password } = req.body;
@@ -640,49 +705,23 @@ exports.getList = async (req, res) => {
 };
 
 exports.getById = async (req, res) => {
-  const { id } = req.query;
-  if (!id) {
-    return res.status(400).json({ message: 'influencerId query parameter is required' });
-  }
   try {
-    // Exclude sensitive/internal fields up front
-    const projection =
-      '-password -__v -_id -_ac -paymentMethods -platformId -audienceAgeRangeId -audienceId -countryId -callingId -categories -subscription.planId';
+    const { id } = req.query;
+    if (!id) {
+      return res.status(400).json({ message: 'Body parameter "id" (influencerId) is required.' });
+    }
 
-    const doc = await Influencer.findOne({ influencerId: id }, projection).lean();
-    if (!doc) {
+    const influencer = await Influencer.findOne({ influencerId: id })
+      .select('-password -__v') // return full doc except sensitive/internal fields
+      .lean();
+
+    if (!influencer) {
       return res.status(404).json({ message: 'Influencer not found' });
     }
 
-    const genderMap = { 0: 'male', 1: 'female', 2: 'other' };
-    const out = { ...doc };
-
-    // Preserve influencerId, then remove any remaining *Id keys at root
-    const influId = out.influencerId;
-    Object.keys(out).forEach((k) => {
-      if (k !== 'influencerId' && /id$/i.test(k)) delete out[k];
-    });
-
-    // Ensure nested planId is gone (in case projection changes later)
-    if (out.subscription && 'planId' in out.subscription) {
-      delete out.subscription.planId;
-    }
-
-    // Rename influencerId -> InfluencerID
-    delete out.influencerId;
-    out.influencerId = influId;
-
-    // Map gender number -> string
-    if (typeof out.gender === 'number') {
-      out.gender = genderMap[out.gender] ?? out.gender;
-    } else if (typeof out.gender === 'string' && /^\d+$/.test(out.gender)) {
-      const code = parseInt(out.gender, 10);
-      out.gender = genderMap[code] ?? out.gender;
-    }
-
-    return res.status(200).json(out);
-  } catch (error) {
-    console.error('Error fetching influencer by ID:', error);
+    return res.status(200).json({ influencer });
+  } catch (err) {
+    console.error('Error in adminGetInfluencerById:', err);
     return res.status(500).json({ message: 'Internal server error' });
   }
 };
@@ -1138,12 +1177,6 @@ exports.searchInfluencers = async (req, res) => {
 
     const q = search.trim().toLowerCase();
     const rx = new RegExp('^' + escapeRegExp(q));
-
-    const docs = await Influencer
-      .find({ _ac: { $regex: rx } }, 'name influencerId')
-      .limit(10)
-      .lean();
-
     if (docs.length === 0) {
       return res.status(404).json({ message: 'No influencers found' });
     }
@@ -1204,7 +1237,6 @@ exports.suggestInfluencers = async (req, res) => {
 
     const rx = new RegExp('^' + escapeRegExp(q));
     const candidates = await Influencer.find(
-      { _ac: { $regex: rx } },
       { name: 1, categoryName: 1, platformName: 1, country: 1, socialMedia: 1 }
     ).limit(100).lean();
 

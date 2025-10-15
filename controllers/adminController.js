@@ -5,6 +5,7 @@ const Brand = require('../models/brand'); // Assuming you have a Brand model
 const Influencer = require('../models/influencer'); // Assuming you have an Influencer model
 const Campaign = require('../models/campaign');
 const Milestone = require('../models/milestone'); // Assuming you have a Milestone model
+const escapeRegex = (s = '') => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 /**
  * POST /admin/login
  * body: { email, password }
@@ -362,6 +363,129 @@ exports.getCampaignsByBrandId = async (req, res) => {
     });
   } catch (err) {
     console.error('Error in getCampaignsByBrandId:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+
+exports.adminGetInfluencerById = async (req, res) => {
+  try {
+    const id = req.body?.id || req.body?.influencerId;
+    if (!id) {
+      return res.status(400).json({ message: 'Body parameter "id" (influencerId) is required.' });
+    }
+
+    const influencer = await Influencer.findOne({ influencerId: id })
+      .select('-password -__v') // return full doc except sensitive/internal fields
+      .lean();
+
+    if (!influencer) {
+      return res.status(404).json({ message: 'Influencer not found' });
+    }
+
+    return res.status(200).json({ influencer });
+  } catch (err) {
+    console.error('Error in adminGetInfluencerById:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+
+exports.adminGetInfluencerList = async (req, res) => {
+  try {
+    // 1) Parse inputs
+    const page  = Math.max(parseInt(req.body.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.body.limit, 10) || 10, 1), 100);
+    const search = (req.body.search || '').trim();
+    const sortBy = (req.body.sortBy || 'createdAt').trim();
+    const sortOrder = String(req.body.sortOrder || 'desc').toLowerCase();
+
+    // 2) Build filter (search across name/email/phone/primaryPlatform/_ac/influencerId/planName)
+    const filter = {};
+    if (search) {
+      const re = new RegExp(escapeRegex(search), 'i');
+      filter.$or = [
+        { name: re },
+        { email: re },
+        { phone: re },
+        { primaryPlatform: re },
+        { influencerId: re },
+        { _ac: re }, // tokenized autocomplete array
+        { 'subscription.planName': re }
+      ];
+    }
+
+    // 3) Count total
+    const total = await Influencer.countDocuments(filter);
+
+    // 4) Sorting
+    const ALLOWED_SORT = new Set([
+      'name',
+      'email',
+      'phone',
+      'primaryPlatform',
+      'createdAt',
+      'planName',     // maps to subscription.planName
+      'expiresAt'     // maps to subscription.expiresAt
+    ]);
+    const field = ALLOWED_SORT.has(sortBy) ? sortBy : 'createdAt';
+    const dir   = sortOrder === 'asc' ? 1 : -1;
+
+    // Build sort object (handle nested plan fields)
+    const sortObj = {};
+    if (field === 'planName') {
+      sortObj['subscription.planName'] = dir;
+    } else if (field === 'expiresAt') {
+      sortObj['subscription.expiresAt'] = dir;
+    } else {
+      sortObj[field] = dir;
+    }
+    // tie-breaker
+    sortObj.createdAt = -1;
+
+    // 5) Fetch data (only necessary fields + plan & expiry)
+    const docs = await Influencer.find(filter)
+      .select('influencerId name email phone primaryPlatform subscription.planName subscription.expiresAt subscriptionExpired createdAt')
+      .sort(sortObj)
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean();
+
+    // 5a) Shape response and compute expiry flag robustly
+    const now = new Date();
+    const influencers = docs.map(d => {
+      const planName  = d.subscription?.planName ?? 'free';
+      const expiresAt = d.subscription?.expiresAt ?? null;
+
+      // Treat as expired if explicit flag set OR expiry date in the past
+      const isExpired =
+        Boolean(d.subscriptionExpired) ||
+        (expiresAt ? new Date(expiresAt) < now : false);
+
+      return {
+        influencerId: d.influencerId,
+        name: d.name || '',
+        email: d.email || '',
+        phone: d.phone || '',
+        primaryPlatform: d.primaryPlatform ?? null,
+        planName,
+        expiresAt,
+        subscriptionExpired: isExpired
+      };
+    });
+
+    // 6) Respond
+    return res.status(200).json({
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit),
+      sortBy: field,
+      sortOrder: dir === 1 ? 'asc' : 'desc',
+      influencers
+    });
+  } catch (err) {
+    console.error('Error in adminGetInfluencerList:', err);
     return res.status(500).json({ message: 'Internal server error' });
   }
 };
