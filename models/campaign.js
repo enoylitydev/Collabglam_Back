@@ -1,5 +1,4 @@
 // models/campaigns.js
-
 const mongoose = require('mongoose');
 const { v4: uuidv4 } = require('uuid');
 
@@ -27,7 +26,27 @@ const targetAudienceSchema = new mongoose.Schema({
       }
     }
   ]
-});
+}, { _id: false });
+
+const categorySelectionSchema = new mongoose.Schema({
+  categoryId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Category',
+    required: true
+  },
+  categoryName: {
+    type: String,
+    required: true
+  },
+  subcategoryId: {
+    type: String, // UUID from your categories seed
+    required: true
+  },
+  subcategoryName: {
+    type: String,
+    required: true
+  }
+}, { _id: false });
 
 const campaignSchema = new mongoose.Schema({
   brandId: {
@@ -58,19 +77,13 @@ const campaignSchema = new mongoose.Schema({
     default: () => ({
       age: { MinAge: 0, MaxAge: 0 },
       gender: 2,
-      location: ''
+      location: '' // legacy
     })
   },
-  interestId: [
-    {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Interest'
-    }
-  ],
-  interestName: {
-    type: String,
-    default: ''
-  },
+
+  // ⬇️ NEW: categories replace interests
+  categories: [categorySelectionSchema],
+
   goal: {
     type: String,
     enum: ['Brand Awareness', 'Sales', 'Engagement'],
@@ -88,16 +101,8 @@ const campaignSchema = new mongoose.Schema({
     startDate: { type: Date },
     endDate:   { type: Date }
   },
-  images: [
-    {
-      type: String
-    }
-  ],
-  creativeBrief: [
-    {
-      type: String
-    }
-  ],
+  images: [{ type: String }],
+  creativeBrief: [{ type: String }],
   additionalNotes: {
     type: String,
     default: ''
@@ -111,7 +116,6 @@ const campaignSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
-  // ← NEW FIELD: hasApplied (0 = not applied, 1 = applied)
   hasApplied: {
     type: Number,
     enum: [0, 1],
