@@ -35,6 +35,40 @@ const storage = multer.diskStorage({
   }
 });
 
+async function buildSubToParentNumMap() {
+  const rows = await Category.find({}, 'id subcategories').lean();
+  const subIdToParentNum = new Map(); // uuid -> Number
+
+  for (const r of rows) {
+    for (const s of (r.subcategories || [])) {
+      subIdToParentNum.set(String(s.subcategoryId), r.id);
+    }
+  }
+  return subIdToParentNum;
+}
+
+function buildSearchOr(q) {
+  return [
+    { brandName: { $regex: q, $options: 'i' } },
+    { productOrServiceName: { $regex: q, $options: 'i' } },
+    { description: { $regex: q, $options: 'i' } },
+    { 'categories.categoryName': { $regex: q, $options: 'i' } },
+    { 'categories.subcategoryName': { $regex: q, $options: 'i' } }
+  ];
+}
+
+
+// Basic search fields (fallback if you already have a builder, keep yours)
+function buildSearchOr(q) {
+  return [
+    { brandName: { $regex: q, $options: 'i' } },
+    { productOrServiceName: { $regex: q, $options: 'i' } },
+    { description: { $regex: q, $options: 'i' } },
+    { 'categories.categoryName': { $regex: q, $options: 'i' } },
+    { 'categories.subcategoryName': { $regex: q, $options: 'i' } }
+  ];
+}
+
 const upload = multer({
   storage,
   limits: { fileSize: 10 * 1024 * 1024 } // 10 MB per file
@@ -84,42 +118,42 @@ async function normalizeCategoriesPayload(raw) {
 
   let items = raw;
   if (typeof items === 'string') {
-    try {
-      items = JSON.parse(items);
-    } catch {
-      throw new Error('Invalid JSON in categories.');
-    }
+    try { items = JSON.parse(items); } catch { throw new Error('Invalid JSON in categories.'); }
   }
   if (!Array.isArray(items)) throw new Error('categories must be an array.');
 
-  const result = [];
+  // collect unique numeric category ids from payload
+  const catNums = [...new Set(
+    items.map(it => Number(it?.categoryId)).filter(n => Number.isFinite(n))
+  )];
+  if (!catNums.length) throw new Error('categories must contain numeric categoryId.');
+
+  // fetch categories by numeric id (NOT _id)
+  const cats = await Category.find({ id: { $in: catNums } }, 'id name subcategories').lean();
+  const byNum = new Map(cats.map(c => [c.id, c]));
+
+  const out = [];
   for (const it of items) {
-    const categoryId = it?.categoryId;
-    const subcategoryId = it?.subcategoryId;
+    const catNum = Number(it?.categoryId);
+    const subId = String(it?.subcategoryId || '');
 
-    if (!mongoose.Types.ObjectId.isValid(categoryId)) {
-      throw new Error(`Invalid categoryId: ${categoryId}`);
-    }
-    if (!subcategoryId || typeof subcategoryId !== 'string') {
-      throw new Error(`Invalid subcategoryId for category ${categoryId}`);
-    }
+    if (!Number.isFinite(catNum)) throw new Error(`Invalid categoryId: ${it?.categoryId}`);
+    if (!subId) throw new Error('subcategoryId is required');
 
-    const catDoc = await Category.findById(categoryId).lean();
-    if (!catDoc) throw new Error(`Category not found: ${categoryId}`);
+    const catDoc = byNum.get(catNum);
+    if (!catDoc) throw new Error(`Category not found (id: ${catNum})`);
 
-    const sub = Array.isArray(catDoc.subcategories)
-      ? catDoc.subcategories.find((s) => s.subcategoryId === subcategoryId)
-      : null;
-    if (!sub) throw new Error(`Subcategory not found: ${subcategoryId} for category ${categoryId}`);
+    const sub = (catDoc.subcategories || []).find(s => String(s.subcategoryId) === subId);
+    if (!sub) throw new Error(`Subcategory ${subId} not under category id ${catNum}`);
 
-    result.push({
-      categoryId: catDoc._id,
+    out.push({
+      categoryId: catDoc.id,        // ✅ numeric
       categoryName: catDoc.name,
       subcategoryId: sub.subcategoryId,
       subcategoryName: sub.name
     });
   }
-  return result;
+  return out;
 }
 
 /**
@@ -724,32 +758,67 @@ exports.getCampaignsByInfluencer = async (req, res) => {
   }
 
   try {
+    // 1) Influencer
     const inf = await Influencer.findOne({ influencerId }).lean();
     if (!inf) {
       return res.status(404).json({ message: 'Influencer not found' });
     }
 
-    const subIds = Array.from(extractSubcategoryIdsFromInfluencerDoc(inf));
-    if (subIds.length === 0) {
+    // 2) Build subcategory -> parent numeric categoryId map
+    const subIdToParentNum = await buildSubToParentNumMap();
+
+    // 3) Gather influencer selections
+    const selectedSubIds = new Set(
+      (inf.onboarding?.subcategories || [])
+        .map(s => s?.subcategoryId)
+        .filter(Boolean)
+        .map(String)
+    );
+
+    // Start with explicitly selected category
+    const selectedCatNumIds = new Set();
+    if (typeof inf.onboarding?.categoryId === 'number') {
+      selectedCatNumIds.add(inf.onboarding.categoryId);
+    }
+
+    // Also include parent categories of selected subcategories
+    for (const subId of selectedSubIds) {
+      const parentNum = subIdToParentNum.get(subId);
+      if (typeof parentNum === 'number') selectedCatNumIds.add(parentNum);
+    }
+
+    // If nothing selected, short-circuit
+    if (selectedSubIds.size === 0 && selectedCatNumIds.size === 0) {
       return res.json({
         meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 },
         campaigns: []
       });
     }
 
-    const filter = {
-      isActive: 1,
-      'categories.subcategoryId': { $in: subIds }
-    };
+    const subIdsArr = Array.from(selectedSubIds);
+    const catNumArr = Array.from(selectedCatNumIds);
 
-    if (search?.trim()) {
-      filter.$or = buildSearchOr(search.trim());
+    // 4) Build filter using NUMERIC categoryId
+    const orClauses = [];
+    if (subIdsArr.length) {
+      orClauses.push({ 'categories.subcategoryId': { $in: subIdsArr } });
+    }
+    if (catNumArr.length) {
+      orClauses.push({ 'categories.categoryId': { $in: catNumArr } });
     }
 
+    const filter = { isActive: 1, $or: orClauses };
+
+    if (search?.trim()) {
+      filter.$and = [{ $or: buildSearchOr(search.trim()) }];
+    }
+
+    // 5) Pagination
     const pageNum = Math.max(1, parseInt(page, 10));
     const limNum = Math.max(1, parseInt(limit, 10));
     const skip = (pageNum - 1) * limNum;
 
+    // 6) Query
     const [total, campaigns] = await Promise.all([
       Campaign.countDocuments(filter),
       Campaign.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limNum).lean()
@@ -757,7 +826,7 @@ exports.getCampaignsByInfluencer = async (req, res) => {
 
     const totalPages = Math.ceil(total / limNum);
 
-    // annotate minimal flags (kept for parity with previous structure)
+    // annotate minimal flags (parity with previous structure)
     const annotated = campaigns.map((c) => ({
       ...c,
       hasApplied: 0,
@@ -1227,8 +1296,25 @@ exports.getCampaignsByFilter = async (req, res) => {
       filter['categories.subcategoryId'] = { $in: subcategoryIds.map(String) };
     }
     if (Array.isArray(categoryIds) && categoryIds.length) {
-      const validCats = categoryIds.filter((id) => mongoose.Types.ObjectId.isValid(id)).map((id) => new mongoose.Types.ObjectId(id));
-      if (validCats.length) filter['categories.categoryId'] = { $in: validCats };
+      // primary path: numeric Category.id (number or numeric string)
+      const nums = categoryIds
+        .map(v => Number(v))
+        .filter(n => Number.isFinite(n));
+
+      // backward-compat: if client accidentally sent ObjectIds, resolve to numeric ids
+      const maybeObjIds = categoryIds
+        .filter(v => typeof v === 'string' && mongoose.Types.ObjectId.isValid(v));
+
+      let fromObj = [];
+      if (maybeObjIds.length) {
+        const rows = await Category.find({ _id: { $in: maybeObjIds } }, 'id').lean();
+        fromObj = rows.map(r => r.id).filter(n => Number.isFinite(n));
+      }
+
+      const combined = [...new Set([...nums, ...fromObj])];
+      if (combined.length) {
+        filter['categories.categoryId'] = { $in: combined }; // ✅ numeric match
+      }
     }
 
     // gender

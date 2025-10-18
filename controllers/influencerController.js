@@ -20,6 +20,8 @@ const VerifyEmail = require('../models/verifyEmail');
 const subscriptionHelper = require('../utils/subscriptionHelper');
 const { escapeRegExp } = require('../utils/searchTokens');
 
+const UUIDv4Regex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 // SMTP
 const SMTP_HOST = process.env.SMTP_HOST;
 const SMTP_PORT = parseInt(process.env.SMTP_PORT, 10);
@@ -176,8 +178,6 @@ async function buildCategoryIndex() {
   return { bySubId, bySubName, byCatId };
 }
 
-const UUIDv4Regex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
 function normalizeCategories(raw, idx) {
   if (!raw) return [];
   const list = Array.isArray(raw) ? raw : [raw];
@@ -187,8 +187,14 @@ function normalizeCategories(raw, idx) {
     if (!item) continue;
 
     if (typeof item === 'string') {
-      const hit = idx.bySubName.get(item.toLowerCase());
-      if (hit) out.push(hit);
+      const s = String(item).trim();
+      if (UUIDv4Regex.test(s)) {
+        const hit = idx.bySubId.get(s);
+        if (hit) out.push(hit);
+      } else {
+        const byName = idx.bySubName.get(s.toLowerCase());
+        if (byName) out.push(byName);
+      }
       continue;
     }
 
@@ -235,7 +241,6 @@ function normalizeCategories(raw, idx) {
 }
 
 function normalizePromptAnswers(selectedPrompts = [], promptAnswers = {}) {
-  // Build a prompt->group lookup from selectedPrompts
   const groupByPrompt = new Map();
   if (Array.isArray(selectedPrompts)) {
     for (const sp of selectedPrompts) {
@@ -243,7 +248,6 @@ function normalizePromptAnswers(selectedPrompts = [], promptAnswers = {}) {
     }
   }
 
-  // If already array of { group?, prompt, answer }, just normalize
   if (Array.isArray(promptAnswers)) {
     return promptAnswers
       .map((row) => {
@@ -257,7 +261,6 @@ function normalizePromptAnswers(selectedPrompts = [], promptAnswers = {}) {
       .filter(Boolean);
   }
 
-  // If object map { [prompt]: answer }, convert to array
   if (promptAnswers && typeof promptAnswers === 'object') {
     return Object.entries(promptAnswers).map(([prompt, answer]) => ({
       prompt: String(prompt),
@@ -266,20 +269,16 @@ function normalizePromptAnswers(selectedPrompts = [], promptAnswers = {}) {
     }));
   }
 
-  // Fallback
   return [];
 }
 
 async function resolveCategoryBasics(categoryIdRaw) {
   if (!categoryIdRaw) return { categoryId: undefined, categoryName: undefined };
 
-  // Try Mongo ObjectId first
   let doc = null;
   if (mongoose.Types.ObjectId.isValid(categoryIdRaw)) {
     doc = await Category.findById(categoryIdRaw, 'id name').lean();
   }
-
-  // If not found, try numeric 'id'
   if (!doc && (/^\d+$/).test(String(categoryIdRaw))) {
     doc = await Category.findOne({ id: Number(categoryIdRaw) }, 'id name').lean();
   }
@@ -366,36 +365,17 @@ const mapPayload = (provider, input) => {
 };
 
 /* ============================== Registration ============================== */
-
+// (unchanged)
 exports.registerInfluencer = async (req, res) => {
   try {
     let {
-      name,
-      email,
-      password,
-      phone,
-
-      // minimal audience/location
-      countryId,
-      callingId,
-
-      // NEW: profile basics & languages from Step 1
-      city,
-      gender,
-      dateOfBirth,            // "YYYY-MM-DD"
-      selectedLanguages,      // string[] Language._id
-
-      // multi-platform payload inputs
-      platforms,              // [{ provider, data }]
-      youtube,
-      tiktok,
-      instagram,
-
-      // preferred platform from Step 3
+      name, email, password, phone,
+      countryId, callingId,
+      city, gender, dateOfBirth, selectedLanguages,
+      platforms, youtube, tiktok, instagram,
       preferredProvider
     } = req.body;
 
-    // 1) Basic validations
     const normalizedEmail = String(email || '').trim().toLowerCase();
     if (!normalizedEmail) return res.status(400).json({ message: 'Email is required' });
     if (!password || String(password).length < 8) return res.status(400).json({ message: 'Password must be at least 8 characters' });
@@ -403,20 +383,16 @@ exports.registerInfluencer = async (req, res) => {
       return res.status(400).json({ message: 'Missing required fields (name, phone, countryId, callingId)' });
     }
 
-    // 2) Email must be verified for Influencer
     const verifiedRec = await VerifyEmail.findOne({ email: normalizedEmail, role: 'Influencer', verified: true });
     if (!verifiedRec) return res.status(400).json({ message: 'Email not verified' });
 
-    // 3) Prevent duplicate registration (case-insensitive)
     const emailRegexCI = new RegExp(`^${escapeRegExp(normalizedEmail)}$`, 'i');
     const already = await Influencer.findOne({ email: emailRegexCI }, '_id');
     if (already) return res.status(400).json({ message: 'Already registered' });
 
-    // 4) Validate Country + Calling refs
     const [countryDoc, callingDoc] = await Promise.all([ Country.findById(countryId), Country.findById(callingId) ]);
     if (!countryDoc || !callingDoc) return res.status(400).json({ message: 'Invalid countryId or callingId' });
 
-    // 5) Map platform payloads
     const profiles = [];
     if (Array.isArray(platforms)) {
       for (const item of platforms) {
@@ -434,14 +410,12 @@ exports.registerInfluencer = async (req, res) => {
     }
     if (!profiles.length) return res.status(400).json({ message: 'No valid platform payloads provided' });
 
-    // 6) Resolve categories/subcategories for each profile
     const idx = await buildCategoryIndex();
     for (const prof of profiles) {
       const rawCats = extractRawCategoriesFromProviderRaw(prof.providerRaw);
       prof.categories = normalizeCategories(rawCats, idx);
     }
 
-    // 7) Resolve selected languages → subdocs
     let languageDocs = [];
     if (Array.isArray(selectedLanguages) && selectedLanguages.length) {
       const langs = await Language.find({ _id: { $in: selectedLanguages } }, 'code name').lean();
@@ -452,12 +426,10 @@ exports.registerInfluencer = async (req, res) => {
         .map(l => ({ languageId: l._id, code: l.code, name: l.name }));
     }
 
-    // 8) Compute primary platform (honor preferredProvider when valid)
     const validProviders = new Set(profiles.map(p => p.provider));
     let primaryPlatform = profiles[0]?.provider || null;
     if (preferredProvider && validProviders.has(preferredProvider)) primaryPlatform = preferredProvider;
 
-    // 9) Create Influencer doc
     const inf = new Influencer({
       name,
       email: normalizedEmail,
@@ -480,7 +452,6 @@ exports.registerInfluencer = async (req, res) => {
       otpVerified: true
     });
 
-    // 10) Initialize free subscription
     const freePlan = await subscriptionHelper.getFreePlan('Influencer');
     if (freePlan) {
       inf.subscription = {
@@ -494,8 +465,6 @@ exports.registerInfluencer = async (req, res) => {
     }
 
     await inf.save();
-
-    // 11) Clean up verification record
     await VerifyEmail.deleteOne({ email: normalizedEmail, role: 'Influencer' });
 
     return res.status(201).json({
@@ -512,27 +481,26 @@ exports.registerInfluencer = async (req, res) => {
 };
 
 /* ====================== Save Quick Questions Onboarding ====================== */
-
 exports.saveQuickOnboarding = async (req, res) => {
   try {
     const {
       influencerId,
       email,
 
-      // shape from frontend QuickQuestions (can be partial)
       formats = [],
-      budgets = {},                    // object { format: range } or array [{format,range}]
+      budgets = {},
       projectLength = '',
       capacity = '',
 
-      categoryId,                      // Accepts Category._id (ObjectId) OR numeric Category.id
-      subcategories = [],              // UUID strings / names / objects -> will normalize
+      categoryId,              // Category._id or numeric id
+      subcategories = [],      // UUID strings / names / objects
+
       collabTypes = [],
       allowlisting = false,
       cadences = [],
 
-      selectedPrompts = [],            // [{ group, prompt }]
-      promptAnswers = {}               // object map or array -> will normalize to [{group,prompt,answer}]
+      selectedPrompts = [],
+      promptAnswers = {}
     } = req.body;
 
     if (!influencerId && !email) {
@@ -546,7 +514,7 @@ exports.saveQuickOnboarding = async (req, res) => {
     const inf = await Influencer.findOne(query);
     if (!inf) return res.status(404).json({ message: 'Influencer not found' });
 
-    // budgets object → array
+    // budgets → array
     let budgetArr = [];
     if (Array.isArray(budgets)) {
       budgetArr = budgets;
@@ -554,22 +522,25 @@ exports.saveQuickOnboarding = async (req, res) => {
       budgetArr = Object.entries(budgets).map(([format, range]) => ({ format, range }));
     }
 
-    // Resolve category basics (numeric id + name)
+    // Resolve selected category basics
     const { categoryId: catNumId, categoryName: catName } = await resolveCategoryBasics(categoryId);
 
-    // Build the global category index and normalize subcategories into categoryLinkSchema objects
+    // Normalize incoming subcategories to full link nodes
     const idx = await buildCategoryIndex();
     let subLinks = normalizeCategories(subcategories, idx);
 
-    // If a category was selected, keep subcategories that belong to that category
+    // If a category was chosen, restrict to its subs
     if (typeof catNumId === 'number') {
       subLinks = subLinks.filter(s => s.categoryId === catNumId);
     }
 
-    // Normalize prompt answers to typed array
-    const answersArray = normalizePromptAnswers(selectedPrompts, promptAnswers);
+    // ✅ Store only minimal fields in onboarding.subcategories
+    const onboardingSubs = subLinks.map(s => ({
+      subcategoryId: s.subcategoryId,
+      subcategoryName: s.subcategoryName
+    }));
 
-    // Persist onboarding in the new shape
+    // Persist onboarding
     inf.onboarding = {
       formats: Array.isArray(formats) ? formats : [],
       budgets: budgetArr,
@@ -579,18 +550,17 @@ exports.saveQuickOnboarding = async (req, res) => {
       categoryId: typeof catNumId === 'number' ? catNumId : undefined,
       categoryName: catName || undefined,
 
-      subcategories: subLinks,  // full objects with {categoryId,categoryName,subcategoryId,subcategoryName}
+      subcategories: onboardingSubs,
 
       collabTypes: Array.isArray(collabTypes) ? collabTypes : [],
       allowlisting: !!allowlisting,
       cadences: Array.isArray(cadences) ? cadences : [],
 
       selectedPrompts: Array.isArray(selectedPrompts) ? selectedPrompts : [],
-      promptAnswers: answersArray
+      promptAnswers: normalizePromptAnswers(selectedPrompts, promptAnswers)
     };
 
     await inf.save();
-
     return res.json({ message: 'Onboarding saved', influencerId: inf.influencerId });
   } catch (err) {
     console.error('saveQuickOnboarding error:', err);

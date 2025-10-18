@@ -29,10 +29,11 @@ const targetAudienceSchema = new mongoose.Schema({
 }, { _id: false });
 
 const categorySelectionSchema = new mongoose.Schema({
+  // ✅ Use the public numeric Category.id, not ObjectId
   categoryId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Category',
-    required: true
+    type: Number,
+    required: true,
+    index: true
   },
   categoryName: {
     type: String,
@@ -40,7 +41,8 @@ const categorySelectionSchema = new mongoose.Schema({
   },
   subcategoryId: {
     type: String, // UUID from your categories seed
-    required: true
+    required: true,
+    index: true
   },
   subcategoryName: {
     type: String,
@@ -81,7 +83,7 @@ const campaignSchema = new mongoose.Schema({
     })
   },
 
-  // ⬇️ NEW: categories replace interests
+  // ⬇️ categories replace interests
   categories: [categorySelectionSchema],
 
   goal: {
@@ -127,4 +129,10 @@ const campaignSchema = new mongoose.Schema({
   }
 });
 
-module.exports = mongoose.model('Campaign', campaignSchema);
+// 🔧 Helpful indexes for this query pattern
+campaignSchema.index({ 'categories.subcategoryId': 1 });
+campaignSchema.index({ 'categories.categoryId': 1 });
+
+/* Create & export model */
+const Campaign = mongoose.models.Campaign || mongoose.model('Campaign', campaignSchema);
+module.exports = Campaign;
