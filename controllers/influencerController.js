@@ -15,6 +15,8 @@ const Category = require('../models/categories');
 const Country = require('../models/country');
 const Language = require('../models/language');
 const VerifyEmail = require('../models/verifyEmail');
+const ApplyCampaign = require('../models/applyCampaign');
+const Campaign = require('../models/Campaign');
 
 // Utils
 const subscriptionHelper = require('../utils/subscriptionHelper');
@@ -711,7 +713,29 @@ exports.getCampaignsByInfluencer = async (req, res) => {
       return res.status(400).json({ message: 'influencerId is required' });
     }
 
-    const filter = { influencerId };
+    // Step 1️⃣: Find all ApplyCampaign docs where influencer appears
+    const applyDocs = await ApplyCampaign.find({
+      $or: [
+        { 'applicants.influencerId': influencerId },
+        { 'approved.influencerId': influencerId }
+      ]
+    });
+
+    if (!applyDocs.length) {
+      return res.status(200).json({
+        total: 0,
+        page: Number(page),
+        pages: 0,
+        campaigns: []
+      });
+    }
+
+    // Step 2️⃣: Extract UUID campaignIds (these are strings)
+    const campaignIds = applyDocs.map(doc => doc.campaignId);
+
+    // Step 3️⃣: Query by `campaignId` field in Campaign collection (not _id)
+    const filter = { campaignId: { $in: campaignIds } };
+
     if (search.trim()) {
       filter.$or = [
         { name: { $regex: search, $options: 'i' } },
@@ -719,20 +743,40 @@ exports.getCampaignsByInfluencer = async (req, res) => {
       ];
     }
 
+    // Step 4️⃣: Pagination and sorting
     const skip = (Math.max(page, 1) - 1) * Math.max(limit, 1);
     const sortDirection = sortOrder === 'asc' ? 1 : -1;
-    const total = await Campaign.countDocuments(filter);
 
+    const total = await Campaign.countDocuments(filter);
     const campaigns = await Campaign.find(filter)
       .sort({ [sortBy]: sortDirection })
       .skip(skip)
       .limit(limit);
 
+    // Step 5️⃣: Determine status (approved / pending)
+    const result = campaigns.map(campaign => {
+      const related = applyDocs.find(
+        d => d.campaignId === campaign.campaignId
+      );
+
+      let status = 'pending';
+      if (related?.approved?.some(a => a.influencerId === influencerId)) {
+        status = 'approved';
+      }
+
+      return {
+        id: campaign.campaignId, // use UUID as id
+        name: campaign.name,
+        appliedDate: related?.createdAt || campaign.createdAt,
+        status
+      };
+    });
+
     return res.status(200).json({
       total,
       page: Number(page),
       pages: Math.ceil(total / limit),
-      campaigns
+      campaigns: result
     });
   } catch (error) {
     console.error('Error in getCampaignsByInfluencer:', error);
