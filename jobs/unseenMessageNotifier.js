@@ -20,11 +20,22 @@ const transporter = nodemailer.createTransport({
 
 // Helper function to get user details
 async function getUserDetails(userId, userType) {
-  if (userType === 'brand') {  // Changed from 'Brand' to 'brand'
-    return await Brand.findOne({ brandId: userId }).select('email name');
-  } else if (userType === 'influencer') {  // Changed from 'Influencer' to 'influencer'
-    return await Influencer.findOne({ influencerId: userId }).select('email name');
+  const projection = 'email name isUnsubscribed';
+
+  if (userType === 'brand') {
+    return await Brand.findOne({
+      brandId: userId,
+      isUnsubscribed: { $ne: true },
+    }).select(projection);
   }
+
+  if (userType === 'influencer') {
+    return await Influencer.findOne({
+      influencerId: userId,
+      isUnsubscribed: { $ne: true },
+    }).select(projection);
+  }
+
   return null;
 }
 
@@ -49,12 +60,15 @@ async function sendUnseenMessageNotification(email, userName, unseenCount, roomI
           <p style="color: #666; font-size: 12px;">
             This is an automated message. Please do not reply to this email.
           </p>
+          <p style="color: #666; font-size: 12px; margin-top: 20px;">
+            If you no longer wish to receive these emails, you can <a href="${process.env.FRONTEND_URL}/unsubscribe?email=${email}" style="color: #FF6B6B;">unsubscribe here</a>.
+          </p>
         </div>
       `
     };
 
     const info = await transporter.sendMail(mailOptions);
-    // console.log(`✅ Email sent to ${email}: ${info.messageId}`);
+    console.log(`✅ Email sent to ${email}: ${info.messageId}`);
     return true;
   } catch (error) {
     console.error(`❌ Failed to send email to ${email}:`, error.message);
@@ -84,10 +98,10 @@ async function checkAndNotifyUnseenMessages() {
           const lastNotification = room.lastNotificationSent?.get(participant.userId);
           const now = new Date();
 
-          if (lastNotification && (now - new Date(lastNotification)) < ONE_HOUR) {
-            // console.log(`⏭️  Skipping notification for ${participant.userId} (sent recently)`);
-            continue;
-          }
+          // if (lastNotification && (now - new Date(lastNotification)) < ONE_HOUR) {
+          //   console.log(`⏭️  Skipping notification for ${participant.userId} (sent recently)`);
+          //   continue;
+          // }
 
           const user = await getUserDetails(participant.userId, participant.role);
           if (user && user.email) {
