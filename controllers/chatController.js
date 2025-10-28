@@ -128,15 +128,22 @@ exports.getRooms = async (req, res) => {
     if (!userId) return res.status(400).json({ message: 'userId is required' });
 
     const rooms = await ChatRoom.find({ 'participants.userId': userId })
-      .select('roomId participants messages.messageId messages.text messages.senderId messages.timestamp messages.attachments')
+      .select('roomId participants messages.messageId messages.text messages.senderId messages.timestamp messages.attachments messages.seenBy')
       .lean();
 
     const summary = rooms.map(room => {
       const last = room.messages[room.messages.length - 1] || null;
+      
+      // Calculate unseen message count for this user
+      const unseenCount = room.messages.filter(
+        msg => msg.senderId !== userId && !msg.seenBy.includes(userId)
+      ).length;
+      
       return {
         roomId: room.roomId,
         participants: room.participants,
-        lastMessage: last
+        lastMessage: last,
+        unseenCount
       };
     });
 
@@ -403,6 +410,119 @@ exports.deleteMessage = async (req, res) => {
   }
 };
 
+
+/* -----------------------------------------------------------
+   7) Mark message(s) as seen
+   POST /chat/mark-seen
+   body: { roomId, userId, messageIds? }
+   - If messageIds is provided: mark those specific messages as seen
+   - If messageIds is omitted/empty: mark ALL messages in the room as seen
+----------------------------------------------------------- */
+exports.markAsSeen = async (req, res) => {
+  try {
+    const { roomId, userId, messageIds } = req.body;
+    if (!roomId || !userId) {
+      return res.status(400).json({ message: 'roomId and userId are required' });
+    }
+
+    const room = await ChatRoom.findOne({ roomId });
+    if (!room) return res.status(404).json({ message: 'Chat room not found' });
+
+    // Verify user is a participant
+    if (!isUserInRoom(room, userId)) {
+      return res.status(403).json({ message: 'You are not a participant of this room' });
+    }
+
+    let markedCount = 0;
+    const updatedMessages = [];
+
+    // If specific messageIds provided, mark only those
+    if (messageIds && Array.isArray(messageIds) && messageIds.length > 0) {
+      for (const msg of room.messages) {
+        if (messageIds.includes(msg.messageId)) {
+          // Don't mark sender's own messages as seen by themselves
+          if (msg.senderId !== userId && !msg.seenBy.includes(userId)) {
+            msg.seenBy.push(userId);
+            markedCount++;
+            updatedMessages.push({
+              messageId: msg.messageId,
+              seenBy: msg.seenBy
+            });
+          }
+        }
+      }
+    } else {
+      // Mark all messages as seen (except sender's own messages)
+      for (const msg of room.messages) {
+        if (msg.senderId !== userId && !msg.seenBy.includes(userId)) {
+          msg.seenBy.push(userId);
+          markedCount++;
+          updatedMessages.push({
+            messageId: msg.messageId,
+            seenBy: msg.seenBy
+          });
+        }
+      }
+    }
+
+    if (markedCount > 0) {
+      await room.save();
+
+      // Broadcast seen status update
+      broadcast(req.app, roomId, {
+        type: 'messagesSeen',
+        roomId,
+        userId,
+        messages: updatedMessages
+      });
+    }
+
+    return res.json({
+      message: 'Messages marked as seen',
+      markedCount,
+      updatedMessages
+    });
+  } catch (err) {
+    console.error('markAsSeen error:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+/* -----------------------------------------------------------
+   8) Get unseen message count for a user in a room
+   POST /chat/unseen-count
+   body: { roomId, userId }
+----------------------------------------------------------- */
+exports.getUnseenCount = async (req, res) => {
+  try {
+    const { roomId, userId } = req.body;
+    if (!roomId || !userId) {
+      return res.status(400).json({ message: 'roomId and userId are required' });
+    }
+
+    const room = await ChatRoom.findOne({ roomId });
+    if (!room) return res.status(404).json({ message: 'Chat room not found' });
+
+    if (!isUserInRoom(room, userId)) {
+      return res.status(403).json({ message: 'You are not a participant of this room' });
+    }
+
+    // Count messages not sent by this user and not seen by this user
+    const unseenCount = room.messages.filter(
+      msg => msg.senderId !== userId && !msg.seenBy.includes(userId)
+    ).length;
+
+    return res.json({
+      message: 'Unseen count retrieved',
+      roomId,
+      userId,
+      unseenCount
+    });
+  } catch (err) {
+    console.error('getUnseenCount error:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
 
 // controllers/chatController.js
 
