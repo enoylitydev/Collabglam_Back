@@ -39,6 +39,9 @@ const businessRoutes      = require('./routes/businessRoutes');
 // Models needed inside WS handlers
 const ChatRoom = require('./models/chat');
 
+// Start unseen message notifier job
+const unseenMessageNotifier = require('./jobs/unseenMessageNotifier');
+
 const app    = express();
 const server = http.createServer(app);
 
@@ -253,6 +256,11 @@ const PORT = process.env.PORT || 5000;
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => {
     console.log('✅ Connected to MongoDB');
+    
+    // Start the unseen message notifier job
+    unseenMessageNotifier.start();
+    console.log('✅ Started unseen message notifier job');
+    
     server.listen(PORT, () => {
       console.log(`🚀 Server listening on port ${PORT}`);
     });
