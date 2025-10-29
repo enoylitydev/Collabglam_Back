@@ -108,6 +108,7 @@ const brandSchema = new mongoose.Schema(
     subscriptionExpired: { type: Boolean, default: false },
     failedLoginAttempts: { type: Number, default: 0 },
     lockUntil: { type: Date, default: null },
+    isUnsubscribed: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

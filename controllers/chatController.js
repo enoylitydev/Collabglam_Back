@@ -433,41 +433,49 @@ exports.markAsSeen = async (req, res) => {
       return res.status(403).json({ message: 'You are not a participant of this room' });
     }
 
-    let markedCount = 0;
-    const updatedMessages = [];
+    let query = { roomId };
+    let update = {};
 
-    // If specific messageIds provided, mark only those
     if (messageIds && Array.isArray(messageIds) && messageIds.length > 0) {
-      for (const msg of room.messages) {
-        if (messageIds.includes(msg.messageId)) {
-          // Don't mark sender's own messages as seen by themselves
-          if (msg.senderId !== userId && !msg.seenBy.includes(userId)) {
-            msg.seenBy.push(userId);
-            markedCount++;
-            updatedMessages.push({
-              messageId: msg.messageId,
-              seenBy: msg.seenBy
-            });
-          }
+      // Mark specific messages as seen
+      query['messages.messageId'] = { $in: messageIds };
+      update = {
+        $addToSet: {
+          'messages.$[elem].seenBy': userId
         }
-      }
+      };
     } else {
-      // Mark all messages as seen (except sender's own messages)
-      for (const msg of room.messages) {
-        if (msg.senderId !== userId && !msg.seenBy.includes(userId)) {
-          msg.seenBy.push(userId);
-          markedCount++;
-          updatedMessages.push({
-            messageId: msg.messageId,
-            seenBy: msg.seenBy
-          });
+      // Mark all unseen messages as seen for this user
+      update = {
+        $addToSet: {
+          'messages.$[elem].seenBy': userId
         }
-      }
+      };
     }
 
-    if (markedCount > 0) {
-      await room.save();
+    const arrayFilters = [{
+      "elem.senderId": { $ne: userId },
+      "elem.seenBy": { $ne: userId }
+    }];
 
+    const updatedRoom = await ChatRoom.findOneAndUpdate(
+      query,
+      update,
+      { new: true, arrayFilters, select: 'roomId messages.messageId messages.seenBy' }
+    ).lean();
+
+    if (!updatedRoom) {
+      return res.status(404).json({ message: 'Chat room not found or no messages updated' });
+    }
+
+    const updatedMessages = updatedRoom.messages
+      .filter(msg => messageIds ? messageIds.includes(msg.messageId) : !msg.seenBy.includes(userId))
+      .map(msg => ({
+        messageId: msg.messageId,
+        seenBy: msg.seenBy
+      }));
+
+    if (updatedMessages.length > 0) {
       // Broadcast seen status update
       broadcast(req.app, roomId, {
         type: 'messagesSeen',
@@ -476,6 +484,12 @@ exports.markAsSeen = async (req, res) => {
         messages: updatedMessages
       });
     }
+
+    return res.json({
+      message: 'Messages marked as seen',
+      markedCount: updatedMessages.length,
+      updatedMessages
+    });
 
     return res.json({
       message: 'Messages marked as seen',
