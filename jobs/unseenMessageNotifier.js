@@ -68,7 +68,7 @@ async function sendUnseenMessageNotification(email, userName, unseenCount, roomI
     };
 
     const info = await transporter.sendMail(mailOptions);
-    console.log(`✅ Email sent to ${email}: ${info.messageId}`);
+    // console.log(`✅ Email sent to ${email}: ${info.messageId}`);
     return true;
   } catch (error) {
     console.error(`❌ Failed to send email to ${email}:`, error.message);
@@ -98,10 +98,10 @@ async function checkAndNotifyUnseenMessages() {
           const lastNotification = room.lastNotificationSent?.get(participant.userId);
           const now = new Date();
 
-          // if (lastNotification && (now - new Date(lastNotification)) < ONE_HOUR) {
-          //   console.log(`⏭️  Skipping notification for ${participant.userId} (sent recently)`);
-          //   continue;
-          // }
+          if (lastNotification && (now - new Date(lastNotification)) < ONE_HOUR) {
+            // console.log(`⏭️  Skipping notification for ${participant.userId} (sent recently)`);
+            continue;
+          }
 
           const user = await getUserDetails(participant.userId, participant.role);
           if (user && user.email) {
