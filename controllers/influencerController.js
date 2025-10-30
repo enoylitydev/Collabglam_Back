@@ -1576,3 +1576,32 @@ exports.verifyotp = async (req, res) => {
     return res.status(500).json({ message: 'Internal server error' });
   }
 };
+
+exports.getLiteById = async (req, res) => {
+  try {
+    const id = req.query.id || req.query.influencerId;
+    if (!id) {
+      return res.status(400).json({ message: 'Query parameter "id" (influencerId) is required.' });
+    }
+
+    const doc = await Influencer.findOne({ influencerId: id })
+      .select('influencerId name email subscription.planId subscription.planName subscription.expiresAt')
+      .lean();
+
+    if (!doc) {
+      return res.status(404).json({ message: 'Influencer not found' });
+    }
+
+    return res.status(200).json({
+      influencerId: doc.influencerId,
+      name: doc.name || '',
+      email: doc.email || '',
+      planId: doc.subscription?.planId || null,
+      planName: doc.subscription?.planName || null,
+      expiresAt: doc.subscription?.expiresAt || null
+    });
+  } catch (err) {
+    console.error('Error in getLiteById:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
