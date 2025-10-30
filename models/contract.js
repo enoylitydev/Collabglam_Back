@@ -140,8 +140,14 @@ const contractSchema = new mongoose.Schema({
   effectiveDateOverride: { type: Date },       // optional admin override (audit still holds actual timestamp)
   lockedAt: { type: Date },                    // after final signature
 
+  // Operation mode for the creation flow:
+  // 1 = save (persist to DB), 2 = preview (do NOT persist; just generate/stream preview)
+  // NOTE: kept as Number (no enum) for backward-compat with any older records.
+  type: { type: Number, required: true, default: 1 },
+
+  isContracted: { type: Number, default: 0 },
+  
   // Compatibility (from original)
-  type: { type: Number, required: true },      // 0 = PDF only (stream), 1 = save
   isAssigned: { type: Number, default: 0 },
   isAccepted: { type: Number, default: 0 },    // legacy; keep for compatibility
   isRejected: { type: Number, default: 0 },

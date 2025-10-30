@@ -86,30 +86,15 @@ function legalTextToHTML(raw) {
   return out.join('\n');
 }
 
+/**
+ * UPDATED: Clean HTML for print — no fixed header/footer; better page breaks
+ */
 function renderContractHTML({ contract, templateText, renderedAt, isSnapshot }) {
   const tz = contract.effectiveDateTimezone || contract.green?.timezone || 'America/Los_Angeles';
   const brand = contract.grey?.brandProfile || {};
   const infl = contract.grey?.influencerProfile || {};
   const y = contract.yellow || {};
   const title = y.campaignTitle || 'Campaign';
-  const eff = contract.effectiveDateOverride || contract.effectiveDate;
-
-  const headInfo = {
-    brand: brand.legalName || contract.brandName || '—',
-    influencer: infl.legalName || contract.influencerName || '—',
-    campaign: title,
-    window: [
-      y?.goLive?.start ? formatDateTZ(y.goLive.start, tz, 'MMM D, YYYY') : null,
-      y?.goLive?.end ? formatDateTZ(y.goLive.end, tz, 'MMM D, YYYY') : null
-    ].filter(Boolean).join(' → ')
-  };
-
-  const legends = [
-    { label: 'Brand Fields', color: '#F5C542', key: 'YELLOW' },
-    { label: 'Influencer Fields', color: '#9B59B6', key: 'PURPLE' },
-    { label: 'System Auto', color: '#9EA7B3', key: 'GREY' },
-    { label: 'Admin Locked', color: '#2ECC71', key: 'GREEN' }
-  ];
 
   // Convert legal text -> semantic HTML (no escaped tags)
   const legalHTML = legalTextToHTML(templateText);
@@ -123,7 +108,9 @@ function renderContractHTML({ contract, templateText, renderedAt, isSnapshot }) 
   <!-- Google Fonts (no local assets) -->
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=Merriweather:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
   <style>
-    @page { size: A4; margin: 28mm 18mm 20mm 22mm; }
+    /* Use CSS page size and modest margins; Puppeteer will honor with preferCSSPageSize */
+    @page { size: A4; margin: 18mm 18mm 18mm 18mm; }
+
     html, body { height: 100%; }
     body {
       font-family: "Merriweather", serif;
@@ -134,24 +121,20 @@ function renderContractHTML({ contract, templateText, renderedAt, isSnapshot }) 
       word-break: normal;
       hyphens: auto;
       line-height: 1.55;
+      font-size: 12px;
     }
-    header {
-      position: fixed; top: -18mm; left: 0; right: 0; height: 16mm;
-      font-family: "Inter", sans-serif;
-      font-size: 10px; letter-spacing: .2px; color: #536171;
-      display:flex; align-items:center; justify-content:space-between;
-      border-bottom: 1px solid #e7edf3; padding: 0 18mm;
+
+    .muted { color:#6b7280; }
+
+    /* Layout & components */
+    .cover {
+      display:grid; grid-template-columns: 10mm 1fr; gap: 14mm; margin-bottom: 12mm;
+      /* Make the cover end with a page break so the agreement starts fresh */
+      page-break-after: always; break-after: page;
     }
-    footer {
-      position: fixed; bottom: -14mm; left: 0; right: 0; height: 12mm;
-      font-family: "Inter", sans-serif; font-size: 10px; color:#536171;
-      display:flex; align-items:center; justify-content:space-between;
-      border-top:1px solid #e7edf3; padding: 0 18mm;
-    }
-    .page { page-break-inside: avoid; }
-    .cover { display:grid; grid-template-columns: 10mm 1fr; gap: 14mm; margin-bottom: 12mm; }
     .rail { display:flex; flex-direction:column; gap:6mm; margin-top: 4mm; }
     .chip { height: 16mm; width: 10mm; border-radius: 6mm; }
+
     .legend {
       display:grid; grid-template-columns: 4mm 1fr; gap:6px 8px;
       align-items:center; margin-top: 2mm;
@@ -171,30 +154,35 @@ function renderContractHTML({ contract, templateText, renderedAt, isSnapshot }) 
       padding: 12px 14px; margin-bottom: 12mm;
       font-size: 12px; color:#374151;
     }
-    h1 { margin-top:0; }
+
+    /* Headings & paragraphs */
+    h1 { margin:0 0 6px 0; }
     h2 {
       font-family:"Inter", sans-serif; font-weight:700;
       font-size: 15px; color:#111827; margin: 14px 0 6px;
       border-left: 3px solid #1d4ed8; padding-left: 8px;
-      page-break-after: avoid;
+      /* Avoid orphan heading at page bottom */
+      page-break-after: avoid; break-after: avoid;
     }
     h3 {
       font-family:"Inter", sans-serif; font-weight:600;
       font-size: 13px; color:#0f172a; margin: 12px 0 4px;
-      page-break-after: avoid;
+      page-break-after: avoid; break-after: avoid;
     }
     .secno { color:#1d4ed8; }
-    p { margin: 6px 0 8px; }
-    .muted { color:#6b7280; }
+    p { margin: 6px 0 8px; orphans: 3; widows: 3; }
+
+    /* Only keep break-avoid on small blocks that must stay together */
+    .signatures, .audit { break-inside: avoid; page-break-inside: avoid; }
     .signatures {
       margin-top: 8mm; display:grid; grid-template-columns: 1fr 1fr; gap: 10mm;
-      break-inside: avoid;
     }
     .sig { border-top: 1px solid #cbd5e1; padding-top: 8px; font-size: 12px; }
     .audit {
       margin-top: 10mm; font-size: 11px; color:#475569;
-      border-top: 1px dashed #d1d5db; padding-top: 8px; break-inside: avoid;
+      border-top: 1px dashed #d1d5db; padding-top: 8px;
     }
+
     .pill {
       display:inline-block; padding: 2px 8px; border-radius: 999px;
       font-size: 10px; font-family:"Inter", sans-serif; font-weight:600;
@@ -203,27 +191,22 @@ function renderContractHTML({ contract, templateText, renderedAt, isSnapshot }) 
   </style>
 </head>
 <body>
-  <header>
-    <div><strong>${esc(headInfo.campaign)}</strong> • ${esc(headInfo.window || 'No window set')}</div>
-    <div>${esc(headInfo.brand)} ↔ ${esc(headInfo.influencer)}</div>
-  </header>
-
-  <footer>
-    <div>${isSnapshot ? 'Signed Snapshot' : 'Live Preview'} • Rendered ${esc(renderedAt)}</div>
-    <div class="muted"></div>
-  </footer>
-
   <main>
-    <section class="cover page">
+    <section class="cover">
       <div class="rail">
-        ${legends.map(l => `<div class="chip" style="background:${l.color}"></div>`).join('')}
+        ${[
+          { label: 'Brand Fields', color: '#F5C542', key: 'YELLOW' },
+          { label: 'Influencer Fields', color: '#9B59B6', key: 'PURPLE' },
+          { label: 'System Auto', color: '#9EA7B3', key: 'GREY' },
+          { label: 'Admin Locked', color: '#2ECC71', key: 'GREEN' }
+        ].map(l => `<div class="chip" style="background:${l.color}"></div>`).join('')}
       </div>
       <div class="title-block">
         <h1>Master Brand–Influencer Agreement</h1>
         <div class="meta">
-          <div><span class="k">Brand:</span> ${esc(headInfo.brand)}</div>
-          <div><span class="k">Influencer:</span> ${esc(headInfo.influencer)}</div>
-          <div><span class="k">Campaign:</span> ${esc(headInfo.campaign)}</div>
+          <div><span class="k">Brand:</span> ${esc(brand.legalName || contract.brandName || '—')}</div>
+          <div><span class="k">Influencer:</span> ${esc(infl.legalName || contract.influencerName || '—')}</div>
+          <div><span class="k">Campaign:</span> ${esc(title)}</div>
         </div>
         <div class="box">
           <strong>At a glance</strong><br>
@@ -233,7 +216,12 @@ function renderContractHTML({ contract, templateText, renderedAt, isSnapshot }) 
           <span class="pill" style="background:#ecfdf5;color:#065f46">Green</span> admin-locked
         </div>
         <div class="legend">
-          ${legends.map(l => `
+          ${[
+            { label: 'Brand Fields', color: '#F5C542', key: 'YELLOW' },
+            { label: 'Influencer Fields', color: '#9B59B6', key: 'PURPLE' },
+            { label: 'System Auto', color: '#9EA7B3', key: 'GREY' },
+            { label: 'Admin Locked', color: '#2ECC71', key: 'GREEN' }
+          ].map(l => `
             <div style="width:6px;height:6px;border-radius:2px;background:${l.color}"></div>
             <div>${esc(l.label)} <span class="muted">(${l.key})</span></div>
           `).join('')}
@@ -241,23 +229,23 @@ function renderContractHTML({ contract, templateText, renderedAt, isSnapshot }) 
       </div>
     </section>
 
-    <section class="page">
+    <section>
       ${legalHTML}
     </section>
 
-    <section class="page">
+    <section>
       <h2>Signatures & Audit</h2>
       <div class="signatures">
         ${['brand', 'influencer', 'collabglam'].map(r => {
-    const s = contract.signatures?.[r] || {};
-    const status = s.signed ? 'SIGNED' : 'PENDING';
-    const when = s.at ? formatDateTZ(s.at, tz, 'YYYY-MM-DD HH:mm z') : '';
-    return `
-          <div class="sig">
-            <strong>${r.toUpperCase()}</strong><br>
-            ${status}${s.signed ? ` by ${esc(s.name || '')} &lt;${esc(s.email || '')}&gt; on ${esc(when)}` : ''}
-          </div>`;
-  }).join('')}
+          const s = contract.signatures?.[r] || {};
+          const status = s.signed ? 'SIGNED' : 'PENDING';
+          const when = s.at ? formatDateTZ(s.at, tz, 'YYYY-MM-DD HH:mm z') : '';
+          return `
+            <div class="sig">
+              <strong>${r.toUpperCase()}</strong><br>
+              ${status}${s.signed ? ` by ${esc(s.name || '')} &lt;${esc(s.email || '')}&gt; on ${esc(when)}` : ''}
+            </div>`;
+        }).join('')}
       </div>
 
       <div class="audit">
@@ -268,36 +256,64 @@ function renderContractHTML({ contract, templateText, renderedAt, isSnapshot }) 
     </section>
   </main>
 </body>
-</html>
-`;
+</html>`;
 }
 
-async function renderPDFWithPuppeteer({ html, res, filename = 'Contract.pdf' }) {
+/**
+ * UPDATED: Use Puppeteer header/footer + enforce A4 with CSS page size
+ */
+async function renderPDFWithPuppeteer({
+  html,
+  res,
+  filename = 'Contract.pdf',
+  headerLeft = '',
+  headerRight = '',
+  footerLeft = ''
+}) {
   const browser = await puppeteer.launch({
     headless: 'new',
     args: ['--no-sandbox', '--disable-setuid-sandbox']
   });
 
+  // Header/footer run in their own document; keep styles inline and simple
   const headerTemplate = `
-    <div style="width:100%; font-size:8px; color:#6b7280; padding:0 10mm; display:flex; justify-content:flex-end;">
-      <span></span>
+    <style>
+      .pdf-h { font-size:9px; width:100%; padding:0 12mm; display:flex; justify-content:space-between; align-items:center; }
+      .muted { color:#6b7280; }
+    </style>
+    <div class="pdf-h">
+      <div>${esc(headerLeft)}</div>
+      <div class="muted">${esc(headerRight)}</div>
     </div>`;
+
   const footerTemplate = `
-    <div style="width:100%; font-size:8px; color:#6b7280; padding:0 10mm; display:flex; justify-content:flex-end;">
-      <span class="pageNumber"></span>/<span class="totalPages"></span>
+    <style>
+      .pdf-f { font-size:9px; width:100%; padding:0 12mm; display:flex; justify-content:space-between; align-items:center; }
+      .muted { color:#6b7280; }
+    </style>
+    <div class="pdf-f">
+      <div>${esc(footerLeft)}</div>
+      <div class="muted"><span class="pageNumber"></span>/<span class="totalPages"></span></div>
     </div>`;
 
   try {
     const page = await browser.newPage();
+    await page.emulateMediaType('print');
     await page.setContent(html, { waitUntil: ['load','domcontentloaded','networkidle0'] });
+
     const pdf = await page.pdf({
-      format: 'A4',
+      // honor CSS @page size/margins
+      preferCSSPageSize: true,
+      format: 'A4',                 // fallback if CSS is missing
       printBackground: true,
       displayHeaderFooter: true,
       headerTemplate,
       footerTemplate,
-      margin: { top: '28mm', bottom: '20mm', left: '18mm', right: '18mm' }
+      // these margins define the HEADER/FOOTER bands — keep in sync with @page margin visually
+      margin: { top: '16mm', bottom: '16mm', left: '18mm', right: '18mm' },
+      scale: 1
     });
+
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename=${filename}`);
     res.end(pdf);
@@ -642,14 +658,40 @@ function writeLongText(doc, text) {
  * POST /contract/initiate
  * Body: brandId, influencerId, campaignId, yellow: {...}, type (0=PDF stream, 1=save)
  */
+/**
+ * 1) INITIATE (Brand fills YELLOW → System expands GREY)
+ * POST /contract/initiate
+ * Body: brandId, influencerId, campaignId, yellow: {...}, type (1=send/save, 2=preview PDF)
+ */
 exports.initiate = async (req, res) => {
   try {
     const { brandId, influencerId, campaignId, yellow = {}, type = 1 } = req.body;
 
-    if (![0, 1].includes(+type)) return res.status(400).json({ message: 'Invalid type; must be 0 or 1' });
+    if (![1, 2].includes(+type)) {
+      return res.status(400).json({ message: 'Invalid type; must be 1 (send/save) or 2 (preview PDF)' });
+    }
     if (!brandId || !influencerId || !campaignId) {
       return res.status(400).json({ message: 'brandId, influencerId, campaignId are required' });
     }
+
+    // On SEND/SAVE, block duplicate sends (already assigned)
+    if (+type === 1) {
+      const existing = await Contract.findOne({
+        brandId,
+        influencerId,
+        campaignId,
+        isAssigned: 1,            // already sent/assigned
+        isRejected: { $ne: 1 }    // not rejected
+      }).lean();
+
+      if (existing) {
+        return res.status(409).json({
+          message: 'Already sent: a contract is already assigned to this influencer for this campaign.',
+          contractId: existing.contractId
+        });
+      }
+    }
+
     const [campaign, brand, influencer] = await Promise.all([
       Campaign.findOne({ campaignsId: campaignId }),
       Brand.findOne({ brandId }),
@@ -659,7 +701,7 @@ exports.initiate = async (req, res) => {
     if (!brand) return res.status(404).json({ message: 'Brand not found' });
     if (!influencer) return res.status(404).json({ message: 'Influencer not found' });
 
-    // System GREY pull
+    // GREY/system pull
     const grey = {
       brandProfile: {
         legalName: brand.legalName || brand.name || '',
@@ -679,25 +721,25 @@ exports.initiate = async (req, res) => {
       autoCalcs: {}
     };
 
-    // Expand Deliverables from preset (you can replace with your actual preset engine)
+    // Expand deliverables (fallback default)
     const deliverablesExpanded = Array.isArray(yellow.deliverablesExpanded)
       ? yellow.deliverablesExpanded
       : [{
-        type: 'Video',
-        quantity: 1,
-        format: 'MP4',
-        durationSec: 60,
-        postingWindow: { start: yellow.goLive?.start, end: yellow.goLive?.end },
-        draftRequired: yellow.revisionsIncluded > 0,
-        minLiveHours: 720, // 30 days
-        tags: [],
-        handles: [],
-        captions: '',
-        links: [],
-        disclosures: '#ad'
-      }];
+          type: 'Video',
+          quantity: 1,
+          format: 'MP4',
+          durationSec: 60,
+          postingWindow: { start: yellow.goLive?.start, end: yellow.goLive?.end },
+          draftRequired: yellow.revisionsIncluded > 0,
+          minLiveHours: 720,
+          tags: [],
+          handles: [],
+          captions: '',
+          links: [],
+          disclosures: '#ad'
+        }];
 
-    // Draft due date calc with floor
+    // Draft due with floor
     const draftDue = clampDraftDue(yellow.goLive?.start || new Date());
     deliverablesExpanded.forEach(d => {
       if (d.draftRequired && !d.draftDueDate) d.draftDueDate = draftDue;
@@ -729,7 +771,9 @@ exports.initiate = async (req, res) => {
       purple: {},
       grey,
       green,
-      isAssigned: 1,
+      // New flow:
+      isAssigned: (+type === 1) ? 1 : 0,   // set only on SEND
+      isContracted: 0,                     // set later when influencer accepts
       lastSentAt: new Date(),
       brandName: grey.brandProfile.legalName,
       brandAddress: grey.brandProfile.address,
@@ -738,29 +782,43 @@ exports.initiate = async (req, res) => {
       influencerHandle: grey.influencerProfile.handle
     };
 
-    // TYPE 0: generate PDF preview on the fly (not saved)
-    if (+type === 0) {
-      const tmp = new Contract(contractData);
+    // ---- TYPE 2: PREVIEW — ALWAYS STREAM PDF (no persistence) ----
+    if (+type === 2) {
+      const tmp = new Contract(contractData); // not saved
+      const tz = green.timezone || 'America/Los_Angeles';
       const tokens = buildTokenMap(tmp);
       const text = renderTemplate(green.legalTemplateText, tokens);
+      const html = renderContractHTML({
+        contract: tmp,
+        templateText: text,
+        renderedAt: formatDateTZ(new Date(), tz, 'MMM D, YYYY HH:mm z'),
+        isSnapshot: false
+      });
 
-      const doc = new PDFDocument({ margin: 50 });
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', 'attachment; filename=Contract-Preview.pdf');
-      doc.pipe(res);
-
-      doc.fontSize(18).text('Master Brand–Influencer Agreement', { align: 'center' });
-      doc.moveDown();
-      writeLongText(doc, text);
-
-      doc.end();
-      return;
+      try {
+        return await renderPDFWithPuppeteer({
+          html,
+          res,
+          filename: `Contract-Preview-${campaignId}.pdf`
+        });
+      } catch (e) {
+        // Fallback to PDFKit
+        const doc = new PDFDocument({ margin: 50 });
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename=Contract-Preview-${campaignId}.pdf`);
+        doc.pipe(res);
+        doc.fontSize(18).text('Master Brand–Influencer Agreement', { align: 'center' }).moveDown();
+        writeLongText(doc, text);
+        doc.end();
+        return;
+      }
     }
 
-    // Save to DB and update ApplyCampaign / Invitation like before
+    // ---- TYPE 1: SEND/SAVE ----
     const newContract = new Contract(contractData);
     await newContract.save();
 
+    // Side-effects (unchanged)
     let appRec = await ApplyCampaign.findOne({ campaignId });
     if (!appRec) {
       appRec = new ApplyCampaign({
@@ -769,18 +827,17 @@ exports.initiate = async (req, res) => {
         approved: [{ influencerId, name: contractData.influencerName }]
       });
     } else {
-      // ensure influencer is in approved list
       appRec.approved = [{ influencerId, name: contractData.influencerName }];
     }
     await appRec.save();
 
+    // NOTE: Do NOT set Invitation.isContracted here; that happens on acceptance now.
     await Invitation.findOneAndUpdate(
       { campaignId, influencerId },
-      { isContracted: 1 },
+      { $set: { /* isAssigned: 1 */ } }, // optional: only if your schema supports it
       { new: true }
-    ).catch(() => { });
+    ).catch(() => {});
 
-    // Audit
     await Contract.updateOne(
       { contractId: newContract.contractId },
       { $push: { audit: { type: 'INITIATED', role: 'brand', details: { campaignId } } } }
@@ -797,6 +854,8 @@ exports.initiate = async (req, res) => {
   }
 };
 
+
+
 /**
  * 2) INFLUENCER QUICK CONFIRM (PURPLE)
  * POST /contract/influencer-confirm
@@ -804,13 +863,63 @@ exports.initiate = async (req, res) => {
  */
 exports.influencerConfirm = async (req, res) => {
   try {
-    const { contractId, purple = {} } = req.body;
+    const { contractId, purple = {}, type = 1 } = req.body;
+
     if (!contractId) return res.status(400).json({ message: 'contractId is required' });
+    if (![1, 2].includes(+type)) {
+      return res.status(400).json({ message: 'Invalid type; must be 1 (confirm/save) or 2 (preview PDF)' });
+    }
 
     const contract = await Contract.findOne({ contractId });
     if (!contract) return res.status(404).json({ message: 'Contract not found' });
     if (contract.lockedAt) return res.status(400).json({ message: 'Contract is locked' });
 
+    // ---- TYPE 2: PREVIEW — ALWAYS STREAM PDF (no DB writes) ----
+    if (+type === 2) {
+      const tmp = new Contract(contract.toObject());
+      tmp.purple = { ...tmp.purple, ...purple };
+
+      const tz = tmp.green?.timezone || 'America/Los_Angeles';
+      const tokens = buildTokenMap(tmp);
+      const text = renderTemplate(tmp.green?.legalTemplateText || MASTER_TEMPLATE, tokens);
+      const html = renderContractHTML({
+        contract: tmp,
+        templateText: text,
+        renderedAt: formatDateTZ(new Date(), tz, 'MMM D, YYYY HH:mm z'),
+        isSnapshot: false
+      });
+
+      const y = tmp.yellow || {};
+      const brandName = tmp.grey?.brandProfile?.legalName || tmp.brandName || '—';
+      const inflName = tmp.grey?.influencerProfile?.legalName || tmp.influencerName || '—';
+      const windowStr = [
+        y?.goLive?.start ? formatDateTZ(y.goLive.start, tz, 'MMM D, YYYY') : null,
+        y?.goLive?.end ? formatDateTZ(y.goLive.end, tz, 'MMM D, YYYY') : null
+      ].filter(Boolean).join(' → ');
+
+      try {
+        return await renderPDFWithPuppeteer({
+          html,
+          res,
+          filename: `Contract-Influencer-Preview-${contractId}.pdf`,
+          headerLeft: `${y.campaignTitle || 'Campaign'} • ${windowStr || 'No window set'}`,
+          headerRight: `${brandName} ↔ ${inflName}`,
+          footerLeft: `Live Preview • Rendered ${formatDateTZ(new Date(), tz, 'MMM D, YYYY HH:mm z')}`
+        });
+      } catch (e) {
+        // Fallback to PDFKit
+        const doc = new PDFDocument({ margin: 50 });
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename=Contract-Influencer-Preview-${contractId}.pdf`);
+        doc.pipe(res);
+        doc.fontSize(18).text('Master Brand–Influencer Agreement', { align: 'center' }).moveDown();
+        writeLongText(doc, text);
+        doc.end();
+        return;
+      }
+    }
+
+    // ---- TYPE 1: CONFIRM/SAVE ----
     contract.purple = { ...contract.purple, ...purple };
     await contract.save();
 
@@ -877,17 +986,35 @@ exports.preview = async (req, res) => {
     const contract = await Contract.findOne({ contractId });
     if (!contract) return res.status(404).json({ message: 'Contract not found' });
 
+    const tz = contract.green?.timezone || 'America/Los_Angeles';
     const tokens = buildTokenMap(contract);
     const text = renderTemplate(contract.green?.legalTemplateText || MASTER_TEMPLATE, tokens);
+
+    const renderedAt = formatDateTZ(new Date(), tz, 'MMM D, YYYY HH:mm z');
     const html = renderContractHTML({
       contract,
       templateText: text,
-      renderedAt: formatDateTZ(new Date(), contract.green?.timezone || 'America/Los_Angeles', 'MMM D, YYYY HH:mm z'),
+      renderedAt,
       isSnapshot: false
     });
 
     if (String(pdf) === '1') {
-      return await renderPDFWithPuppeteer({ html, res, filename: `Contract-Preview-${contractId}.pdf` });
+      const y = contract.yellow || {};
+      const brand = contract.grey?.brandProfile?.legalName || contract.brandName || '—';
+      const infl = contract.grey?.influencerProfile?.legalName || contract.influencerName || '—';
+      const windowStr = [
+        y?.goLive?.start ? formatDateTZ(y.goLive.start, tz, 'MMM D, YYYY') : null,
+        y?.goLive?.end ? formatDateTZ(y.goLive.end, tz, 'MMM D, YYYY') : null
+      ].filter(Boolean).join(' → ');
+
+      return await renderPDFWithPuppeteer({
+        html,
+        res,
+        filename: `Contract-Preview-${contractId}.pdf`,
+        headerLeft: `${y.campaignTitle || 'Campaign'} • ${windowStr || 'No window set'}`,
+        headerRight: `${brand} ↔ ${infl}`,
+        footerLeft: `Live Preview • Rendered ${renderedAt}`
+      });
     }
 
     // Return HTML preview + tokens (handy for a web UI)
@@ -905,37 +1032,55 @@ exports.preview = async (req, res) => {
  * Body: contractId
  */
 exports.viewContractPdf = async (req, res) => {
+  let contract;
   try {
     const { contractId } = req.body;
     if (!contractId) return res.status(400).json({ message: 'contractId is required' });
 
-    const contract = await Contract.findOne({ contractId });
+    contract = await Contract.findOne({ contractId });
     if (!contract) return res.status(404).json({ message: 'Contract not found' });
 
+    const tz = contract.green?.timezone || 'America/Los_Angeles';
     const text = contract.lockedAt
       ? contract.renderedTextSnapshot
       : renderTemplate(contract.green?.legalTemplateText || MASTER_TEMPLATE, buildTokenMap(contract));
 
+    const renderedAt = formatDateTZ(new Date(), tz, 'MMM D, YYYY HH:mm z');
     const html = renderContractHTML({
       contract,
       templateText: text,
-      renderedAt: formatDateTZ(new Date(), contract.green?.timezone || 'America/Los_Angeles', 'MMM D, YYYY HH:mm z'),
+      renderedAt,
       isSnapshot: Boolean(contract.lockedAt)
     });
 
-    return await renderPDFWithPuppeteer({ html, res, filename: `Contract-${contractId}.pdf` });
+    const y = contract.yellow || {};
+    const brand = contract.grey?.brandProfile?.legalName || contract.brandName || '—';
+    const infl = contract.grey?.influencerProfile?.legalName || contract.influencerName || '—';
+    const windowStr = [
+      y?.goLive?.start ? formatDateTZ(y.goLive.start, tz, 'MMM D, YYYY') : null,
+      y?.goLive?.end ? formatDateTZ(y.goLive.end, tz, 'MMM D, YYYY') : null
+    ].filter(Boolean).join(' → ');
+
+    return await renderPDFWithPuppeteer({
+      html,
+      res,
+      filename: `Contract-${contractId}.pdf`,
+      headerLeft: `${y.campaignTitle || 'Campaign'} • ${windowStr || 'No window set'}`,
+      headerRight: `${brand} ↔ ${infl}`,
+      footerLeft: `${contract.lockedAt ? 'Signed Snapshot' : 'Live Preview'} • Rendered ${renderedAt}`
+    });
   } catch (err) {
     console.error('viewContractPdf error:', err);
 
     // -------- PDFKIT FALLBACK (if Chromium is unavailable) --------
     try {
       const templateText = renderTemplate(
-        contract.green?.legalTemplateText || MASTER_TEMPLATE,
-        buildTokenMap(contract)
+        (contract?.green?.legalTemplateText) || MASTER_TEMPLATE,
+        buildTokenMap(contract || {})
       );
       const doc = new PDFDocument({ margin: 50 });
       res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `inline; filename=Contract-${contractId}.pdf`);
+      res.setHeader('Content-Disposition', `inline; filename=Contract-${(contract?.contractId || 'Unknown')}.pdf`);
       doc.pipe(res);
       doc.fontSize(18).text('Master Brand–Influencer Agreement', { align: 'center' }).moveDown();
       writeLongText(doc, templateText);
@@ -974,16 +1119,19 @@ exports.sign = async (req, res) => {
       at: now
     };
 
-    // Mark legacy flag for compatibility
-    if (role === 'influencer') contract.isAccepted = 1;
+    // When influencer signs → accept + contracted
+    if (role === 'influencer') {
+      contract.isAccepted = 1;
+      contract.isContracted = 1;
+    }
 
     await contract.save();
     contract.audit.push({ type: 'SIGNED', role, details: { name, email } });
     await contract.save();
 
+    // Finalize on all three signatures
     const allSigned = contract.signatures.brand?.signed && contract.signatures.influencer?.signed && contract.signatures.collabglam?.signed;
     if (allSigned) {
-      // Lock + set Effective Date to last signature time in TZ (stored in UTC)
       const lastAt = [contract.signatures.brand.at, contract.signatures.influencer.at, contract.signatures.collabglam.at]
         .filter(Boolean)
         .sort((a, b) => new Date(a) - new Date(b))
@@ -992,12 +1140,10 @@ exports.sign = async (req, res) => {
       contract.effectiveDate = lastAt;
       contract.effectiveDateTimezone = contract.green?.timezone || 'America/Los_Angeles';
 
-      // Optional admin override
       if (effectiveDateOverride && req.user?.isAdmin) {
         contract.effectiveDateOverride = new Date(effectiveDateOverride);
       }
 
-      // Freeze snapshot of tokens/template
       const tokens = buildTokenMap(contract);
       const templateText = contract.green?.legalTemplateText || MASTER_TEMPLATE;
       const rendered = renderTemplate(templateText, tokens);
@@ -1013,12 +1159,22 @@ exports.sign = async (req, res) => {
       await contract.save();
     }
 
+    // Optional: reflect acceptance in Invitation
+    if (role === 'influencer') {
+      await Invitation.findOneAndUpdate(
+        { campaignId: contract.campaignId, influencerId: contract.influencerId },
+        { $set: { isContracted: 1 } },
+        { new: true }
+      ).catch(() => {});
+    }
+
     return res.json({ message: allSigned ? 'Signed & locked' : 'Signature recorded', contract });
   } catch (err) {
     console.error('sign error:', err);
     return res.status(500).json({ message: 'Internal server error' });
   }
 };
+
 
 /**
  * 7) RESEND (Brand) — clears reject flags, bumps resend count
@@ -1201,6 +1357,7 @@ exports.acceptContract = async (req, res) => {
 
     const contract = await Contract.findOne({ contractId });
     if (!contract) return res.status(404).json({ message: 'Contract not found' });
+    if (contract.lockedAt) return res.status(400).json({ message: 'Contract is locked' });
 
     // mark influencer signature
     contract.signatures.influencer = {
@@ -1210,11 +1367,22 @@ exports.acceptContract = async (req, res) => {
       email,
       at: new Date()
     };
+
+    // New flow: acceptance flips both flags
     contract.isAccepted = 1;
+    contract.isContracted = 1;
+
     await contract.save();
 
     contract.audit.push({ type: 'SIGNED', role: 'influencer', details: { name, email } });
     await contract.save();
+
+    // Optional: reflect in Invitation
+    await Invitation.findOneAndUpdate(
+      { campaignId: contract.campaignId, influencerId: contract.influencerId },
+      { $set: { isContracted: 1 } },
+      { new: true }
+    ).catch(() => {});
 
     return res.status(200).json({ message: 'Contract approved successfully', contract });
   } catch (err) {
