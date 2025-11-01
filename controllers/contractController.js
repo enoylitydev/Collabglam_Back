@@ -424,7 +424,7 @@ const MASTER_TEMPLATE = `This Master Brand–Influencer Agreement (the “Agreem
 17. Representations and Warranties
    a. Mutual. Each Party represents and warrants authority to enter into this Agreement and compliance with law, including sanctions and export controls.
    b. Influencer. Influencer represents and warrants originality of Deliverables (excluding Brand Assets), compliance with Schedule B and Channel policies, and that statements reflect honest opinions and experiences.
-   c. Brand. Brand represents and warrants that Brand Assets and required claims are lawful and non-infringing and that Brand will provide substantiation for objective claims.
+   c. Brand. Brand represents and warrants that Brand Assets and required claims are lawful and non-infringing and that Brand will provide substantiation for objective claims it requires.
 
 18. Indemnification
    a. By Influencer. Influencer shall defend, indemnify, and hold harmless Brand and CollabGlam against claims arising from infringement by Deliverables (excluding Brand Assets), violations of Schedule B, or Influencer’s breach.
@@ -656,11 +656,6 @@ function writeLongText(doc, text) {
 /**
  * 1) INITIATE (Brand fills YELLOW → System expands GREY)
  * POST /contract/initiate
- * Body: brandId, influencerId, campaignId, yellow: {...}, type (0=PDF stream, 1=save)
- */
-/**
- * 1) INITIATE (Brand fills YELLOW → System expands GREY)
- * POST /contract/initiate
  * Body: brandId, influencerId, campaignId, yellow: {...}, type (1=send/save, 2=preview PDF)
  */
 exports.initiate = async (req, res) => {
@@ -716,7 +711,8 @@ exports.initiate = async (req, res) => {
         contactName: influencer.contactName || influencer.name || '',
         email: influencer.email || '',
         country: influencer.country || '',
-        handle: influencer.handle || yellow.influencerHandle || ''
+        // UPDATED: lock to DB; brand cannot change influencer handle
+        handle: influencer.handle || ''
       },
       autoCalcs: {}
     };
@@ -733,7 +729,7 @@ exports.initiate = async (req, res) => {
           draftRequired: yellow.revisionsIncluded > 0,
           minLiveHours: 720,
           tags: [],
-          handles: [],
+          handles: [], // will enforce below
           captions: '',
           links: [],
           disclosures: '#ad'
@@ -746,6 +742,12 @@ exports.initiate = async (req, res) => {
     });
     grey.autoCalcs.firstDraftDue = draftDue;
     grey.autoCalcs.tokensExpandedAt = new Date();
+
+    // NEW: enforce influencer handle on all deliverables (brand cannot edit)
+    const infHandle = influencer.handle || '';
+    deliverablesExpanded.forEach(d => {
+      d.handles = infHandle ? [infHandle] : [];
+    });
 
     const green = {
       timezone: 'America/Los_Angeles',
@@ -874,10 +876,18 @@ exports.influencerConfirm = async (req, res) => {
     if (!contract) return res.status(404).json({ message: 'Contract not found' });
     if (contract.lockedAt) return res.status(400).json({ message: 'Contract is locked' });
 
+    // Ensure purple.dataAccess is always an object to avoid CastError
+    const purpleIncoming = purple || {};
+    const safePurple = {
+      dataAccess: {},
+      ...purpleIncoming,
+      dataAccess: purpleIncoming?.dataAccess || {},
+    };
+
     // ---- TYPE 2: PREVIEW — ALWAYS STREAM PDF (no DB writes) ----
     if (+type === 2) {
       const tmp = new Contract(contract.toObject());
-      tmp.purple = { ...tmp.purple, ...purple };
+      tmp.purple = { ...(tmp.purple || {}), ...safePurple };
 
       const tz = tmp.green?.timezone || 'America/Los_Angeles';
       const tokens = buildTokenMap(tmp);
@@ -920,10 +930,10 @@ exports.influencerConfirm = async (req, res) => {
     }
 
     // ---- TYPE 1: CONFIRM/SAVE ----
-    contract.purple = { ...contract.purple, ...purple };
+    contract.purple = { ...(contract.purple || {}), ...safePurple };
     await contract.save();
 
-    contract.audit.push({ type: 'PURPLE_CONFIRMED', role: 'influencer', details: purple });
+    contract.audit.push({ type: 'PURPLE_CONFIRMED', role: 'influencer', details: safePurple });
     await contract.save();
 
     return res.json({ message: 'Influencer confirmation saved', contract });
@@ -1129,13 +1139,18 @@ exports.sign = async (req, res) => {
     contract.audit.push({ type: 'SIGNED', role, details: { name, email } });
     await contract.save();
 
-    // Finalize on all three signatures
-    const allSigned = contract.signatures.brand?.signed && contract.signatures.influencer?.signed && contract.signatures.collabglam?.signed;
+    // Finalize when all signed
+    const allSigned =
+      contract.signatures.brand?.signed &&
+      contract.signatures.influencer?.signed &&
+      contract.signatures.collabglam?.signed;
+
     if (allSigned) {
-      const lastAt = [contract.signatures.brand.at, contract.signatures.influencer.at, contract.signatures.collabglam.at]
-        .filter(Boolean)
-        .sort((a, b) => new Date(a) - new Date(b))
-        .pop() || now;
+      const lastAt =
+        [contract.signatures.brand.at, contract.signatures.influencer.at, contract.signatures.collabglam.at]
+          .filter(Boolean)
+          .sort((a, b) => new Date(a) - new Date(b))
+          .pop() || now;
 
       contract.effectiveDate = lastAt;
       contract.effectiveDateTimezone = contract.green?.timezone || 'America/Los_Angeles';
@@ -1155,7 +1170,11 @@ exports.sign = async (req, res) => {
       contract.lockedAt = new Date();
       await contract.save();
 
-      contract.audit.push({ type: 'LOCKED', role: 'system', details: { effectiveDate: contract.effectiveDate, override: contract.effectiveDateOverride || null } });
+      contract.audit.push({
+        type: 'LOCKED',
+        role: 'system',
+        details: { effectiveDate: contract.effectiveDate, override: contract.effectiveDateOverride || null }
+      });
       await contract.save();
     }
 
@@ -1205,6 +1224,20 @@ exports.resendContract = async (req, res) => {
         contract.yellow[k] = yellowUpdates[k];
       }
     });
+
+    // NEW: re-enforce influencer handle across deliverables after any updates
+    const inf = await Influencer.findOne({ influencerId: contract.influencerId }, 'handle').lean();
+    const enforcedHandle = inf?.handle || '';
+    if (Array.isArray(contract.yellow?.deliverablesExpanded)) {
+      contract.yellow.deliverablesExpanded = contract.yellow.deliverablesExpanded.map(d => ({
+        ...d,
+        handles: enforcedHandle ? [enforcedHandle] : []
+      }));
+    }
+    // Keep GREY profile in sync as well
+    contract.grey = contract.grey || {};
+    contract.grey.influencerProfile = contract.grey.influencerProfile || {};
+    contract.grey.influencerProfile.handle = enforcedHandle;
 
     contract.isRejected = 0;
     contract.rejectedReason = '';
@@ -1305,7 +1338,7 @@ exports.sendOrGenerateContract = async (req, res) => {
         draftRequired: false,
         minLiveHours: 0,
         tags: [],
-        handles: [influencerHandle].filter(Boolean),
+        handles: [], // will be enforced in initiate
         captions: paymentTerms || '',
         links: [],
         disclosures: ''
