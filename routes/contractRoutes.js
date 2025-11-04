@@ -3,49 +3,55 @@ const express = require('express');
 const router = express.Router();
 
 const {
-  // NEW (color-owner flow)
+  // Core color-owner flow
   initiate,
+  viewed,
   influencerConfirm,
+  brandConfirm,
   adminUpdate,
+  finalize,
   preview,
   sign,
-
-  // Legacy-compatible + shared
-  sendOrGenerateContract,
-  getContract,
   viewContractPdf,
-  acceptContract,
-  rejectContract,
-  resendContract,
-  getRejectedContractsByBrand,
-  getRejectedContractsByInfluencer
+
+  // Scoped edits
+  brandUpdateFields,
+  influencerUpdateFields,
+
+  // Basic read
+  getContract,
+  reject
 } = require('../controllers/contractController');
 
 /**
  * v2 — Color-owner flow
  * YELLOW (Brand) → GREY (System) → PURPLE (Influencer) → GREEN (Admin) → Sign & Lock
  */
-router.post('/initiate', initiate);                   // Brand fills Yellow; System expands Grey
-router.post('/influencerConfirm', influencerConfirm); // Influencer quick 3-field confirm (Purple)
-router.post('/adminUpdate', adminUpdate);             // Admin-only Green edits + legal versioning
-router.get('/preview', preview);                      // Live preview JSON or ?pdf=1
-router.post('/sign', sign);                           // Signatures; locks on final signature
 
-/**
- * Shared/Final
- */
-router.post('/viewPdf', viewContractPdf);             // View final/locked PDF (or pre-lock live render)
+// Initiation & viewing
+router.post('/initiate', initiate);                      // Brand fills Yellow; System expands Grey
+router.post('/viewed', viewed);                          // Mark viewed
 
-/**
- * Legacy routes (kept for backward compatibility)
- */
-router.post('/sendContract', sendOrGenerateContract);
-router.post('/getContract', getContract);
-router.post('/view', viewContractPdf);
-router.post('/accept', acceptContract);
-router.post('/reject', rejectContract);
-router.post('/resend', resendContract);
-router.post('/rejectedByBrand', getRejectedContractsByBrand);
-router.post('/rejectedByInfluencer', getRejectedContractsByInfluencer);
+// Confirmations
+router.post('/influencer/confirm', influencerConfirm);   // Influencer quick confirm (Purple)
+router.post('/brand/confirm', brandConfirm);             // Brand confirm (optional gate)
+
+// Scoped edits (post-confirm)
+router.post('/brand/update', brandUpdateFields);         // Brand-only (Yellow)
+router.post('/influencer/update', influencerUpdateFields); // Influencer-only (Purple)
+
+// Admin
+router.post('/admin/update', adminUpdate);               // Admin-only Green edits + legal versioning
+router.post('/finalize', finalize);                      // Freeze for signatures (optional gate)
+
+// Preview & signing
+router.get('/preview', preview);                         // PDF preview of current state
+router.post('/sign', sign);                              // Signatures; locks when ALL parties have signed
+router.post('/viewPdf', viewContractPdf);                // View final/locked PDF (or pre-lock live render)
+
+// Basic read
+router.post('/getContract', getContract);                // Latest contracts for Brand & Influencer
+
+router.post('/reject', reject);
 
 module.exports = router;

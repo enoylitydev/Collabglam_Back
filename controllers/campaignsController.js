@@ -1174,52 +1174,40 @@ exports.getContractedCampaignsByInfluencer = async (req, res) => {
   }
 
   try {
+    // Consider these statuses as "contracted" and visible to the influencer
+    const CONTRACTED_STATUSES = ['sent', 'viewed', 'negotiation', 'finalize', 'signing', 'locked'];
+
+    // Pull every non-rejected contract for this influencer in a contracted-ish state
     const contracts = await Contract.find(
       {
         influencerId,
-        isAssigned: 1,
-        isRejected: { $ne: 1 }
+        isRejected: { $ne: 1 },
+        status: { $in: CONTRACTED_STATUSES }
+        // NOTE: we do NOT require isAssigned anymore to avoid filtering out older data
       },
-      'campaignId contractId feeAmount isAccepted'
+      'campaignId contractId feeAmount isAccepted status'
     ).lean();
 
-    const campaignIds = contracts.map((c) => c.campaignId.toString());
+    const campaignIds = [...new Set(contracts.map(c => String(c.campaignId)).filter(Boolean))];
     if (!campaignIds.length) {
       return res.json({ meta: { total: 0, page: +page, limit: +limit, totalPages: 0 }, campaigns: [] });
     }
 
-    const applyRecs = await ApplyCampaign.find(
-      { campaignId: { $in: campaignIds }, 'applicants.influencerId': influencerId },
-      'campaignId'
-    ).lean();
-    const appliedSet = new Set(applyRecs.map((r) => r.campaignId.toString()));
-    let remainingIds = campaignIds.filter((id) => appliedSet.has(id));
-    if (!remainingIds.length) {
-      return res.json({ meta: { total: 0, page: +page, limit: +limit, totalPages: 0 }, campaigns: [] });
-    }
-
-    const milestoneIds = await milestoneSetForInfluencer(influencerId, remainingIds);
-    remainingIds = remainingIds.filter((id) => !milestoneIds.has(id));
-    if (!remainingIds.length) {
-      return res.json({ meta: { total: 0, page: +page, limit: +limit, totalPages: 0 }, campaigns: [] });
-    }
-
-    const contractMap = new Map();
-    contracts.forEach((c) => {
-      const cid = c.campaignId.toString();
-      if (remainingIds.includes(cid)) {
-        contractMap.set(cid, {
-          contractId: c.contractId,
-          feeAmount: c.feeAmount,
-          isAccepted: c.isAccepted
-        });
-      }
+    // Build quick map from campaignId -> contract details
+    const contractByCampaign = new Map();
+    contracts.forEach(c => {
+      const key = String(c.campaignId);
+      contractByCampaign.set(key, {
+        contractId: c.contractId || null,
+        feeAmount: Number(c.feeAmount || 0),
+        isAccepted: c.isAccepted === 1 ? 1 : 0,
+        status: c.status
+      });
     });
 
-    const filter = { campaignsId: { $in: remainingIds } };
-    if (search?.trim()) {
-      filter.$or = buildSearchOr(search.trim());
-    }
+    // Query campaigns for these IDs (we keep it simple & inclusive)
+    const filter = { campaignsId: { $in: campaignIds } };
+    if (search?.trim()) filter.$or = buildSearchOr(search.trim());
 
     const pageNum = Math.max(1, parseInt(page, 10));
     const limNum = Math.max(1, parseInt(limit, 10));
@@ -1230,17 +1218,18 @@ exports.getContractedCampaignsByInfluencer = async (req, res) => {
       Campaign.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limNum).lean()
     ]);
 
-    const campaigns = rawCampaigns.map((c) => {
-      const details = contractMap.get(c.campaignsId.toString());
+    const campaigns = rawCampaigns.map(c => {
+      const key = String(c.campaignsId);
+      const details = contractByCampaign.get(key) || {};
       return {
         ...c,
+        // UI flags the table expects
         hasApplied: 1,
         isContracted: 1,
-        isAccepted: details?.isAccepted || 0,
-        hasMilestone: 0,
-        contractId: details?.contractId || null,
-        feeAmount: details?.feeAmount || 0,
-        canAccept: details?.isAccepted === 0
+        isAccepted: details.isAccepted || 0,
+        hasMilestone: c.hasMilestone ?? 0, // leave as-is if you store it, else default 0
+        contractId: details.contractId,
+        feeAmount: details.feeAmount
       };
     });
 
