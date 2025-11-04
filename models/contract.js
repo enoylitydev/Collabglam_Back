@@ -1,20 +1,36 @@
-// models/contract.js
+// ========================= models/contract.js (rewritten) =========================
 const mongoose = require('mongoose');
 const { v4: uuidv4 } = require('uuid');
 
+/**
+ * Canonical status machine
+ */
+const STATUS = [
+  'draft',       // created (not sent)
+  'sent',        // brand sent (influencer sees "Received")
+  'viewed',      // influencer opened
+  'negotiation', // edits/notes exchanged
+  'finalize',    // frozen for signatures (no further edits expected)
+  'signing',     // at least one signature captured
+  'locked'       // snapshot frozen as system of record (as soon as all required signatures captured)
+];
+
+// ---- Subschemas ----
 const SignatureSchema = new mongoose.Schema({
   signed: { type: Boolean, default: false },
   byUserId: { type: String },
   name: { type: String },
   email: { type: String },
-  at: { type: Date }
+  at: { type: Date },
+  sigImageDataUrl: { type: String }, // data:image/png;base64,...
+  sigImageBytes: { type: Number }
 }, { _id: false });
 
 const AuditEventSchema = new mongoose.Schema({
   at: { type: Date, default: Date.now },
   byUserId: { type: String, default: '' },
   role: { type: String, enum: ['brand','influencer','admin','system'], default: 'system' },
-  type: { type: String }, // e.g., INITIATED, PURPLE_CONFIRMED, ADMIN_UPDATED, SIGNED, LOCKED, RESENT, REJECTED
+  type: { type: String }, // INITIATED, VIEWED, EDITED, FINALIZED, SIGNED, LOCKED, ADMIN_UPDATED, BRAND_EDITED, INFLUENCER_EDITED
   details: { type: Object, default: {} }
 }, { _id: false });
 
@@ -44,20 +60,40 @@ const UsageBundleSchema = new mongoose.Schema({
   durationMonths: Number,
   geographies: [String],
   derivativeEditsAllowed: { type: Boolean, default: false },
-  spendCap: { type: Number }, // optional for paid
-  audienceRestrictions: { type: String } // text
+  spendCap: { type: Number },
+  audienceRestrictions: { type: String }
 }, { _id: false });
 
-const OwnerEnum = ['yellow','purple','grey','green'];
+const ConfirmationSchema = new mongoose.Schema({
+  confirmed: { type: Boolean, default: false },
+  byUserId: { type: String },
+  at: { type: Date }
+}, { _id: false });
 
+const LastEditSchema = new mongoose.Schema({
+  isEdit: { type: Boolean, default: false },
+  by: { type: String, enum: ['brand','influencer','admin','system',''], default: '' },
+  at: { type: Date },
+  fields: [String]
+}, { _id: false });
+
+// ---- Contract schema ----
 const contractSchema = new mongoose.Schema({
   contractId: { type: String, required: true, unique: true, default: uuidv4 },
   brandId: { type: String, required: true, ref: 'Brand' },
   influencerId: { type: String, required: true, ref: 'Influencer' },
   campaignId: { type: String, required: true, ref: 'Campaign' },
 
-  // ----- YELLOW (Brand fills small popup) -----
-  yellow: {
+  status: { type: String, enum: STATUS, default: 'draft' },
+
+  // Confirmations (quick ACKs—not signatures)
+  confirmations: {
+    brand: { type: ConfirmationSchema, default: () => ({ confirmed: false }) },
+    influencer: { type: ConfirmationSchema, default: () => ({ confirmed: false }) }
+  },
+
+  // ----- BRAND (was YELLOW) -----
+  brand: {
     campaignTitle: { type: String },
     platforms: [{ type: String, enum: ['YouTube','Instagram','TikTok'] }],
     goLive: {
@@ -69,12 +105,12 @@ const contractSchema = new mongoose.Schema({
     milestoneSplit: { type: String }, // e.g., "50/50"
     usageBundle: UsageBundleSchema,
     revisionsIncluded: { type: Number, default: 1 },
-    deliverablesPresetKey: { type: String }, // points to your preset id/key in app logic
-    deliverablesExpanded: [ExpandedDeliverableSchema] // system-generated from preset
+    deliverablesPresetKey: { type: String },
+    deliverablesExpanded: [ExpandedDeliverableSchema]
   },
 
-  // ----- PURPLE (Influencer quick confirm) -----
-  purple: {
+  // ----- INFLUENCER (was PURPLE) -----
+  influencer: {
     shippingAddress: { type: String },
     dataAccess: {
       insightsReadOnly: { type: Boolean, default: false },
@@ -84,8 +120,8 @@ const contractSchema = new mongoose.Schema({
     taxFormType: { type: String, enum: ['W-9','W-8BEN','W-8BEN-E'], default: 'W-9' }
   },
 
-  // ----- GREY (System pulls/auto-calcs) -----
-  grey: {
+  // ----- OTHER/System (was GREY) -----
+  other: {
     brandProfile: {
       legalName: String,
       address: String,
@@ -102,91 +138,84 @@ const contractSchema = new mongoose.Schema({
       handle: String
     },
     autoCalcs: {
-      firstDraftDue: Date, // 7 business days before go-live start with safety floor
-      tokensExpandedAt: { type: Date }
+      firstDraftDue: Date,               // 7 business days before go-live start (safety floor)
+      tokensExpandedAt: { type: Date }   // when tokens were last hydrated
     }
   },
 
-  // ----- GREEN (Admin controls) -----
-  green: {
+  // ----- ADMIN (was GREEN) -----
+  admin: {
     governingLaw: { type: String, default: 'California, United States' },
     arbitrationSeat: { type: String, default: 'San Francisco, CA' },
     timezone: { type: String, default: 'America/Los_Angeles' },
     jurisdiction: { type: String, default: 'USA' },
-    fxSource: { type: String, default: 'ECB' }, // Payments.FXSource
+    fxSource: { type: String, default: 'ECB' },
     defaultBrandReviewWindowBDays: { type: Number, default: 2 },
     extraRevisionFee: { type: Number, default: 0 },
     escrowAMLFlags: { type: String, default: '' },
 
     // Admin-locked legal text (versioned)
     legalTemplateVersion: { type: Number, default: 1 },
-    legalTemplateText: { type: String }, // current active template text
+    legalTemplateText: { type: String },
     legalTemplateHistory: [{
       version: Number,
       text: String,
       updatedAt: { type: Date, default: Date.now },
-      updatedBy: { type: String } // admin id/email
+      updatedBy: { type: String }
     }]
   },
 
-  // ----- Template + tokens -----
-  templateVersion: { type: Number, default: 1 }, // copy from green.legalTemplateVersion when frozen
-  templateTokensSnapshot: { type: Object, default: {} }, // frozen on lock
-  renderedTextSnapshot: { type: String }, // final rendered text at lock
+  // Template + tokens
+  templateVersion: { type: Number, default: 1 },
+  templateTokensSnapshot: { type: Object, default: {} },
+  renderedTextSnapshot: { type: String },
 
-  // Effective date handling
-  effectiveDate: { type: Date },               // set at final signature (last signature time in chosen TZ)
+  /**
+   * Effective date handling
+   * - requestedEffectiveDate: brand intent; used only in tokens/display
+   * - effectiveDate: system-of-record = later of all required signatures, unless override is set
+   */
+  requestedEffectiveDate: { type: Date },
+  requestedEffectiveDateTimezone: { type: String, default: 'America/Los_Angeles' },
+
+  effectiveDate: { type: Date },
   effectiveDateTimezone: { type: String, default: 'America/Los_Angeles' },
-  effectiveDateOverride: { type: Date },       // optional admin override (audit still holds actual timestamp)
-  lockedAt: { type: Date },                    // after final signature
+  effectiveDateOverride: { type: Date }, // admin-only override for rare legal cases
+  lockedAt: { type: Date },
 
-  // Operation mode for the creation flow:
-  // 1 = save (persist to DB), 2 = preview (do NOT persist; just generate/stream preview)
-  // NOTE: kept as Number (no enum) for backward-compat with any older records.
-  type: { type: Number, required: true, default: 1 },
-
-  isContracted: { type: Number, default: 0 },
-  
-  // Compatibility (from original)
-  isAssigned: { type: Number, default: 0 },
-  isAccepted: { type: Number, default: 0 },    // legacy; keep for compatibility
-  isRejected: { type: Number, default: 0 },
-  rejectedReason: { type: String, default: '' },
-  rejectedAt: { type: Date },
-  resendCount: { type: Number, default: 0 },
-  lastSentAt: { type: Date, default: Date.now },
-
-  // Signatures
+  // Signatures (tri-party)
   signatures: {
     brand: { type: SignatureSchema, default: () => ({}) },
     influencer: { type: SignatureSchema, default: () => ({}) },
     collabglam: { type: SignatureSchema, default: () => ({}) }
   },
 
+  // Edit tracking
+  isEdit: { type: Boolean, default: false },
+  isEditBy: { type: String, enum: ['brand','influencer','admin','system',''], default: '' },
+  editedFields: [String],
+  lastEdit: { type: LastEditSchema, default: () => ({ isEdit: false, by: '', fields: [] }) },
+
   // Audit trail
   audit: [AuditEventSchema],
 
-  // Minimal legacy fields (kept for old endpoints to function)
+  // Minimal denorm for headers/tokens (non-authoritative)
   brandName: { type: String },
   brandAddress: { type: String },
   influencerName: { type: String },
   influencerAddress: { type: String },
   influencerHandle: { type: String },
-  effectiveDateStr: { type: String }, // deprecated, prefer effectiveDate
-  deliverableDescription: { type: String }, // deprecated
-  feeAmount: { type: String }, // deprecated
 
   createdAt: { type: Date, default: Date.now }
 });
 
-// Safety: clear rejection flags on accept
-contractSchema.pre('save', function(next) {
-  if (this.isAccepted === 1 || this.signatures?.influencer?.signed || this.signatures?.brand?.signed) {
-    this.isRejected = 0;
-    this.rejectedReason = '';
-    this.rejectedAt = undefined;
-  }
-  next();
-});
+// Indexes
+contractSchema.index({ contractId: 1 }, { unique: true });
+contractSchema.index({ brandId: 1, influencerId: 1, campaignId: 1 });
+contractSchema.index({ lastSentAt: -1 }, { sparse: true }); // legacy-safe; not required elsewhere
+contractSchema.index({ lockedAt: 1 });
+contractSchema.index({ status: 1 });
+contractSchema.index({ 'audit.at': -1 });
 
 module.exports = mongoose.model('Contract', contractSchema);
+module.exports.STATUS = STATUS;

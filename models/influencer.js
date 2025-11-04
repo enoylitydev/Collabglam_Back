@@ -79,12 +79,11 @@ const audienceSchema = new mongoose.Schema(
 /* Kept full for socialProfiles.categories */
 const categoryLinkSchema = new mongoose.Schema(
   {
-    categoryId: { type: Number, required: true, index: true },
+    categoryId: { type: Number, required: true },
     categoryName: { type: String, required: true, trim: true },
     subcategoryId: {
       type: String,
       required: true,
-      index: true,
       match: [UUIDv4Regex, 'Invalid subcategoryId (must be UUID v4)']
     },
     subcategoryName: { type: String, required: true, trim: true }
@@ -98,7 +97,6 @@ const onboardingSubcategorySchema = new mongoose.Schema(
     subcategoryId: {
       type: String,
       required: true,
-      index: true,
       match: [UUIDv4Regex, 'Invalid subcategoryId (must be UUID v4)']
     },
     subcategoryName: { type: String, required: true, trim: true }
@@ -109,7 +107,7 @@ const onboardingSubcategorySchema = new mongoose.Schema(
 /* ----------------------- Social profile sub-schema ----------------------- */
 const socialProfileSchema = new mongoose.Schema(
   {
-    provider: { type: String, enum: ['youtube', 'tiktok', 'instagram'], required: true, index: true },
+    provider: { type: String, enum: ['youtube', 'tiktok', 'instagram'], required: true },
 
     // Identity
     userId: String,
@@ -190,7 +188,7 @@ const socialProfileSchema = new mongoose.Schema(
 /* -------------------------- Language sub-schema -------------------------- */
 const languageRefSchema = new mongoose.Schema(
   {
-    languageId: { type: mongoose.Schema.Types.ObjectId, ref: 'Language', required: true, index: true },
+    languageId: { type: mongoose.Schema.Types.ObjectId, ref: 'Language', required: true },
     code: { type: String, required: true },
     name: { type: String, required: true }
   },
@@ -257,7 +255,7 @@ const influencerSchema = new mongoose.Schema(
   {
     influencerId: { type: String, required: true, unique: true, default: uuidv4 },
     name: { type: String, required: function () { return this.otpVerified; } },
-    email: { type: String, required: true, unique: true, match: [emailRegex, 'Invalid email'] },
+    email: { type: String, required: true, match: [emailRegex, 'Invalid email'] },
     password: { type: String, minlength: 8, required: function () { return this.otpVerified; } },
     phone: { type: String, match: [phoneRegex, 'Invalid phone'], required: function () { return this.otpVerified; } },
 
