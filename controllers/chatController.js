@@ -95,7 +95,7 @@ exports.createRoom = async (req, res) => {
       { userId: influencerId, name: infl.name, role: 'influencer' }
     ].sort(sortParticipants);
 
-    // find if both ids already present
+    // Check if the chat room already exists
     let room = await ChatRoom.findOne({
       'participants.userId': { $all: [brandId, influencerId] },
       'participants.2': { $exists: false } // ensure it's a 1-1 room
@@ -103,7 +103,9 @@ exports.createRoom = async (req, res) => {
 
     let message;
     if (!room) {
+      // Create a new room
       room = new ChatRoom({ participants });
+
       await room.save();
       message = 'Chat room created';
     } else {
@@ -116,6 +118,7 @@ exports.createRoom = async (req, res) => {
     return res.status(500).json({ message: 'Internal server error' });
   }
 };
+
 
 /* -----------------------------------------------------------
    2) List all rooms for a user

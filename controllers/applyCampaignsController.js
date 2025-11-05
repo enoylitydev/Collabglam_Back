@@ -1,10 +1,21 @@
-// controllers/applyCampaingsController.js
+// controllers/ApplyCampaignsController.js
 
-const ApplyCampaing = require('../models/applyCampaign');
+const ApplyCampaign = require('../models/applyCampaign');
 const Campaign = require('../models/campaign');
 const Influencer = require('../models/influencer');
 const Contract = require('../models/contract');
+const Category = require('../models/categories');
 
+async function buildSubToParentNameMap() {
+  const rows = await Category.find({}, 'name subcategories').lean();
+  const map = new Map();
+  for (const r of rows) {
+    for (const s of (r.subcategories || [])) {
+      map.set(String(s.subcategoryId), r.name);
+    }
+  }
+  return map;
+}
 
 exports.applyToCampaign = async (req, res) => {
   const { campaignId, influencerId } = req.body;
@@ -37,9 +48,9 @@ exports.applyToCampaign = async (req, res) => {
 
     // ── 1) record the application ──────────────────────────────────
     const name = inf.name;
-    let record = await ApplyCampaing.findOne({ campaignId });
+    let record = await ApplyCampaign.findOne({ campaignId });
     if (!record) {
-      record = new ApplyCampaing({
+      record = new ApplyCampaign({
         campaignId,
         applicants: [{ influencerId, name }]
       });
@@ -77,7 +88,7 @@ exports.applyToCampaign = async (req, res) => {
 };
 
 
-// POST /applyCampaings/list
+// POST /ApplyCampaigns/list
 // body: { campaignId: String }
 exports.getListByCampaign = async (req, res) => {
   const {
@@ -86,7 +97,7 @@ exports.getListByCampaign = async (req, res) => {
     limit = 10,
     search,
     sortField,
-    sortOrder = 0
+    sortOrder = 0 // 0 = asc, 1 = desc
   } = req.body;
 
   if (!campaignId) {
@@ -94,11 +105,11 @@ exports.getListByCampaign = async (req, res) => {
   }
 
   try {
-    // 1) Application record
-    const record = await ApplyCampaing.findOne({ campaignId });
+    // 1) Application record (we’ll use its createdAt)
+    const record = await ApplyCampaign.findOne({ campaignId }).lean();
     if (!record) {
       return res.status(200).json({
-        meta: { total: 0, page, limit, totalPages: 0 },
+        meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 },
         applicantCount: 0,
         isContracted: 0,
         contractId: null,
@@ -106,70 +117,149 @@ exports.getListByCampaign = async (req, res) => {
       });
     }
 
-    // 2) Build influencer filter
+    // 2) subcategory -> parent category name map
+    const subIdToCatName = await (async function buildSubToParentNameMap() {
+      const rows = await Category.find({}, 'name subcategories').lean();
+      const map = new Map();
+      for (const r of rows) {
+        for (const s of (r.subcategories || [])) {
+          map.set(String(s.subcategoryId), r.name);
+        }
+      }
+      return map;
+    })();
+
+    // 3) Filter
     const influencerIds = record.applicants.map(a => a.influencerId);
     const filter = { influencerId: { $in: influencerIds } };
     if (search?.trim()) {
       filter.name = { $regex: search.trim(), $options: 'i' };
     }
 
-    // 3) Pagination / sorting
-    const total = await Influencer.countDocuments(filter);
-    const skip  = (Math.max(1, page) - 1) * Math.max(1, limit);
-    let query   = Influencer.find(filter).select('-password -__v');
+    // 4) Fetch only needed fields (NOTE: no influencer.createdAt here)
+    const projection = [
+      'influencerId',
+      'name',
+      'primaryPlatform',
+      'onboarding.categoryName',
+      'onboarding.subcategories',
+      'socialProfiles.provider',
+      'socialProfiles.handle',
+      'socialProfiles.username',
+      'socialProfiles.followers'
+    ].join(' ');
 
-    if (sortField) {
-      const dir = sortOrder === 1 ? -1 : 1;
-      query = query.sort({ [sortField]: dir });
-    }
+    const influencersRaw = await Influencer.find(filter).select(projection).lean();
 
-    const influencers = await query.skip(skip).limit(Math.max(1, limit)).lean();
-
-    // 4) Load ALL contracts for this campaign
+    // 5) Contracts for flags
     const contracts = await Contract.find({ campaignId }).lean();
-
-    // campaign‑level info (optional)
     const isContractedCampaign = contracts.length > 0 ? 1 : 0;
-
-    // Build per‑influencer maps
-    const contractByInf   = new Map();
-    contracts.forEach(c => contractByInf.set(c.influencerId, c));
-
-    // Approved influencer (from ApplyCampaing doc)
+    const contractByInf = new Map(contracts.map(c => [String(c.influencerId), c]));
     const approvedId = record.approved?.[0]?.influencerId || null;
 
-    // 5) Annotate each influencer row
-    const annotated = influencers.map(inf => {
-      const c = contractByInf.get(inf.influencerId);
+    // Helper: choose profile for handle
+    function pickProfileForHandle(profiles = [], primary) {
+      if (!Array.isArray(profiles) || profiles.length === 0) return null;
+      if (primary) {
+        const hit = profiles.find(p => p?.provider === primary);
+        if (hit) return hit;
+      }
+      return profiles
+        .slice()
+        .sort((a, b) => (Number(b?.followers) || 0) - (Number(a?.followers) || 0))[0] || null;
+    }
 
-      const isAssigned = approvedId === inf.influencerId ? 1 : 0;
+    // 6) Shape response rows — use ApplyCampaign.createdAt
+    const applicationCreatedAt = record.createdAt || record._id?.getTimestamp?.() || null;
+
+    const condensed = influencersRaw.map(inf => {
+      // category name
+      let categoryName = inf?.onboarding?.categoryName || '';
+      if (!categoryName && Array.isArray(inf?.onboarding?.subcategories)) {
+        for (const s of inf.onboarding.subcategories) {
+          const cat = subIdToCatName.get(String(s?.subcategoryId));
+          if (cat) { categoryName = cat; break; }
+        }
+      }
+
+      // audience size
+      const audienceSize = Array.isArray(inf.socialProfiles)
+        ? inf.socialProfiles.reduce((sum, p) => sum + (Number(p?.followers) || 0), 0)
+        : 0;
+
+      // handle
+      const chosen = pickProfileForHandle(inf.socialProfiles, inf.primaryPlatform);
+      let handle = (chosen?.handle || chosen?.username || '').trim() || null;
+      if (handle && !handle.startsWith('@')) handle = '@' + handle;
+
+      // contract flags
+      const c = contractByInf.get(String(inf.influencerId));
+      const isAssigned   = approvedId === inf.influencerId ? 1 : 0;
       const isContracted = c ? 1 : 0;
       const isAccepted   = c?.isAccepted === 1 ? 1 : 0;
       const isRejected   = c?.isRejected === 1 ? 1 : 0;
 
       return {
-        ...inf,
+        influencerId: inf.influencerId,
+        name: inf.name || '',
+        primaryPlatform: inf.primaryPlatform || null,
+        handle,
+        category: categoryName || null,
+        audienceSize,
+        createdAt: applicationCreatedAt, // 👈 use ApplyCampaign.createdAt
+
         isAssigned,
         isContracted,
-        contractId:     c?.contractId || null,
-        feeAmount:      c?.feeAmount  || 0,
+        contractId: c?.contractId || null,
+        feeAmount: c?.feeAmount || 0,
         isAccepted,
         isRejected,
         rejectedReason: isRejected ? (c?.rejectedReason || '') : ''
       };
     });
 
+    // 7) Sorting (supports createdAt)
+    const dir = sortOrder === 1 ? -1 : 1;
+    if (sortField) {
+      const allowed = new Set(['name', 'primaryPlatform', 'category', 'audienceSize', 'handle', 'createdAt']);
+      if (allowed.has(sortField)) {
+        condensed.sort((a, b) => {
+          const av = a[sortField];
+          const bv = b[sortField];
+
+          if (sortField === 'createdAt') {
+            const ta = av ? new Date(av).getTime() : 0;
+            const tb = bv ? new Date(bv).getTime() : 0;
+            return dir * (ta - tb);
+          }
+          if (typeof av === 'number' && typeof bv === 'number') {
+            return dir * (av - bv);
+          }
+          return dir * String(av ?? '').localeCompare(String(bv ?? ''));
+        });
+      }
+    }
+
+    // 8) Pagination
+    const pageNum = Math.max(1, parseInt(page, 10));
+    const limNum  = Math.max(1, parseInt(limit, 10));
+    const start   = (pageNum - 1) * limNum;
+    const end     = start + limNum;
+
+    const total = condensed.length;
+    const paged = condensed.slice(start, end);
+
     return res.status(200).json({
       meta: {
         total,
-        page: Number(page),
-        limit: Number(limit),
-        totalPages: Math.ceil(total / limit)
+        page: pageNum,
+        limit: limNum,
+        totalPages: Math.ceil(total / limNum)
       },
       applicantCount: record.applicants.length,
-      isContracted:   isContractedCampaign,   // campaign-level flag (keep if you need it)
-      contractId:     null,                   // no single global contract anymore
-      influencers:    annotated
+      isContracted: isContractedCampaign,
+      contractId: null,
+      influencers: paged
     });
 
   } catch (err) {
@@ -178,6 +268,10 @@ exports.getListByCampaign = async (req, res) => {
   }
 };
 
+
+
+
+
 exports.approveInfluencer = async (req, res) => {
   const { campaignId, influencerId } = req.body;
   if (!campaignId || !influencerId) {
@@ -185,7 +279,7 @@ exports.approveInfluencer = async (req, res) => {
   }
 
   try {
-    const record = await ApplyCampaing.findOne({ campaignId });
+    const record = await ApplyCampaign.findOne({ campaignId });
     if (!record) {
       return res.status(404).json({ message: 'No applications found for this campaign' });
     }

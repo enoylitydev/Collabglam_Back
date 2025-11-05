@@ -2,7 +2,6 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
-const { edgeNgrams, charNgrams } = require('../utils/searchTokens');
 
 /* --------------------------------- Utils --------------------------------- */
 const emailRegex = /^[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,6}$/;
@@ -76,15 +75,28 @@ const audienceSchema = new mongoose.Schema(
   { _id: false }
 );
 
-/* ----------------------- Category link sub-schema ----------------------- */
+/* ----------------------- Category link sub-schema ------------------------ */
+/* Kept full for socialProfiles.categories */
 const categoryLinkSchema = new mongoose.Schema(
   {
-    categoryId: { type: Number, required: true, index: true },
+    categoryId: { type: Number, required: true },
     categoryName: { type: String, required: true, trim: true },
     subcategoryId: {
       type: String,
       required: true,
-      index: true,
+      match: [UUIDv4Regex, 'Invalid subcategoryId (must be UUID v4)']
+    },
+    subcategoryName: { type: String, required: true, trim: true }
+  },
+  { _id: false }
+);
+
+/* -------- NEW: Minimal sub-schema for onboarding.subcategories ---------- */
+const onboardingSubcategorySchema = new mongoose.Schema(
+  {
+    subcategoryId: {
+      type: String,
+      required: true,
       match: [UUIDv4Regex, 'Invalid subcategoryId (must be UUID v4)']
     },
     subcategoryName: { type: String, required: true, trim: true }
@@ -95,7 +107,7 @@ const categoryLinkSchema = new mongoose.Schema(
 /* ----------------------- Social profile sub-schema ----------------------- */
 const socialProfileSchema = new mongoose.Schema(
   {
-    provider: { type: String, enum: ['youtube', 'tiktok', 'instagram'], required: true, index: true },
+    provider: { type: String, enum: ['youtube', 'tiktok', 'instagram'], required: true },
 
     // Identity
     userId: String,
@@ -114,8 +126,8 @@ const socialProfileSchema = new mongoose.Schema(
     // State/meta
     isPrivate: Boolean,
     isVerified: Boolean,
-    accountType: String, // instagram
-    secUid: String,      // tiktok
+    accountType: String,
+    secUid: String,
 
     // Localization
     city: String,
@@ -141,9 +153,9 @@ const socialProfileSchema = new mongoose.Schema(
     totalViews: Number,
 
     // Bio/tags/brand
-    bio: String, // also maps from "description"
+    bio: String,
 
-    // ✨ Categories (taxonomy)
+    // Full category link objects (unchanged)
     categories: { type: [categoryLinkSchema], default: [] },
 
     hashtags: [{ tag: String, weight: Number }],
@@ -173,32 +185,31 @@ const socialProfileSchema = new mongoose.Schema(
   { _id: false, timestamps: true }
 );
 
-/* -------------------------- NEW: Language sub-schema -------------------------- */
+/* -------------------------- Language sub-schema -------------------------- */
 const languageRefSchema = new mongoose.Schema(
   {
-    languageId: { type: mongoose.Schema.Types.ObjectId, ref: 'Language', required: true, index: true },
+    languageId: { type: mongoose.Schema.Types.ObjectId, ref: 'Language', required: true },
     code: { type: String, required: true },
     name: { type: String, required: true }
   },
   { _id: false }
 );
 
-/* -------------------------- NEW: Onboarding sub-schema ------------------------ */
+/* -------------------------- Onboarding sub-schema ------------------------ */
 const onboardingSchema = new mongoose.Schema(
   {
     // STEP 4.1
-    formats: { type: [String], default: [] },                // ['Reels/Shorts', 'Stories', ...]
+    formats: { type: [String], default: [] },
     budgets: { type: [{ format: String, range: String }], default: [] },
     projectLength: { type: String },
     capacity: { type: String },
 
     // STEP 4.2
-    // Store BOTH the numeric category id (from Category.id) and the readable name.
-    categoryId: { type: Number, index: true },               // <-- changed: numeric category id
-    categoryName: { type: String, trim: true },              // <-- added: stored category name
+    categoryId: { type: Number, index: true },
+    categoryName: { type: String, trim: true },
 
-    // Store full subcategory link objects (id + name + parent category info)
-    subcategories: { type: [categoryLinkSchema], default: [] }, // <-- changed: used to be [String]
+    // ✅ Minimal subcategory objects (no categoryId/categoryName)
+    subcategories: { type: [onboardingSubcategorySchema], default: [] },
 
     collabTypes: { type: [String], default: [] },
     allowlisting: { type: Boolean, default: false },
@@ -206,8 +217,6 @@ const onboardingSchema = new mongoose.Schema(
 
     // STEP 4.3
     selectedPrompts: { type: [{ group: String, prompt: String }], default: [] },
-
-    // Strongly typed answers: one row per prompt
     promptAnswers: {
       type: [{ group: String, prompt: String, answer: String }],
       default: []
@@ -215,7 +224,6 @@ const onboardingSchema = new mongoose.Schema(
   },
   { _id: false }
 );
-
 
 /* -------------------------- Payment sub-schema --------------------------- */
 const paymentSchema = new mongoose.Schema(
@@ -247,34 +255,28 @@ const influencerSchema = new mongoose.Schema(
   {
     influencerId: { type: String, required: true, unique: true, default: uuidv4 },
     name: { type: String, required: function () { return this.otpVerified; } },
-    email: { type: String, required: true, unique: true, match: [emailRegex, 'Invalid email'] },
+    email: { type: String, required: true, match: [emailRegex, 'Invalid email'] },
     password: { type: String, minlength: 8, required: function () { return this.otpVerified; } },
     phone: { type: String, match: [phoneRegex, 'Invalid phone'], required: function () { return this.otpVerified; } },
 
-    // Multi-platform storage
     primaryPlatform: { type: String, enum: ['youtube', 'tiktok', 'instagram', 'other', null], default: null },
     socialProfiles: { type: [socialProfileSchema], default: [] },
 
-    // Minimal audience/location
     countryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Country', required: function () { return this.otpVerified; } },
     country: { type: String, required: function () { return this.otpVerified; } },
     callingId: { type: mongoose.Schema.Types.ObjectId, ref: 'Country', required: function () { return this.otpVerified; } },
     callingcode: { type: String, required: function () { return this.otpVerified; } },
 
-    // NEW basics from Step 1
     city: { type: String, trim: true },
     dateOfBirth: { type: Date },
     gender: { type: String, enum: ['Female', 'Male', 'Non-binary', 'Prefer not to say', ''], default: '' },
 
-    // NEW languages
     languages: { type: [languageRefSchema], default: [] },
 
-    // NEW quick onboarding
     onboarding: { type: onboardingSchema, default: {} },
 
     createdAt: { type: Date, default: Date.now },
 
-    // OTP / reset / subscription / payments
     otpCode: { type: String },
     otpExpiresAt: { type: Date },
     otpVerified: { type: Boolean, default: false },
@@ -317,6 +319,9 @@ influencerSchema.index({ 'languages.languageId': 1 });
 influencerSchema.index({ 'onboarding.categoryId': 1 });
 influencerSchema.index({ city: 1 });
 
+// Lookup by selected subcategories in onboarding
+influencerSchema.index({ 'onboarding.subcategories.subcategoryId': 1 });
+
 /* -------------------- Only one default payment method -------------------- */
 influencerSchema.pre('validate', function (next) {
   if (Array.isArray(this.paymentMethods)) {
@@ -326,7 +331,6 @@ influencerSchema.pre('validate', function (next) {
   }
   next();
 });
-
 
 influencerSchema.pre('save', async function (next) {
   if (!this.isModified('password')) return next();

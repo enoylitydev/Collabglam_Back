@@ -1,41 +1,20 @@
-const express            = require('express');
-const { body }           = require('express-validator');
-const router             = express.Router();
-const mediaKitController = require('../controllers/mediaKitController');
+// routes/mediakitRoutes.js
+const express = require('express');
+const router = express.Router();
 
-/* -------------- validation helpers (express-validator) --------- */
-const requireInfluencerId = body('influencerId')
-  .notEmpty()
-  .withMessage('influencerId is required');
+const {
+  createByInfluencer,
+  updateMediaKit,
+  getAllMediaKits
+} = require('../controllers/mediaKitController');
 
-/* -----------   ALL ROUTES USE POST & BODY PAYLOAD  ------------- */
-router.post(
-  '/influencer',
-  requireInfluencerId,
-  mediaKitController.getInfluencerDetails
-);
+// create from influencer (POST)
+router.post('/influencer', createByInfluencer);
 
-router.post(
-  '/list',
-  mediaKitController.getAllMediaKits               // no body needed
-);
+// update mediakit (POST)
+router.post('/update', updateMediaKit);
 
-router.post(
-  '/get',
-  requireInfluencerId,
-  mediaKitController.getMediaKitById
-);
-
-router.post(
-  '/create',
-  requireInfluencerId,
-  mediaKitController.createMediaKit
-);
-
-router.post(
-  '/update',
-  requireInfluencerId,
-  mediaKitController.updateMediaKit
-);
+// list mediakits (compact view)
+router.get('/getAll', getAllMediaKits);
 
 module.exports = router;
