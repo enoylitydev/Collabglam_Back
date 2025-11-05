@@ -1,9 +1,10 @@
 const Dispute = require('../models/dispute');
 const Campaign = require('../models/campaign');
 const Admin = require('../models/admin');
+const Brand = require('../models/brand');
+const Influencer = require('../models/influencer');
 
 const ALLOWED_STATUSES = new Set(['open', 'in_review', 'awaiting_user', 'resolved', 'rejected']);
-const ALLOWED_PRIORITIES = new Set(['low', 'medium', 'high']);
 
 function getAuth(req) {
   const u = req.user || {}; // set by dashboardController.verifyToken
@@ -41,15 +42,11 @@ exports.createDispute = async (req, res) => {
       influencerId,
       subject,
       description = '',
-      priority = 'medium',
       related
     } = req.body || {};
 
     if (!brandId || !influencerId || !subject) {
       return res.status(400).json({ message: 'brandId, influencerId and subject are required' });
-    }
-    if (!ALLOWED_PRIORITIES.has(String(priority))) {
-      return res.status(400).json({ message: 'Invalid priority' });
     }
 
     // Enforce identity consistency: user can only create for self
@@ -74,7 +71,6 @@ exports.createDispute = async (req, res) => {
       influencerId,
       subject: String(subject).trim(),
       description: String(description || ''),
-      priority: String(priority),
       related: related && typeof related === 'object' ? {
         type: related.type || 'other',
         id: related.id || null
@@ -99,7 +95,8 @@ exports.listMine = async (req, res) => {
       page = 1,
       limit = 10,
       status,
-      search = ''
+      search = '',
+      appliedBy
     } = req.body || {};
 
     const p = Math.max(1, parseInt(page, 10) || 1);
@@ -113,10 +110,15 @@ exports.listMine = async (req, res) => {
       const re = new RegExp(String(search).trim(), 'i');
       filter.$or = [{ subject: re }, { description: re }];
     }
+    if (appliedBy && typeof appliedBy === 'string') {
+      const role = String(appliedBy).toLowerCase();
+      if (role === 'brand') filter['createdBy.role'] = 'Brand';
+      if (role === 'influencer') filter['createdBy.role'] = 'Influencer';
+    }
 
     const total = await Dispute.countDocuments(filter);
     const rows = await Dispute.find(filter)
-      .select('disputeId subject description priority status campaignId brandId influencerId assignedTo comments createdAt updatedAt')
+      .select('disputeId subject description status campaignId brandId influencerId assignedTo comments createdAt updatedAt')
       .sort({ createdAt: -1 })
       .skip((p - 1) * l)
       .limit(l)
@@ -155,6 +157,33 @@ exports.getById = async (req, res) => {
     return res.status(200).json({ dispute: d });
   } catch (err) {
     console.error('Error in getById:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// Admin-friendly detail view: follows the project's relaxed admin auth policy
+exports.adminGetById = async (req, res) => {
+  const me = requireAdmin(req, res);
+  if (!me) return;
+
+  const { id } = req.params;
+  if (!id) return res.status(400).json({ message: 'Dispute id is required' });
+
+  try {
+    const d = await Dispute.findOne({ disputeId: id }).lean();
+    if (!d) return res.status(404).json({ message: 'Dispute not found' });
+    // Enrich with brand/influencer names for admin UX
+    try {
+      const [b, inf] = await Promise.all([
+        d.brandId ? Brand.findOne({ brandId: d.brandId }).select('brandId name').lean() : null,
+        d.influencerId ? Influencer.findOne({ influencerId: d.influencerId }).select('influencerId name').lean() : null,
+      ]);
+      d.brandName = b?.name || null;
+      d.influencerName = inf?.name || null;
+    } catch {}
+    return res.status(200).json({ dispute: d });
+  } catch (err) {
+    console.error('Error in adminGetById:', err);
     return res.status(500).json({ message: 'Internal server error' });
   }
 };
@@ -208,6 +237,55 @@ exports.addComment = async (req, res) => {
   }
 };
 
+// Admin-friendly add comment (relaxed auth)
+exports.adminAddComment = async (req, res) => {
+  const me = requireAdmin(req, res);
+  if (!me) return;
+
+  const { id } = req.params;
+  if (!id) return res.status(400).json({ message: 'Dispute id is required' });
+
+  try {
+    const { text, attachments = [] } = req.body || {};
+    if (!text || !String(text).trim()) {
+      return res.status(400).json({ message: 'text is required' });
+    }
+
+    const d = await Dispute.findOne({ disputeId: id });
+    if (!d) return res.status(404).json({ message: 'Dispute not found' });
+
+    if (d.status === 'resolved' || d.status === 'rejected') {
+      return res.status(400).json({ message: 'Cannot comment on a finalized dispute' });
+    }
+
+    const sanitized = Array.isArray(attachments) ? attachments
+      .filter(a => a && a.url)
+      .map(a => ({
+        url: a.url,
+        originalName: a.originalName || null,
+        mimeType: a.mimeType || null,
+        size: typeof a.size === 'number' ? a.size : undefined
+      }))
+      : [];
+
+    const authorRole = me.role === 'Unknown' ? 'Admin' : me.role;
+    const authorId = me.id || req.body?.adminId || 'system';
+
+    d.comments.push({
+      authorRole,
+      authorId,
+      text: String(text),
+      attachments: sanitized
+    });
+    await d.save();
+
+    return res.status(200).json({ message: 'Comment added' });
+  } catch (err) {
+    console.error('Error in adminAddComment:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
 exports.adminList = async (req, res) => {
   const me = requireAdmin(req, res);
   if (!me) return;
@@ -220,7 +298,8 @@ exports.adminList = async (req, res) => {
       campaignId,
       brandId,
       influencerId,
-      search = ''
+      search = '',
+      appliedBy
     } = req.body || {};
 
     const p = Math.max(1, parseInt(page, 10) || 1);
@@ -235,6 +314,11 @@ exports.adminList = async (req, res) => {
       const re = new RegExp(String(search).trim(), 'i');
       filter.$or = [{ subject: re }, { description: re }];
     }
+    if (appliedBy && typeof appliedBy === 'string') {
+      const role = String(appliedBy).toLowerCase();
+      if (role === 'brand') filter['createdBy.role'] = 'Brand';
+      if (role === 'influencer') filter['createdBy.role'] = 'Influencer';
+    }
 
     const total = await Dispute.countDocuments(filter);
     const rows = await Dispute.find(filter)
@@ -243,7 +327,30 @@ exports.adminList = async (req, res) => {
       .limit(l)
       .lean();
 
-    return res.status(200).json({ page: p, limit: l, total, totalPages: Math.ceil(total / l), disputes: rows });
+    // Enrich with brand/influencer names for list view
+    try {
+      const brandIds = Array.from(new Set(rows.map(r => r.brandId).filter(Boolean))).map(String);
+      const influencerIds = Array.from(new Set(rows.map(r => r.influencerId).filter(Boolean))).map(String);
+
+      const [brands, influencers] = await Promise.all([
+        brandIds.length ? Brand.find({ brandId: { $in: brandIds } }).select('brandId name').lean() : [],
+        influencerIds.length ? Influencer.find({ influencerId: { $in: influencerIds } }).select('influencerId name').lean() : [],
+      ]);
+
+      const brandMap = new Map((brands || []).map(b => [String(b.brandId), b.name]));
+      const infMap = new Map((influencers || []).map(i => [String(i.influencerId), i.name]));
+
+      const enriched = rows.map(r => ({
+        ...r,
+        brandName: brandMap.get(String(r.brandId)) || null,
+        influencerName: infMap.get(String(r.influencerId)) || null,
+      }));
+
+      return res.status(200).json({ page: p, limit: l, total, totalPages: Math.ceil(total / l), disputes: enriched });
+    } catch {
+      // In case enrichment fails, still return base rows
+      return res.status(200).json({ page: p, limit: l, total, totalPages: Math.ceil(total / l), disputes: rows });
+    }
   } catch (err) {
     console.error('Error in adminList:', err);
     return res.status(500).json({ message: 'Internal server error' });
@@ -268,7 +375,9 @@ exports.adminUpdateStatus = async (req, res) => {
 
     d.status = String(status);
     if (resolution && String(resolution).trim()) {
-      d.comments.push({ authorRole: me.role, authorId: me.id, text: String(resolution) });
+      const authorRole = me.role === 'Unknown' ? 'Admin' : me.role;
+      const authorId = me.id || req.body?.adminId || 'system';
+      d.comments.push({ authorRole, authorId, text: String(resolution) });
     }
     await d.save();
 

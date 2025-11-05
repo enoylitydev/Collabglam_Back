@@ -9,7 +9,9 @@ const {
   addComment,
   adminList,
   adminUpdateStatus,
-  adminAssign
+  adminAssign,
+  adminGetById,
+  adminAddComment
 } = require('../controllers/disputeController');
 
 // Brand/Influencer endpoints (require auth)
@@ -20,7 +22,9 @@ router.post('/:id/comment', verifyToken, addComment);
 
 // Admin endpoints (no auth required per project request)
 router.post('/admin/list', adminList);
+router.get('/admin/:id', adminGetById);
 router.post('/admin/update-status', adminUpdateStatus);
 router.post('/admin/assign', adminAssign);
+router.post('/admin/:id/comment', adminAddComment);
 
 module.exports = router;
