@@ -1,36 +1,34 @@
-// ========================= models/contract.js (rewritten) =========================
+// models/contract.js
+// CollabGlam — Contract Model (rewritten + resend support)
+// - Adds persisted helper fields (lastSentAt, isAssigned, isAccepted, isRejected, feeAmount, currency)
+// - Adds resend lineage fields (resendIteration, resendOf, supersededBy, resentAt)
+// - Adds virtual flags + toJSON transform to expose booleans:
+//   isBrandInitiate, isInfluencerconfirm, isrejected, isResend, and a statusFlags group
+
 const mongoose = require('mongoose');
 const { v4: uuidv4 } = require('uuid');
 
-/**
- * Canonical status machine
- */
+// Canonical status machine
 const STATUS = [
-  'draft',       // created (not sent)
-  'sent',        // brand sent (influencer sees "Received")
-  'viewed',      // influencer opened
-  'negotiation', // edits/notes exchanged
-  'finalize',    // frozen for signatures (no further edits expected)
-  'signing',     // at least one signature captured
-  'locked'       // snapshot frozen as system of record (as soon as all required signatures captured)
+  'draft', 'sent', 'viewed', 'negotiation', 'finalize', 'signing', 'locked', 'rejected'
 ];
 
-// ---- Subschemas ----
+// Subschemas
 const SignatureSchema = new mongoose.Schema({
   signed: { type: Boolean, default: false },
   byUserId: { type: String },
   name: { type: String },
   email: { type: String },
   at: { type: Date },
-  sigImageDataUrl: { type: String }, // data:image/png;base64,...
+  sigImageDataUrl: { type: String },
   sigImageBytes: { type: Number }
 }, { _id: false });
 
 const AuditEventSchema = new mongoose.Schema({
   at: { type: Date, default: Date.now },
   byUserId: { type: String, default: '' },
-  role: { type: String, enum: ['brand','influencer','admin','system'], default: 'system' },
-  type: { type: String }, // INITIATED, VIEWED, EDITED, FINALIZED, SIGNED, LOCKED, ADMIN_UPDATED, BRAND_EDITED, INFLUENCER_EDITED
+  role: { type: String, enum: ['brand', 'influencer', 'admin', 'system'], default: 'system' },
+  type: { type: String },
   details: { type: Object, default: {} }
 }, { _id: false });
 
@@ -39,10 +37,7 @@ const ExpandedDeliverableSchema = new mongoose.Schema({
   quantity: Number,
   format: String,
   durationSec: Number,
-  postingWindow: {
-    start: Date,
-    end: Date
-  },
+  postingWindow: { start: Date, end: Date },
   draftRequired: { type: Boolean, default: false },
   draftDueDate: Date,
   minLiveHours: Number,
@@ -56,7 +51,7 @@ const ExpandedDeliverableSchema = new mongoose.Schema({
 }, { _id: false });
 
 const UsageBundleSchema = new mongoose.Schema({
-  type: { type: String, enum: ['Organic','Paid Digital','Custom'], default: 'Organic' },
+  type: { type: String, enum: ['Organic', 'Paid Digital', 'Custom'], default: 'Organic' },
   durationMonths: Number,
   geographies: [String],
   derivativeEditsAllowed: { type: Boolean, default: false },
@@ -72,12 +67,12 @@ const ConfirmationSchema = new mongoose.Schema({
 
 const LastEditSchema = new mongoose.Schema({
   isEdit: { type: Boolean, default: false },
-  by: { type: String, enum: ['brand','influencer','admin','system',''], default: '' },
+  by: { type: String, enum: ['brand', 'influencer', 'admin', 'system', ''], default: '' },
   at: { type: Date },
   fields: [String]
 }, { _id: false });
 
-// ---- Contract schema ----
+// Contract schema
 const contractSchema = new mongoose.Schema({
   contractId: { type: String, required: true, unique: true, default: uuidv4 },
   brandId: { type: String, required: true, ref: 'Brand' },
@@ -86,30 +81,26 @@ const contractSchema = new mongoose.Schema({
 
   status: { type: String, enum: STATUS, default: 'draft' },
 
-  // Confirmations (quick ACKs—not signatures)
   confirmations: {
     brand: { type: ConfirmationSchema, default: () => ({ confirmed: false }) },
     influencer: { type: ConfirmationSchema, default: () => ({ confirmed: false }) }
   },
 
-  // ----- BRAND (was YELLOW) -----
+  // Brand data
   brand: {
     campaignTitle: { type: String },
-    platforms: [{ type: String, enum: ['YouTube','Instagram','TikTok'] }],
-    goLive: {
-      start: { type: Date },
-      end: { type: Date }
-    },
+    platforms: [{ type: String, enum: ['YouTube', 'Instagram', 'TikTok'] }],
+    goLive: { start: { type: Date }, end: { type: Date } },
     totalFee: { type: Number },
     currency: { type: String, default: 'USD' },
-    milestoneSplit: { type: String }, // e.g., "50/50"
+    milestoneSplit: { type: String },
     usageBundle: UsageBundleSchema,
     revisionsIncluded: { type: Number, default: 1 },
     deliverablesPresetKey: { type: String },
     deliverablesExpanded: [ExpandedDeliverableSchema]
   },
 
-  // ----- INFLUENCER (was PURPLE) -----
+  // Influencer data
   influencer: {
     shippingAddress: { type: String },
     dataAccess: {
@@ -117,33 +108,16 @@ const contractSchema = new mongoose.Schema({
       whitelisting: { type: Boolean, default: false },
       sparkAds: { type: Boolean, default: false }
     },
-    taxFormType: { type: String, enum: ['W-9','W-8BEN','W-8BEN-E'], default: 'W-9' }
+    taxFormType: { type: String, enum: ['W-9', 'W-8BEN', 'W-8BEN-E'], default: 'W-9' }
   },
 
-  // ----- OTHER/System (was GREY) -----
   other: {
-    brandProfile: {
-      legalName: String,
-      address: String,
-      contactName: String,
-      email: String,
-      country: String
-    },
-    influencerProfile: {
-      legalName: String,
-      address: String,
-      contactName: String,
-      email: String,
-      country: String,
-      handle: String
-    },
-    autoCalcs: {
-      firstDraftDue: Date,               // 7 business days before go-live start (safety floor)
-      tokensExpandedAt: { type: Date }   // when tokens were last hydrated
-    }
+    brandProfile: { legalName: String, address: String, contactName: String, email: String, country: String },
+    influencerProfile: { legalName: String, address: String, contactName: String, email: String, country: String, handle: String },
+    autoCalcs: { firstDraftDue: Date, tokensExpandedAt: { type: Date } }
   },
 
-  // ----- ADMIN (was GREEN) -----
+  // Admin/System data
   admin: {
     governingLaw: { type: String, default: 'California, United States' },
     arbitrationSeat: { type: String, default: 'San Francisco, CA' },
@@ -154,15 +128,9 @@ const contractSchema = new mongoose.Schema({
     extraRevisionFee: { type: Number, default: 0 },
     escrowAMLFlags: { type: String, default: '' },
 
-    // Admin-locked legal text (versioned)
     legalTemplateVersion: { type: Number, default: 1 },
     legalTemplateText: { type: String },
-    legalTemplateHistory: [{
-      version: Number,
-      text: String,
-      updatedAt: { type: Date, default: Date.now },
-      updatedBy: { type: String }
-    }]
+    legalTemplateHistory: [{ version: Number, text: String, updatedAt: { type: Date, default: Date.now }, updatedBy: { type: String } }]
   },
 
   // Template + tokens
@@ -170,17 +138,17 @@ const contractSchema = new mongoose.Schema({
   templateTokensSnapshot: { type: Object, default: {} },
   renderedTextSnapshot: { type: String },
 
-  /**
-   * Effective date handling
-   * - requestedEffectiveDate: brand intent; used only in tokens/display
-   * - effectiveDate: system-of-record = later of all required signatures, unless override is set
-   */
+  // Display preferences
+  dateFormatShort: { type: String, default: 'MMMM D, YYYY' },
+  dateFormatLong: { type: String, default: 'Do MMMM YYYY' },
+  locale: { type: String, default: 'en-US' },
+
+  // Effective date handling
   requestedEffectiveDate: { type: Date },
   requestedEffectiveDateTimezone: { type: String, default: 'America/Los_Angeles' },
-
   effectiveDate: { type: Date },
   effectiveDateTimezone: { type: String, default: 'America/Los_Angeles' },
-  effectiveDateOverride: { type: Date }, // admin-only override for rare legal cases
+  effectiveDateOverride: { type: Date },
   lockedAt: { type: Date },
 
   // Signatures (tri-party)
@@ -192,7 +160,7 @@ const contractSchema = new mongoose.Schema({
 
   // Edit tracking
   isEdit: { type: Boolean, default: false },
-  isEditBy: { type: String, enum: ['brand','influencer','admin','system',''], default: '' },
+  isEditBy: { type: String, enum: ['brand', 'influencer', 'admin', 'system', ''], default: '' },
   editedFields: [String],
   lastEdit: { type: LastEditSchema, default: () => ({ isEdit: false, by: '', fields: [] }) },
 
@@ -206,16 +174,149 @@ const contractSchema = new mongoose.Schema({
   influencerAddress: { type: String },
   influencerHandle: { type: String },
 
+  // --- Persisted convenience fields used in controllers ---
+  lastSentAt: { type: Date },
+  isAssigned: { type: Number, default: 0 },
+  isAccepted: { type: Number, default: 0 },
+  isRejected: { type: Number, default: 0 },
+  feeAmount: { type: Number, default: 0 },
+  currency: { type: String, default: 'USD' },
+
+  // --- Resend lineage / meta ---
+  resendIteration: { type: Number, default: 0 }, // 0 = original, 1+ = nth resend
+  resendOf: { type: String },                    // parent contractId
+  supersededBy: { type: String },                // child contractId
+  resentAt: { type: Date },                      // when parent was resent
+
   createdAt: { type: Date, default: Date.now }
 });
 
 // Indexes
 contractSchema.index({ contractId: 1 }, { unique: true });
 contractSchema.index({ brandId: 1, influencerId: 1, campaignId: 1 });
-contractSchema.index({ lastSentAt: -1 }, { sparse: true }); // legacy-safe; not required elsewhere
+contractSchema.index({ lastSentAt: -1 });
 contractSchema.index({ lockedAt: 1 });
 contractSchema.index({ status: 1 });
 contractSchema.index({ 'audit.at': -1 });
+contractSchema.index({ resendOf: 1 });
+contractSchema.index({ supersededBy: 1 });
 
-module.exports = mongoose.model('Contract', contractSchema);
+// -------- Convenience Flags --------
+function computeStatusFlags(doc) {
+  const s = doc?.status || 'draft';
+
+  const viewedOrBeyond = ['viewed', 'negotiation', 'finalize', 'signing', 'locked'].includes(s);
+  const finalizeOrBeyond = ['finalize', 'signing', 'locked'].includes(s);
+  const signingOrBeyond = ['signing', 'locked'].includes(s);
+  const locked = s === 'locked';
+
+  const brandConfirmed = !!doc?.confirmations?.brand?.confirmed;
+  const influencerConfirmed = !!doc?.confirmations?.influencer?.confirmed;
+
+  const bothSigned = !!(
+    doc?.signatures?.brand?.signed &&
+    doc?.signatures?.influencer?.signed &&
+    doc?.signatures?.collabglam?.signed
+  );
+
+  const rejected = s === 'rejected' || doc?.isRejected === 1;
+
+  const isResendChild = !!(doc?.resendIteration > 0 || doc?.resendOf);
+
+  return {
+    isDraft: s === 'draft',
+    isSent: s === 'sent',
+    isViewed: viewedOrBeyond,
+    isNegotiation: s === 'negotiation',
+    isFinalized: finalizeOrBeyond,
+    isSigning: signingOrBeyond,
+    isLocked: locked,
+    isRejected: rejected,
+
+    isBrandInitiate: s !== 'draft',
+    isBrandConfirmed: brandConfirmed,
+    isInfluencerConfirm: influencerConfirmed,
+    isBothSigned: bothSigned,
+
+    canEditBrandFields: !locked && !bothSigned && influencerConfirmed,
+    canEditInfluencerFields: !locked && !bothSigned && influencerConfirmed,
+    canSignBrand: !locked && brandConfirmed,
+    canSignInfluencer: !locked && influencerConfirmed,
+
+    isResendChild
+  };
+}
+
+contractSchema.virtual('flags').get(function () { return computeStatusFlags(this); });
+
+contractSchema.set('toJSON', {
+  virtuals: true,
+  versionKey: false,
+  transform(doc, ret) {
+    delete ret._id;
+    const f = computeStatusFlags(doc);
+
+    // grouped
+    ret.statusFlags = f;
+
+    // Aliases requested
+    ret.isBrandInitiate = f.isBrandInitiate;
+    ret.isInfluencerconfirm = f.isInfluencerConfirm; // exact casing requested
+    ret.isrejected = f.isRejected;          // exact casing requested
+
+    // Friendly camelCase too
+    ret.isInfluencerConfirm = f.isInfluencerConfirm;
+    ret.isRejected = f.isRejected;
+
+    // Edit/signing flags
+    ret.isDraft = f.isDraft;
+    ret.isSent = f.isSent;
+    ret.isViewed = f.isViewed;
+    ret.isNegotiation = f.isNegotiation;
+    ret.isFinalized = f.isFinalized;
+    ret.isSigning = f.isSigning;
+    ret.isLocked = f.isLocked;
+    ret.isBrandConfirmed = f.isBrandConfirmed;
+    ret.isBothSigned = f.isBothSigned;
+    ret.canEditBrandFields = f.canEditBrandFields;
+    ret.canEditInfluencerFields = f.canEditInfluencerFields;
+    ret.canSignBrand = f.canSignBrand;
+    ret.canSignInfluencer = f.canSignInfluencer;
+
+    // Resend flags
+    ret.isResend = f.isResendChild;
+    ret.isresend = f.isResendChild;
+
+    return ret;
+  }
+});
+
+// -------- Statics (unchanged behavior) --------
+contractSchema.statics.getSupportedCurrencies = function () {
+  try { const data = require('../data/currencies.json'); return Object.keys(data || {}); } catch (e) { return []; }
+};
+contractSchema.statics.getCurrenciesMeta = function () {
+  try { return require('../data/currencies.json'); } catch (e) { return {}; }
+};
+contractSchema.statics.isCurrencySupported = function (code) {
+  if (!code) return false; const c = String(code).toUpperCase(); const data = this.getCurrenciesMeta(); return Boolean(data && data[c]);
+};
+contractSchema.statics.getTimezones = function () {
+  try { return require('../data/timezones.json'); } catch (e) { return []; }
+};
+contractSchema.statics.findTimezone = function (key) {
+  if (!key) return null; const list = this.getTimezones(); const q = String(key).toLowerCase();
+  return list.find(t =>
+    (t.value && t.value.toLowerCase() === q) ||
+    (t.abbr && t.abbr.toLowerCase() === q) ||
+    (Array.isArray(t.utc) && t.utc.some(u => u.toLowerCase() === q)) ||
+    (t.text && t.text.toLowerCase().includes(q))
+  ) || null;
+};
+contractSchema.statics.isTimezoneSupported = function (key) { return Boolean(this.findTimezone(key)); };
+
+// Export
+const Contract = mongoose.model('Contract', contractSchema);
+Contract.STATUS = STATUS; // attached for convenience
+module.exports = Contract;
 module.exports.STATUS = STATUS;

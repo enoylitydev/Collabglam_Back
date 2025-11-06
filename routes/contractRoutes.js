@@ -20,7 +20,13 @@ const {
 
   // Basic read
   getContract,
-  reject
+  reject,
+  // lists
+  listTimezones,
+  getTimezone,
+  listCurrencies,
+  getCurrency,
+  resend,
 } = require('../controllers/contractController');
 
 /**
@@ -54,4 +60,10 @@ router.post('/getContract', getContract);                // Latest contracts for
 
 router.post('/reject', reject);
 
+// lists
+router.get('/timezones', listTimezones);
+router.get('/timezone', getTimezone);
+router.get('/currencies', listCurrencies);
+router.get('/currency', getCurrency);
+router.post('/resend', resend);
 module.exports = router;
