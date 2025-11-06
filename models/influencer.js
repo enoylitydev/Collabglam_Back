@@ -257,18 +257,18 @@ const influencerSchema = new mongoose.Schema(
     name: { type: String, required: function () { return this.otpVerified; } },
     email: { type: String, required: true, match: [emailRegex, 'Invalid email'] },
     password: { type: String, minlength: 8, required: function () { return this.otpVerified; } },
-    phone: { type: String, match: [phoneRegex, 'Invalid phone'], required: function () { return this.otpVerified; } },
+    // phone: { type: String, match: [phoneRegex, 'Invalid phone'], required: function () { return this.otpVerified; } },
 
     primaryPlatform: { type: String, enum: ['youtube', 'tiktok', 'instagram', 'other', null], default: null },
     socialProfiles: { type: [socialProfileSchema], default: [] },
 
     countryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Country', required: function () { return this.otpVerified; } },
     country: { type: String, required: function () { return this.otpVerified; } },
-    callingId: { type: mongoose.Schema.Types.ObjectId, ref: 'Country', required: function () { return this.otpVerified; } },
-    callingcode: { type: String, required: function () { return this.otpVerified; } },
+    // callingId: { type: mongoose.Schema.Types.ObjectId, ref: 'Country', required: function () { return this.otpVerified; } },
+    // callingcode: { type: String, required: function () { return this.otpVerified; } },
 
-    city: { type: String, trim: true },
-    dateOfBirth: { type: Date },
+    // city: { type: String, trim: true },
+    // dateOfBirth: { type: Date },
     gender: { type: String, enum: ['Female', 'Male', 'Non-binary', 'Prefer not to say', ''], default: '' },
 
     languages: { type: [languageRefSchema], default: [] },
