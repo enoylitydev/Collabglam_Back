@@ -1,9 +1,29 @@
 // controllers/mediakitController.js
 const Influencer = require('../models/influencer');
 const MediaKit = require('../models/mediaKit');
+const { refreshMediaKitForInfluencer } = require('../jobs/mediakitSync');
 
-/* ------------------------------- Helpers -------------------------------- */
+// ------------------------------- Helpers --------------------------------
 
+// Helper to pick username based on primary platform and profiles
+function pickUsername(primaryPlatform, profiles = []) {
+  if (!Array.isArray(profiles) || profiles.length === 0) return null;
+  if (primaryPlatform) {
+    const match = profiles.find(p => p.provider === primaryPlatform);
+    if (match?.username) return match.username;
+  }
+  return profiles.find(p => p?.username)?.username ?? null;
+}
+
+// Helper to sanitize MediaKit objects (remove sensitive fields)
+function sanitizeMediaKit(docOrObj) {
+  const obj = docOrObj?.toObject ? docOrObj.toObject() : { ...docOrObj };
+  // redact sensitive snapshot fields from responses
+  delete obj.password;
+  return obj;
+}
+
+// Helper to build snapshot from Influencer document
 function buildSnapshotFromInfluencer(infDoc) {
   const src = infDoc.toObject({ getters: false, virtuals: false, depopulate: true });
 
@@ -25,28 +45,12 @@ function buildSnapshotFromInfluencer(infDoc) {
   return snapshot;
 }
 
-function pickUsername(primaryPlatform, profiles = []) {
-  if (!Array.isArray(profiles) || profiles.length === 0) return null;
-  if (primaryPlatform) {
-    const match = profiles.find(p => p.provider === primaryPlatform);
-    if (match?.username) return match.username;
-  }
-  return profiles.find(p => p?.username)?.username ?? null;
-}
-
-function sanitizeMediaKit(docOrObj) {
-  const obj = docOrObj?.toObject ? docOrObj.toObject() : { ...docOrObj };
-  // redact sensitive snapshot fields from responses
-  delete obj.password;
-  return obj;
-}
-
-/* ------------------------------- Controllers ---------------------------- */
+// ------------------------------- Controllers ----------------------------
 
 // POST /api/mediakits/by-influencer
 // Body: { influencerId }
-// If mediakit exists -> return it (no error).
-// If not -> create from influencer snapshot and return it.
+// If a MediaKit exists -> return it (no error).
+// If not -> create from Influencer snapshot and return it.
 async function createByInfluencer(req, res) {
   try {
     const { influencerId } = req.body || {};
@@ -57,16 +61,19 @@ async function createByInfluencer(req, res) {
     const influencer = await Influencer.findOne({ influencerId });
     if (!influencer) return res.status(404).json({ error: 'Influencer not found' });
 
-    // If a MediaKit already exists for this influencer, just "open" (return) it.
+    // If a MediaKit already exists for this influencer, refresh it from the latest Influencer data before returning
     const existing = await MediaKit.findOne({ influencerId });
     if (existing) {
+      const refreshed = await refreshMediaKitForInfluencer(influencerId);
+      // If for some reason it wasn't updated (e.g., deleted between calls), fall back to the existing MediaKit
+      const doc = refreshed || existing;
       return res.status(200).json({
-        mediaKitId: existing.mediaKitId,
-        mediaKit: sanitizeMediaKit(existing)
+        mediaKitId: doc.mediaKitId,
+        mediaKit: sanitizeMediaKit(doc)
       });
     }
 
-    // Otherwise, build a fresh snapshot from Influencer and create.
+    // Otherwise, build a fresh snapshot from Influencer and create a new MediaKit
     const snapshot = buildSnapshotFromInfluencer(influencer);
     const mediaKit = await MediaKit.create({
       influencerId,
@@ -87,7 +94,8 @@ async function createByInfluencer(req, res) {
 }
 
 // POST /api/mediakits/update
-// Body: { mediaKitId, ...fieldsToUpdate } — fully flexible update
+// Body: { mediaKitId, ...fieldsToUpdate }
+// Fully flexible update of MediaKit
 async function updateMediaKit(req, res) {
   try {
     const { mediaKitId, ...rest } = req.body || {};
@@ -140,8 +148,35 @@ async function getAllMediaKits(_req, res) {
   }
 }
 
+// POST /api/mediakits/sync/by-influencer
+// Body: { influencerId }
+// Manually refreshes an existing MediaKit from the latest Influencer data
+async function syncByInfluencer(req, res) {
+  try {
+    const { influencerId } = req.body || {};
+    if (!influencerId) {
+      return res.status(400).json({ error: 'influencerId is required in body' });
+    }
+
+    const updated = await refreshMediaKitForInfluencer(influencerId);
+    if (!updated) {
+      return res.status(404).json({ error: 'MediaKit not found for this influencerId' });
+    }
+
+    return res.json({
+      message: 'MediaKit synced from Influencer successfully',
+      mediaKitId: updated.mediaKitId,
+      mediaKit: sanitizeMediaKit(updated)
+    });
+  } catch (err) {
+    console.error('Sync MediaKit error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
 module.exports = {
   createByInfluencer,
   updateMediaKit,
-  getAllMediaKits
+  getAllMediaKits,
+  syncByInfluencer
 };
