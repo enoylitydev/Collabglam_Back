@@ -73,5 +73,6 @@ router.post('/accepted-inf', campaignController.getAcceptedInfluencers);
 router.post('/contracted', campaignController.getContractedCampaignsByInfluencer);
 router.post('/filter', campaignController.getCampaignsByFilter);
 
+router.post('/rejectedbyinf', campaignController.getRejectedCampaignsByInfluencer);
 
 module.exports = router;

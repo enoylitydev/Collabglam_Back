@@ -1381,3 +1381,124 @@ exports.getCampaignsByFilter = async (req, res) => {
     return res.status(500).json({ message: 'Internal server error while filtering campaigns.' });
   }
 };
+
+// ===============================
+//  INFLUENCER: REJECTED CAMPAIGNS (excludes any that were later resent)
+//      • POST body: { influencerId, search?, page?, limit? }
+// ===============================
+exports.getRejectedCampaignsByInfluencer = async (req, res) => {
+  const { influencerId, search = '', page = 1, limit = 10 } = req.body || {};
+  if (!influencerId) return res.status(400).json({ message: 'influencerId is required' });
+
+  try {
+    // Step 1: find rejected contracts for this influencer
+    const candFilter = {
+      influencerId: String(influencerId),
+      $or: [{ status: 'rejected' }, { isRejected: 1 }],
+      // coarse exclude of parents already marked with a successor
+      $and: [
+        {
+          $or: [
+            { supersededBy: { $exists: false } },
+            { supersededBy: null },
+            { supersededBy: '' }
+          ]
+        }
+      ]
+    };
+
+    const candidates = await Contract.find(
+      candFilter,
+      'contractId campaignId feeAmount createdAt audit supersededBy'
+    ).lean();
+
+    if (!candidates.length) {
+      return res.json({
+        meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 },
+        campaigns: []
+      });
+    }
+
+    // Step 2: exclude any rejected contract that has a child resend
+    const candidateIds = candidates.map(c => String(c.contractId));
+    const children = await Contract.find({ resendOf: { $in: candidateIds } }, 'resendOf').lean();
+    const parentsWithChildren = new Set(children.map(ch => String(ch.resendOf)));
+
+    const finalRejected = candidates.filter(c => !parentsWithChildren.has(String(c.contractId)));
+    if (!finalRejected.length) {
+      return res.json({
+        meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 },
+        campaigns: []
+      });
+    }
+
+    // Step 3: if multiple rejected entries per campaign, keep the latest
+    const latestByCampaign = new Map(); // campaignId -> contract
+    for (const c of finalRejected) {
+      const key = String(c.campaignId);
+      const prev = latestByCampaign.get(key);
+      if (!prev || new Date(c.createdAt) > new Date(prev.createdAt)) {
+        latestByCampaign.set(key, c);
+      }
+    }
+
+    const campaignIds = Array.from(latestByCampaign.keys());
+
+    // Step 4: fetch campaigns (+ optional text search) and paginate
+    const campFilter = { campaignsId: { $in: campaignIds } };
+    if (typeof search === 'string' && search.trim()) {
+      campFilter.$or = buildSearchOr(search.trim());
+    }
+
+    const allMatched = await Campaign.find(campFilter).sort({ createdAt: -1 }).lean();
+    const total = allMatched.length;
+
+    const pageNum = Math.max(1, parseInt(page, 10));
+    const perPage = Math.max(1, parseInt(limit, 10));
+    const start = (pageNum - 1) * perPage;
+    const slice = allMatched.slice(start, start + perPage);
+
+    // Step 5: decorate campaigns with rejection details and UI flags
+    const campaigns = slice.map((camp) => {
+      const parent = latestByCampaign.get(String(camp.campaignsId)) || {};
+      let rejectedAt = parent.createdAt || null;
+      let reason = '';
+
+      if (Array.isArray(parent.audit)) {
+        const rejEvents = parent.audit.filter(e => e?.type === 'REJECTED');
+        if (rejEvents.length) {
+          // pick most recent REJECTED event if multiple
+          rejEvents.sort((a, b) => new Date(a.at || 0) - new Date(b.at || 0));
+          const last = rejEvents[rejEvents.length - 1];
+          rejectedAt = last.at || rejectedAt;
+          reason = (last.details && last.details.reason) || '';
+        }
+      }
+
+      return {
+        ...camp,
+        hasApplied: 1,
+        isContracted: 0,
+        isAccepted: 0,
+        isRejected: 1,
+        contractId: parent.contractId || null,
+        feeAmount: Number(parent.feeAmount || 0),
+        rejectedAt,
+        rejectionReason: reason
+      };
+    });
+
+    return res.json({
+      meta: {
+        total,
+        page: pageNum,
+        limit: perPage,
+        totalPages: Math.ceil(total / perPage)
+      },
+      campaigns
+    });
+  } catch (err) {
+    console.error('Error in getRejectedCampaignsByInfluencer:', err);
+    return res.status(500).json({ message: 'Internal server error while fetching rejected campaigns.' });
+  }
+};
