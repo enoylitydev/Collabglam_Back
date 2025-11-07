@@ -196,11 +196,52 @@ exports.requestOtpInfluencer = async (req, res) => {
     );
 
     try {
+      const subject = 'CollabGlam email verification';
+
+      const plainText = `Dear Customer,
+
+We require your confirmation that your CollabGlam ${normalizedRole} account setup has been completed and that access is working as expected.
+
+Please provide this Email Verification Code ${code} to confirm your email. The code expires in 10 minutes.
+
+Thank you,
+Team CollabGlam`;
+
+      const html = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="x-apple-disable-message-reformatting">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CollabGlam email verification</title>
+    <style>
+      body { margin:0; padding:0; background:#ffffff; font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; color:#111; }
+      .wrap { max-width:620px; margin:0 auto; padding:24px 20px; }
+      .brand { font-size:16px; color:#666; }
+      .content p { line-height:1.6; margin:0 0 14px; }
+      .code { display:inline-block; font-size:18px; letter-spacing:2px; padding:8px 12px; border:1px solid #ddd; border-radius:6px; background:#f7f7f7; }
+      .footer { margin-top:18px; color:#444; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="brand">CollabGlam Notifications</div>
+      <div class="content" style="margin-top:14px">
+        <p>Dear Customer,</p>
+        <p>We require your confirmation that your CollabGlam ${normalizedRole} account setup has been completed and that access is working as expected.</p>
+        <p>Please provide this Email Verification Code <span class="code">${code}</span> to confirm your email. The code expires in 10 minutes.</p>
+        <p class="footer">Thank you,<br/>Team CollabGlam</p>
+      </div>
+    </div>
+  </body>
+</html>`;
+
       await transporter.sendMail({
-        from: `"No-Reply" <${SMTP_USER}>`,
+        from: `"CollabGlam Notifications" <${SMTP_USER}>`,
         to: normalizedEmail,
-        subject: 'Verify your email',
-        text: `Your verification code is ${code}. It expires in 10 minutes.`
+        subject,
+        text: plainText,  // plaintext fallback
+        html,             // styled HTML
       });
     } catch (mailErr) {
       console.warn('Failed to send OTP email:', mailErr.message);
@@ -490,7 +531,7 @@ exports.registerInfluencer = async (req, res) => {
     const already = await Influencer.findOne({ email: emailRegexCI }, '_id');
     if (already) return res.status(400).json({ message: 'Already registered' });
 
-    const [countryDoc, callingDoc] = await Promise.all([ Country.findById(countryId), Country.findById(callingId) ]);
+    const [countryDoc, callingDoc] = await Promise.all([Country.findById(countryId), Country.findById(callingId)]);
     if (!countryDoc || !callingDoc) return res.status(400).json({ message: 'Invalid countryId or callingId' });
 
     const profiles = [];
@@ -992,7 +1033,7 @@ exports.resetPasswordInfluencer = async (req, res) => {
 
 exports.addPaymentMethod = async (req, res) => {
   try {
-    const { type, bank = {}, paypal = {}, isDefault = false ,influencerId} = req.body;
+    const { type, bank = {}, paypal = {}, isDefault = false, influencerId } = req.body;
 
     // validate type
     if (![0, 1].includes(Number(type))) {
@@ -1515,7 +1556,7 @@ exports.updateProfile = async (req, res) => {
 // =====================================================
 exports.requestEmailUpdate = async (req, res) => {
   try {
-    const { influencerId, newEmail, role='Influencer' } = req.body || {};
+    const { influencerId, newEmail, role = 'Influencer' } = req.body || {};
     if (!influencerId || !newEmail || !role) {
       return res.status(400).json({ message: 'influencerId, newEmail and role are required' });
     }
@@ -1603,7 +1644,7 @@ exports.requestEmailUpdate = async (req, res) => {
 // ======================================================================
 exports.verifyotp = async (req, res) => {
   try {
-    const { influencerId, role='Influencer', oldEmailOtp, newEmailOtp, newEmail } = req.body || {};
+    const { influencerId, role = 'Influencer', oldEmailOtp, newEmailOtp, newEmail } = req.body || {};
     if (!influencerId || !role || !oldEmailOtp || !newEmailOtp || !newEmail) {
       return res.status(400).json({ message: 'influencerId, role, oldEmailOtp, newEmailOtp, and newEmail are required' });
     }
