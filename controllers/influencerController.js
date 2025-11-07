@@ -480,7 +480,7 @@ exports.registerInfluencer = async (req, res) => {
     if (!normalizedEmail) return res.status(400).json({ message: 'Email is required' });
     if (!password || String(password).length < 8) return res.status(400).json({ message: 'Password must be at least 8 characters' });
     if (!name || !countryId ) {
-      return res.status(400).json({ message: 'Missing required fields (name, phone, countryId, callingId)' });
+      return res.status(400).json({ message: 'Missing required fields (name, countryId)' });
     }
 
     const verifiedRec = await VerifyEmail.findOne({ email: normalizedEmail, role: 'Influencer', verified: true });
@@ -534,7 +534,7 @@ exports.registerInfluencer = async (req, res) => {
       name,
       email: normalizedEmail,
       password,
-      // phone,
+      phone:phone || '',
 
       primaryPlatform,
       socialProfiles: profiles,
