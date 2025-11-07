@@ -18,19 +18,75 @@ const transporter = nodemailer.createTransport({
   auth: { user: SMTP_USER, pass: SMTP_PASS },
 });
 
+function escapeHtml(text) {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function buildLatestMessageTeaser(message) {
+  if (!message) {
+    return null;
+  }
+
+  if (typeof message.text === 'string') {
+    const trimmed = message.text.trim();
+    if (trimmed) {
+      return trimmed.length <= 140 ? trimmed : `${trimmed.slice(0, 137)}...`;
+    }
+  }
+
+  if (Array.isArray(message.attachments) && message.attachments.length > 0) {
+    const attachment = message.attachments[0];
+    if (attachment?.originalName) {
+      return `Attachment: ${attachment.originalName}`;
+    }
+    if (attachment?.mimeType) {
+      return `Attachment: ${attachment.mimeType}`;
+    }
+    return 'Attachment: New file';
+  }
+
+  return null;
+}
+
 // Helper function to get user details
 async function getUserDetails(userId, userType) {
-  if (userType === 'brand') {  // Changed from 'Brand' to 'brand'
-    return await Brand.findOne({ brandId: userId }).select('email name');
-  } else if (userType === 'influencer') {  // Changed from 'Influencer' to 'influencer'
-    return await Influencer.findOne({ influencerId: userId }).select('email name');
+  const projection = 'email name isUnsubscribed';
+
+  if (userType === 'brand') {
+    return await Brand.findOne({
+      brandId: userId,
+      isUnsubscribed: { $ne: true },
+    }).select(projection);
   }
+
+  if (userType === 'influencer') {
+    return await Influencer.findOne({
+      influencerId: userId,
+      isUnsubscribed: { $ne: true },
+    }).select(projection);
+  }
+
   return null;
 }
 
 // Helper function to send email
-async function sendUnseenMessageNotification(email, userName, unseenCount, roomId) {
+async function sendUnseenMessageNotification(email, userName, unseenCount, roomId, teaserText) {
   try {
+    const sanitizedTeaser = teaserText ? escapeHtml(teaserText) : null;
+    const teaserSection = sanitizedTeaser
+      ? `
+          <div style="margin: 20px 0; padding: 12px 16px; background-color: #f7f7f7; border-left: 4px solid #FF6B6B;">
+            <p style="margin: 0; color: #333; font-weight: bold;">Latest message preview</p>
+            <p style="margin: 8px 0 0; color: #555;">${sanitizedTeaser}</p>
+          </div>
+        `
+      : '';
+
     const mailOptions = {
       from: `"Collabglam Notifications" <${SMTP_USER}>`,
       to: email,
@@ -39,6 +95,7 @@ async function sendUnseenMessageNotification(email, userName, unseenCount, roomI
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <h2 style="color: #333;">Hello ${userName},</h2>
           <p>You have ${unseenCount} unread message${unseenCount > 1 ? 's' : ''} in your chat room.</p>
+          ${teaserSection}
           <p>Please log in to your Collabglam account to view your messages.</p>
           <div style="margin: 20px 0;">
             <a href="${process.env.FRONTEND_URL}/messages?room=${roomId}" 
@@ -49,12 +106,15 @@ async function sendUnseenMessageNotification(email, userName, unseenCount, roomI
           <p style="color: #666; font-size: 12px;">
             This is an automated message. Please do not reply to this email.
           </p>
+          <p style="color: #666; font-size: 12px; margin-top: 20px;">
+            If you no longer wish to receive these emails, you can <a href="${process.env.FRONTEND_URL}/unsubscribe?email=${email}" style="color: #FF6B6B;">unsubscribe here</a>.
+          </p>
         </div>
       `
     };
 
     const info = await transporter.sendMail(mailOptions);
-    console.log(`✅ Email sent to ${email}: ${info.messageId}`);
+    // console.log(`✅ Email sent to ${email}: ${info.messageId}`);
     return true;
   } catch (error) {
     console.error(`❌ Failed to send email to ${email}:`, error.message);
@@ -80,14 +140,16 @@ async function checkAndNotifyUnseenMessages() {
         const unseenCount = unseenMessages.length;
 
         if (unseenCount > 0) {
+          const latestUnseenMessage = unseenMessages[unseenMessages.length - 1];
+          const messageTeaser = buildLatestMessageTeaser(latestUnseenMessage);
           // Check if we recently sent a notification
           const lastNotification = room.lastNotificationSent?.get(participant.userId);
           const now = new Date();
 
-          if (lastNotification && (now - new Date(lastNotification)) < ONE_HOUR) {
-            console.log(`⏭️  Skipping notification for ${participant.userId} (sent recently)`);
-            continue;
-          }
+          // if (lastNotification && (now - new Date(lastNotification)) < ONE_HOUR) {
+          //   console.log(`⏭️  Skipping notification for ${participant.userId} (sent recently)`);
+          //   continue;
+          // }
 
           const user = await getUserDetails(participant.userId, participant.role);
           if (user && user.email) {
@@ -95,7 +157,8 @@ async function checkAndNotifyUnseenMessages() {
               user.email,
               user.name || 'User',
               unseenCount,
-              room.roomId
+              room.roomId,
+              messageTeaser
             );
 
             if (sent) {

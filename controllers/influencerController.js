@@ -16,7 +16,7 @@ const Country = require('../models/country');
 const Language = require('../models/language');
 const VerifyEmail = require('../models/verifyEmail');
 const ApplyCampaign = require('../models/applyCampaign');
-const Campaign = require('../models/Campaign');
+const Campaign = require('../models/campaign');
 
 // Utils
 const subscriptionHelper = require('../utils/subscriptionHelper');
@@ -38,6 +38,104 @@ const transporter = nodemailer.createTransport({
   secure: SMTP_PORT === 465,
   auth: { user: SMTP_USER, pass: SMTP_PASS }
 });
+
+const ALLOWED_GENDERS = new Set(['Female', 'Male', 'Non-binary', 'Prefer not to say', '']);
+// primaryPlatform must match Influencer schema enum
+const ALLOWED_PLATFORMS = new Set(['youtube', 'tiktok', 'instagram', 'other', null]);
+
+function normalizeGender(value) {
+  if (typeof value === 'undefined' || value === null) return null; // don't update
+  const raw = String(value).trim();
+
+  // common loose inputs
+  const t = raw.toLowerCase();
+  if (t === '' || t === 'none' || t === 'na' || t === 'n/a') return '';
+  if (t === 'male' || t === 'm') return 'Male';
+  if (t === 'female' || t === 'f') return 'Female';
+  if (t === 'non-binary' || t === 'nonbinary' || t === 'nb') return 'Non-binary';
+  if (t === 'prefer not to say' || t === 'prefer-not-to-say') return 'Prefer not to say';
+
+  // already a valid enum value?
+  if (ALLOWED_GENDERS.has(raw)) return raw;
+
+  // reject unknowns
+  return '__INVALID__';
+}
+
+function normalizePrimaryPlatform(value) {
+  if (typeof value === 'undefined') return undefined; // don't update
+  if (value === null) return null;
+  const v = String(value).trim().toLowerCase();
+  if (ALLOWED_PLATFORMS.has(v)) return v;
+  return '__INVALID__';
+}
+
+async function upsertOnboardingFromPayload(inf, onboardingPayload) {
+  // Accept either a JSON string or an object
+  let ob = onboardingPayload;
+  if (typeof ob === 'string') {
+    try { ob = JSON.parse(ob); } catch {
+      const err = new Error('Invalid onboarding payload (must be JSON).');
+      err.statusCode = 400; throw err;
+    }
+  }
+  if (!ob || typeof ob !== 'object') {
+    const err = new Error('onboarding must be an object.');
+    err.statusCode = 400; throw err;
+  }
+
+  // categoryId is required when onboarding is provided
+  const catIdNum = Number(ob.categoryId);
+  if (!Number.isFinite(catIdNum)) {
+    const err = new Error('categoryId must be a number.');
+    err.statusCode = 400; throw err;
+  }
+
+  // Look up category by your Category schema's "id" field
+  const catDoc = await Category.findOne({ id: catIdNum }).lean();
+  if (!catDoc) {
+    const err = new Error('Invalid categoryId.');
+    err.statusCode = 400; throw err;
+  }
+
+  // Collect subcategoryIds from either:
+  // 1) ob.subcategories: [{ subcategoryId, subcategoryName? }...], or
+  // 2) ob.subcategoryIds: [uuid, uuid, ...]
+  let incomingIds = [];
+  if (Array.isArray(ob.subcategories) && ob.subcategories.length) {
+    incomingIds = ob.subcategories
+      .map(s => s && s.subcategoryId)
+      .filter(Boolean);
+  } else if (Array.isArray(ob.subcategoryIds) && ob.subcategoryIds.length) {
+    incomingIds = [...ob.subcategoryIds];
+  }
+
+  // Validate subcategories (no limit; can be empty)
+  const valid = new Set(catDoc.subcategories.map(s => s.subcategoryId));
+  const nameById = new Map(catDoc.subcategories.map(s => [s.subcategoryId, s.name]));
+
+  for (const id of incomingIds) {
+    if (!valid.has(id)) {
+      const err = new Error(`Invalid subcategoryId for this category: ${id}`);
+      err.statusCode = 400; throw err;
+    }
+  }
+
+  // Map to Influencer.onboarding storage shape: { subcategoryId, subcategoryName }
+  const finalSubs = incomingIds.map(id => ({
+    subcategoryId: id,
+    subcategoryName: nameById.get(id)
+  }));
+
+  // Save onto document (derive names from DB; ignore client-sent categoryName)
+  inf.onboarding = {
+    ...(inf.onboarding || {}),
+    categoryId: catDoc.id,
+    categoryName: catDoc.name,
+    subcategories: finalSubs
+  };
+}
+
 
 // Uploads
 const uploadDir = path.join(__dirname, '../uploads/profile_images');
@@ -381,7 +479,7 @@ exports.registerInfluencer = async (req, res) => {
     const normalizedEmail = String(email || '').trim().toLowerCase();
     if (!normalizedEmail) return res.status(400).json({ message: 'Email is required' });
     if (!password || String(password).length < 8) return res.status(400).json({ message: 'Password must be at least 8 characters' });
-    if (!name || !phone || !countryId || !callingId) {
+    if (!name || !countryId ) {
       return res.status(400).json({ message: 'Missing required fields (name, phone, countryId, callingId)' });
     }
 
@@ -392,8 +490,8 @@ exports.registerInfluencer = async (req, res) => {
     const already = await Influencer.findOne({ email: emailRegexCI }, '_id');
     if (already) return res.status(400).json({ message: 'Already registered' });
 
-    const [countryDoc, callingDoc] = await Promise.all([ Country.findById(countryId), Country.findById(callingId) ]);
-    if (!countryDoc || !callingDoc) return res.status(400).json({ message: 'Invalid countryId or callingId' });
+    const [countryDoc] = await Promise.all([ Country.findById(countryId)]);
+    if (!countryDoc) return res.status(400).json({ message: 'Invalid countryId' });
 
     const profiles = [];
     if (Array.isArray(platforms)) {
@@ -436,15 +534,15 @@ exports.registerInfluencer = async (req, res) => {
       name,
       email: normalizedEmail,
       password,
-      phone,
+      // phone,
 
       primaryPlatform,
       socialProfiles: profiles,
 
       countryId,
       country: countryDoc.countryName,
-      callingId,
-      callingcode: callingDoc.callingCode,
+      // callingId,
+      // callingcode: callingDoc.callingCode,
 
       city: city || '',
       gender: gender || '',
@@ -1289,17 +1387,16 @@ exports.updateProfile = async (req, res) => {
       phone,
       socialMedia,
       gender,
-      platformId,
-      manualPlatformName,
+      primaryPlatform,      // <--- use string enum
       profileLink,
       malePercentage,
       femalePercentage,
-      categories,
       audienceAgeRangeId,
       audienceId,
       countryId,
       callingId,
-      bio
+      bio,
+      onboarding            // <--- { categoryId, subcategories?: [{subcategoryId}], subcategoryIds?: [] }
     } = req.body || {};
 
     if (!influencerId) {
@@ -1315,50 +1412,35 @@ exports.updateProfile = async (req, res) => {
       return res.status(400).json({ message: 'Email cannot be updated here. Use requestEmailUpdate & verifyotp.' });
     }
 
-    // Optional: update profile image if sent (use the same upload middleware on the route)
+    // Optional: update profile image if sent (multer single upload)
     if (req.file) {
       inf.profileImage = `/uploads/profile_images/${req.file.filename}`;
     }
 
+    // Basic fields
     if (typeof name !== 'undefined') inf.name = name;
     if (typeof password !== 'undefined' && password) inf.password = password; // hashed by pre-save hook
     if (typeof phone !== 'undefined') inf.phone = phone;
     if (typeof socialMedia !== 'undefined') inf.socialMedia = socialMedia;
-    if (typeof gender !== 'undefined') inf.gender = Number(gender);
     if (typeof profileLink !== 'undefined') inf.profileLink = profileLink;
     if (typeof bio !== 'undefined') inf.bio = bio;
 
-    // Platform update (optional)
-    if (typeof platformId !== 'undefined') {
-      let platformDoc = await Platform.findOne({ platformId });
-      if (!platformDoc) {
-        return res.status(400).json({ message: 'Invalid platformId' });
+    // Gender (string enum)
+    if (typeof gender !== 'undefined') {
+      const g = normalizeGender(gender);
+      if (g === '__INVALID__') {
+        return res.status(400).json({ message: 'Invalid gender. Allowed: Male, Female, Non-binary, Prefer not to say, or empty.' });
       }
-      if (platformDoc.name === 'Other') {
-        if (!manualPlatformName?.trim()) {
-          return res.status(400).json({ message: 'manualPlatformName is required when platform is Other' });
-        }
-        platformDoc = await new Platform({ name: manualPlatformName.trim() }).save();
-      }
-      inf.platformId = platformDoc._id;
-      inf.platformName = platformDoc.name;
+      if (g !== null) inf.gender = g; // null means "do not update"
     }
 
-    // Categories (optional)
-    if (typeof categories !== 'undefined') {
-      let parsed = categories;
-      if (typeof parsed === 'string') {
-        try { parsed = JSON.parse(parsed); } catch { return res.status(400).json({ message: 'categories must be a JSON array' }); }
+    // Primary platform (string enum from Influencer schema)
+    if (typeof primaryPlatform !== 'undefined') {
+      const p = normalizePrimaryPlatform(primaryPlatform);
+      if (p === '__INVALID__') {
+        return res.status(400).json({ message: 'Invalid primaryPlatform. Allowed: youtube | tiktok | instagram | other | null.' });
       }
-      if (!Array.isArray(parsed) || parsed.length < 1 || parsed.length > 3) {
-        return res.status(400).json({ message: 'You must select between 1 and 3 categories' });
-      }
-      const interestDocs = await Interest.find({ _id: { $in: parsed } });
-      if (interestDocs.length !== parsed.length) {
-        return res.status(400).json({ message: 'Invalid category IDs' });
-      }
-      inf.categories = interestDocs.map(d => d._id);
-      inf.categoryName = interestDocs.map(d => d.name);
+      inf.primaryPlatform = p;
     }
 
     // Audience bifurcation (optional)
@@ -1401,11 +1483,28 @@ exports.updateProfile = async (req, res) => {
       inf.callingcode = callingDoc.callingCode;
     }
 
+    // Onboarding (Category/Subcategories) – validate & save against Category model
+    if (typeof onboarding !== 'undefined') {
+      await upsertOnboardingFromPayload(inf, onboarding);
+    }
+
     await inf.save();
-    return res.status(200).json({ message: 'Profile updated successfully' });
+
+    // Optional: return a small snapshot (helps client rehydrate without another GET)
+    return res.status(200).json({
+      message: 'Profile updated successfully',
+      onboarding: inf.onboarding,
+      primaryPlatform: inf.primaryPlatform,
+      gender: inf.gender,
+      socialMedia: inf.socialMedia,
+      profileLink: inf.profileLink,
+      country: { id: inf.countryId, name: inf.country },
+      calling: { id: inf.callingId, code: inf.callingcode }
+    });
   } catch (err) {
+    const status = err.statusCode || 500;
     console.error('Error in updateProfile:', err);
-    return res.status(500).json({ message: 'Internal server error' });
+    return res.status(status).json({ message: err.message || 'Internal server error' });
   }
 };
 
@@ -1573,6 +1672,35 @@ exports.verifyotp = async (req, res) => {
     return res.status(200).json({ message: 'Email updated successfully' });
   } catch (err) {
     console.error('Error in verifyotp:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+exports.getLiteById = async (req, res) => {
+  try {
+    const id = req.query.id || req.query.influencerId;
+    if (!id) {
+      return res.status(400).json({ message: 'Query parameter "id" (influencerId) is required.' });
+    }
+
+    const doc = await Influencer.findOne({ influencerId: id })
+      .select('influencerId name email subscription.planId subscription.planName subscription.expiresAt')
+      .lean();
+
+    if (!doc) {
+      return res.status(404).json({ message: 'Influencer not found' });
+    }
+
+    return res.status(200).json({
+      influencerId: doc.influencerId,
+      name: doc.name || '',
+      email: doc.email || '',
+      planId: doc.subscription?.planId || null,
+      planName: doc.subscription?.planName || null,
+      expiresAt: doc.subscription?.expiresAt || null
+    });
+  } catch (err) {
+    console.error('Error in getLiteById:', err);
     return res.status(500).json({ message: 'Internal server error' });
   }
 };

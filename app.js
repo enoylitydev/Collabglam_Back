@@ -9,7 +9,7 @@ const WebSocket = require('ws');
 const path      = require('path');
 const { v4: uuidv4 } = require('uuid');
 
-// Routes ... (unchanged)
+
 const influencerRoutes    = require('./routes/influencerRoutes');
 const countryRoutes       = require('./routes/countryRoutes');
 const brandRoutes         = require('./routes/brandRoutes');
@@ -35,6 +35,8 @@ const mediaKitRoutes      = require('./routes/mediaKitRoutes');
 const modashRoutes        = require('./routes/modashRoutes');
 const languageRoutes      = require('./routes/languageRoutes');
 const businessRoutes      = require('./routes/businessRoutes');
+const unsubscribeRoutes   = require('./routes/unsubscribeRoutes');
+const disputeRoutes       = require('./routes/disputeRoutes');
 
 // Models needed inside WS handlers
 const ChatRoom = require('./models/chat');
@@ -249,6 +251,8 @@ app.use('/media-kit', mediaKitRoutes);
 app.use('/modash', modashRoutes);
 app.use('/languages', languageRoutes);
 app.use('/business', businessRoutes);
+app.use('/unsubscribe', unsubscribeRoutes);
+app.use('/dispute', disputeRoutes);
 
 /* Mongo & start */
 const PORT = process.env.PORT || 5000;
