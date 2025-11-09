@@ -4,6 +4,7 @@ require('dotenv').config();
 const express   = require('express');
 const cors      = require('cors');
 const mongoose  = require('mongoose');
+const { GridFSBucket, ObjectId } = require('mongodb');
 const http      = require('http');
 const path      = require('path');
 const { v4: uuidv4 } = require('uuid');
@@ -47,8 +48,7 @@ const sockets = require('./sockets');
 const app    = express();
 const server = http.createServer(app);
 
-// ====== Static uploads (so attachment URLs work) ======
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
 
 // ====== Socket.IO setup (replaces old ws) ======
 const io = sockets.init(server);
@@ -69,6 +69,9 @@ app.use(cors({
 const JSON_LIMIT = process.env.JSON_LIMIT || '8mb';
 app.use(express.json({ limit: JSON_LIMIT }));
 app.use(express.urlencoded({ extended: true, limit: JSON_LIMIT, parameterLimit: 100000 }));
+
+// Legacy static: serve any historical disk uploads if present
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Friendly 413 response
 app.use((err, req, res, next) => {
@@ -115,6 +118,65 @@ mongoose.connect(process.env.MONGODB_URI)
   .then(() => {
     console.log('✅ Connected to MongoDB');
 
+    // Init GridFS
+    const bucket = new GridFSBucket(mongoose.connection.db, { bucketName: 'uploads' });
+    // Expose for controllers if needed
+    app.set('gridfsBucket', bucket);
+
+    // Serve files from GridFS
+    app.get('/file/:filename', async (req, res) => {
+      try {
+        const filename = req.params.filename;
+        const files = await bucket.find({ filename }).toArray();
+        if (!files || files.length === 0) {
+          return res.status(404).json({ message: 'File not found.' });
+        }
+        const doc = files[0];
+        const contentType = doc.contentType || doc.metadata?.mimeType || 'application/octet-stream';
+        res.set('Content-Type', contentType);
+        res.set('Cache-Control', 'public, max-age=31536000, immutable');
+        const stream = bucket.openDownloadStreamByName(filename);
+        stream.on('error', (err) => {
+          console.error('Error streaming file from GridFS:', err);
+          return res.status(404).json({ message: 'File not found.' });
+        });
+        stream.pipe(res);
+      } catch (err) {
+        console.error('Error handling /file/:filename:', err);
+        return res.status(500).json({ message: 'Internal server error' });
+      }
+    });
+
+    // Serve files by ObjectId
+    app.get('/file/id/:id', async (req, res) => {
+      try {
+        const id = req.params.id;
+        let _id;
+        try {
+          _id = new ObjectId(id);
+        } catch {
+          return res.status(400).json({ message: 'Invalid file id.' });
+        }
+        const files = await bucket.find({ _id }).toArray();
+        if (!files || files.length === 0) {
+          return res.status(404).json({ message: 'File not found.' });
+        }
+        const doc = files[0];
+        const contentType = doc.contentType || doc.metadata?.mimeType || 'application/octet-stream';
+        res.set('Content-Type', contentType);
+        res.set('Cache-Control', 'public, max-age=31536000, immutable');
+        const stream = bucket.openDownloadStream(_id);
+        stream.on('error', (err) => {
+          console.error('Error streaming file from GridFS:', err);
+          return res.status(404).json({ message: 'File not found.' });
+        });
+        stream.pipe(res);
+      } catch (err) {
+        console.error('Error handling /file/id/:id:', err);
+        return res.status(500).json({ message: 'Internal server error' });
+      }
+    });
+    
     // Start the unseen message notifier job
     unseenMessageNotifier.start();
     console.log('✅ Started unseen message notifier job');

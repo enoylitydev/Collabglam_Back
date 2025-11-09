@@ -3,6 +3,8 @@ require('dotenv').config();
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
+const multer = require('multer');
+const { uploadToGridFS } = require('../utils/gridfs');
 
 const Brand = require('../models/brand');
 const Influencer = require('../models/influencer'); // needed by requestOtp
@@ -64,6 +66,38 @@ async function resolveCategory(input) {
   // name (case-insensitive, exact)
   return Category.findOne({ name: new RegExp(`^${escapeRegExp(raw)}$`, 'i') });
 }
+
+// ---------------- File Upload (Brand Logo via GridFS) ----------------
+const logoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  fileFilter: (req, file, cb) => {
+    const ok = /^(image\/png|image\/jpeg|image\/jpg|image\/webp|image\/svg\+xml)$/i.test(file.mimetype);
+    if (ok) return cb(null, true);
+    cb(new Error('Unsupported logo type'));
+  }
+});
+
+exports.uploadLogoMiddleware = logoUpload.single('file');
+
+exports.uploadLogo = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: 'file is required' });
+    }
+
+    const [saved] = await uploadToGridFS(req.file, {
+      prefix: 'brand_logo',
+      metadata: { kind: 'brand_logo' },
+      req
+    });
+
+    return res.status(201).json({ message: 'Logo uploaded', url: saved.url, filename: saved.filename });
+  } catch (err) {
+    console.error('uploadLogo error:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
 
 async function resolveBusinessType(input) {
   if (!input && input !== 0) return null;
@@ -624,7 +658,7 @@ exports.searchBrands = async (req, res) => {
 // ---------- 12) Update profile ----------
 exports.updateProfile = async (req, res) => {
   try {
-    const { brandId, name, phone, countryId, callingId } = req.body || {};
+    const { brandId, name, phone, countryId, callingId, logoUrl } = req.body || {};
 
     if (!brandId) {
       return res.status(400).json({ message: 'brandId is required' });
@@ -636,7 +670,7 @@ exports.updateProfile = async (req, res) => {
     }
 
     // require at least one change
-    if (name == null && phone == null && countryId == null && callingId == null) {
+    if (name == null && phone == null && countryId == null && callingId == null && typeof logoUrl === 'undefined') {
       return res.status(400).json({ message: 'No changes provided' });
     }
 
@@ -658,6 +692,10 @@ exports.updateProfile = async (req, res) => {
       if (!callingDoc) return res.status(400).json({ message: 'Invalid callingId' });
       brand.callingId = callingId;
       brand.callingcode = callingDoc.callingCode;
+    }
+
+    if (typeof logoUrl !== 'undefined') {
+      brand.logoUrl = normalizeUrl(logoUrl);
     }
 
     await brand.save();

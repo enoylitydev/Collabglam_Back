@@ -1,29 +1,19 @@
 "use strict";
 
 // ============================ Imports ============================
-// CollabGlam — Contracts Controller (rewritten, resilient previews + resend support + notifications)
-// - Preserves deliverable flags (whitelistingEnabled/sparkAdsEnabled) in previews and saves
-// - Adds "resend" support via:
-//     a) POST /contract/initiate with { isResend: true, resendOf: "<contractId>" }
-//     b) POST /contract/resend with { contractId, brandUpdates? }
-// - Adds in-website notifications for initiate, edits, confirms/accepts, sign, fully-locked, and reject
-// - IMPORTANT CHANGE: Brand edits are allowed **only before any confirmations** (brand or influencer).
-// - NOTE: For persistent storage of custom deliverable fields, ensure your Mongoose schema
-//         includes `whitelistingEnabled` and `sparkAdsEnabled` (or set strict:false on the subdoc).
-
-const PDFDocument = require("pdfkit");
-const moment = require("moment-timezone");
-const puppeteer = require("puppeteer");
-const fs = require("fs");
-const path = require("path");
+const PDFDocument = require('pdfkit');
+const moment = require('moment-timezone');
+const puppeteer = require('puppeteer');
+const fs = require('fs');
+const path = require('path');
 
 // External models & template
-const Campaign = require("../models/campaign");
-const Brand = require("../models/brand");
-const Influencer = require("../models/influencer");
-const MASTER_TEMPLATE = require("../template/ContractTemplate");
-const Contract = require("../models/contract");
-const { createAndEmit } = require("../utils/notifier"); // ← notifications
+const Campaign = require('../models/campaign');
+const Brand = require('../models/brand');
+const Influencer = require('../models/influencer');
+const MASTER_TEMPLATE = require('../template/ContractTemplate');
+const Contract = require('../models/contract');
+const { createAndEmit } = require('../utils/notifier'); // ← notifications
 
 // Files
 const TIMEZONES_FILE = path.join(__dirname, "..", "data", "timezones.json");
