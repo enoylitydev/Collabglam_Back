@@ -146,10 +146,10 @@ async function checkAndNotifyUnseenMessages() {
           const lastNotification = room.lastNotificationSent?.get(participant.userId);
           const now = new Date();
 
-          // if (lastNotification && (now - new Date(lastNotification)) < ONE_HOUR) {
-          //   console.log(`⏭️  Skipping notification for ${participant.userId} (sent recently)`);
-          //   continue;
-          // }
+          if (lastNotification && (now - new Date(lastNotification)) < ONE_HOUR * 6) {
+            // console.log(`⏭️  Skipping notification for ${participant.userId} (sent recently)`);
+            continue;
+          }
 
           const user = await getUserDetails(participant.userId, participant.role);
           if (user && user.email) {

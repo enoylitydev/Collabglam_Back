@@ -1,8 +1,7 @@
 // controllers/campaignController.js
-const path = require('path');
-const fs = require('fs');
 const mongoose = require('mongoose');
 const multer = require('multer');
+const { uploadToGridFS } = require('../utils/gridfs');
 
 const Campaign = require('../models/campaign');
 const Brand = require('../models/brand');
@@ -16,24 +15,11 @@ const Milestone = require('../models/milestone');
 const Country = require('../models/country');
 
 // ===============================
-//  Multer setup
+//  Multer setup (memory) + GridFS helpers
 // ===============================
-const uploadDir = path.join(__dirname, '..', 'uploads');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir);
-}
 
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, uploadDir);
-  },
-  filename: function (req, file, cb) {
-    const timestamp = Date.now();
-    const ext = path.extname(file.originalname);
-    const baseName = path.basename(file.originalname, ext).replace(/\s+/g, '_');
-    cb(null, `${baseName}_${timestamp}${ext}`);
-  }
-});
+// Use memory storage to receive buffers, then hand them to the shared GridFS helper.
+const storage = multer.memoryStorage();
 
 async function buildSubToParentNumMap() {
   const rows = await Category.find({}, 'id subcategories').lean();
@@ -336,11 +322,19 @@ exports.createCampaign = (req, res) => {
 
       const isActiveFlag = computeIsActive(tlData);
 
-      // files
-      const images = (req.files.image || []).map((f) => path.join('uploads', path.basename(f.path)));
-      const creativePDFs = (req.files.creativeBrief || []).map((f) =>
-        path.join('uploads', path.basename(f.path))
-      );
+      // files → stream to GridFS, store returned filenames
+      const imagesUploaded = await uploadToGridFS(req.files.image || [], {
+        prefix: 'campaign_image',
+        metadata: { kind: 'campaign_image', brandId },
+        req
+      });
+      const creativeUploaded = await uploadToGridFS(req.files.creativeBrief || [], {
+        prefix: 'campaign_brief',
+        metadata: { kind: 'campaign_brief', brandId },
+        req
+      });
+      const images = imagesUploaded.map((f) => f.filename);
+      const creativePDFs = creativeUploaded.map((f) => f.filename);
 
       // save
       const newCampaign = new Campaign({
@@ -529,14 +523,22 @@ exports.updateCampaign = (req, res) => {
         updates.isActive = computeIsActive(timelineData);
       }
 
-      // files
+      // files → stream to GridFS, store returned filenames
       if (Array.isArray(req.files['image']) && req.files['image'].length > 0) {
-        updates.images = req.files['image'].map((file) => path.join('uploads', path.basename(file.path)));
+        const uploadedImages = await uploadToGridFS(req.files['image'], {
+          prefix: 'campaign_image',
+          metadata: { kind: 'campaign_image', campaignsId },
+          req
+        });
+        updates.images = uploadedImages.map((f) => f.filename);
       }
       if (Array.isArray(req.files['creativeBrief']) && req.files['creativeBrief'].length > 0) {
-        updates.creativeBrief = req.files['creativeBrief'].map((file) =>
-          path.join('uploads', path.basename(file.path))
-        );
+        const uploadedBriefs = await uploadToGridFS(req.files['creativeBrief'], {
+          prefix: 'campaign_brief',
+          metadata: { kind: 'campaign_brief', campaignsId },
+          req
+        });
+        updates.creativeBrief = uploadedBriefs.map((f) => f.filename);
       }
 
       const updatedCampaign = await Campaign.findOneAndUpdate({ campaignsId }, updates, {

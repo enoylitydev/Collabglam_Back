@@ -2,17 +2,30 @@
 
 const express = require('express');
 const router = express.Router();
-const { register, login, 
+const {
+  register,
+  login,
   verifyToken,
-   getBrandById, getAllBrands, requestOtp, verifyOtp, 
-  requestPasswordResetOtp, verifyPasswordResetOtp,
-   resetPassword,updateProfile,requestEmailUpdate,
-  verifyEmailUpdate,getMetaOptions} = require('../controllers/brandController');
+  getBrandById,
+  getAllBrands,
+  requestOtp,
+  verifyOtp,
+  requestPasswordResetOtp,
+  verifyPasswordResetOtp,
+  resetPassword,
+  updateProfile,
+  requestEmailUpdate,
+  verifyEmailUpdate,
+  getMetaOptions,
+  uploadLogoMiddleware,
+  uploadLogo
+} = require('../controllers/brandController');
 
 const { searchInfluencers } = require('../controllers/influencerController');
 
 // POST /brand/register → register a new brand
 router.post('/register', register);
+router.post('/uploadLogo', uploadLogoMiddleware, uploadLogo);
 router.post('/requestOtp', requestOtp);
 router.post('/verifyOtp', verifyOtp);
 
