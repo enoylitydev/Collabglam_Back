@@ -3,6 +3,7 @@ const { v4: uuidv4 } = require('uuid');
 const fs = require('fs');
 const multer = require('multer');
 const mongoose = require('mongoose');
+const mime = require('mime-types'); // NEW: for content-type fallback
 const { uploadToGridFS, deleteGridFsFiles } = require('../utils/gridfs');
 
 const ChatRoom       = require('../models/chat');
@@ -10,6 +11,42 @@ const Brand          = require('../models/brand');
 const Influencer     = require('../models/influencer');
 
 const { createAndEmit } = require('../utils/notifier'); // 🔔 centralized notifier
+
+/* -----------------------------------------------------------
+   Config / GridFS helpers
+----------------------------------------------------------- */
+const GRIDFS_BUCKET = process.env.GRIDFS_BUCKET || 'fs';
+
+function getBucket() {
+  const db = mongoose.connection.db;
+  if (!db) throw new Error('MongoDB connection not ready');
+  return new mongoose.mongo.GridFSBucket(db, { bucketName: GRIDFS_BUCKET });
+}
+
+async function findGridFileByFilename(filename) {
+  const db = mongoose.connection.db;
+  return db.collection(`${GRIDFS_BUCKET}.files`).findOne({ filename });
+}
+
+function contentDispositionInline(filename, asAttachment) {
+  const safe = encodeURIComponent(filename || 'file');
+  return `${asAttachment ? 'attachment' : 'inline'}; filename*=UTF-8''${safe}`;
+}
+
+function isInlineType(ct) {
+  if (!ct) return false;
+  const t = ct.toLowerCase();
+  return t.startsWith('image/') || t === 'application/pdf';
+}
+
+function guessType(name, fallback = 'application/octet-stream') {
+  return mime.lookup(name) || fallback;
+}
+
+function buildPublicFileUrl(filename) {
+  // Frontend expects /file/:filename
+  return `/file/${encodeURIComponent(filename)}`;
+}
 
 /* -----------------------------------------------------------
    Helpers
@@ -105,7 +142,7 @@ exports.createRoom = async (req, res) => {
     const participants = [
       { userId: brandId, name: brand.name, role: 'brand' },
       { userId: influencerId, name: infl.name, role: 'influencer' }
-    ].sort((a, b) => a.userId.localeCompare(b.userId));
+    ].sort(sortParticipants);
 
     let room = await ChatRoom.findOne({
       'participants.userId': { $all: [brandId, influencerId] },
@@ -214,7 +251,7 @@ exports.postMessage = async (req, res) => {
 
     const normalized = Array.isArray(attachments) ? attachments.map(a => ({
       attachmentId: uuidv4(),
-      url: a.url,
+      url: a.url, // if remote URL
       path: a.path || null,
       originalName: a.originalName || 'file',
       mimeType: a.mimeType || 'application/octet-stream',
@@ -292,9 +329,9 @@ exports.postFileMessage = [
 
       const attachments = saved.map(s => ({
         attachmentId: uuidv4(),
-        url: s.url,
+        url: buildPublicFileUrl(s.filename), // NEW: public /file/:filename
         originalName: s.originalName || 'file',
-        mimeType: s.mimeType || 'application/octet-stream',
+        mimeType: s.mimeType || guessType(s.filename),
         size: s.size || 0,
         width: null,
         height: null,
@@ -389,7 +426,8 @@ exports.editMessage = async (req, res) => {
       actionPath: chatPathForRole(otherRole, room.roomId),
     }).catch(e => console.error('notify chat.message.edited failed:', e));
 
-    return res.json({ message: 'Message edited', message: msg });
+    // FIX: avoid duplicate 'message' key
+    return res.json({ message: 'Message edited', messageData: msg });
   } catch (err) {
     console.error('editMessage error:', err);
     return res.status(500).json({ message: 'Internal server error' });
@@ -466,10 +504,6 @@ exports.deleteMessage = async (req, res) => {
    7) Mark message(s) as seen
    POST /chat/mark-seen
 ----------------------------------------------------------- */
-/* -----------------------------------------------------------
-   7) Mark message(s) as seen
-   POST /chat/mark-seen
------------------------------------------------------------ */
 exports.markAsSeen = async (req, res) => {
   try {
     const { roomId, userId, messageIds } = req.body;
@@ -498,10 +532,7 @@ exports.markAsSeen = async (req, res) => {
         .map(m => m.messageId)
     );
 
-    // 2) Apply update — addToSet for seenBy only where:
-    //    - not sender's own message
-    //    - userId not already in seenBy
-    //    - (optional) message is in messageIds when provided
+    // 2) Apply update
     const elemFilter = {
       'elem.senderId': { $ne: userId },
       'elem.seenBy': { $ne: userId },
@@ -516,7 +547,7 @@ exports.markAsSeen = async (req, res) => {
       { arrayFilters: [elemFilter] }
     );
 
-    // 3) Load AFTER state
+    // 3) AFTER
     const after = await ChatRoom.findOne(
       { roomId },
       'roomId participants messages.messageId messages.senderId messages.seenBy'
@@ -526,9 +557,9 @@ exports.markAsSeen = async (req, res) => {
       return res.status(404).json({ message: 'Chat room not found or no messages updated' });
     }
 
-    // 4) Compute which messages became newly seen in THIS call
+    // 4) Newly seen
     const newlySeen = (after.messages || []).filter(m => {
-      if (m.senderId === userId) return false; // never count own messages
+      if (m.senderId === userId) return false;
       const nowSeen = Array.isArray(m.seenBy) && m.seenBy.includes(userId);
       const wasSeen = alreadySeen.has(m.messageId);
       const inFilter = Array.isArray(messageIds) && messageIds.length > 0
@@ -537,7 +568,6 @@ exports.markAsSeen = async (req, res) => {
       return nowSeen && !wasSeen && inFilter;
     });
 
-    // If nothing new was marked seen, do not broadcast/notify (prevents duplicates)
     if (newlySeen.length === 0) {
       return res.json({
         message: 'Messages marked as seen',
@@ -546,13 +576,11 @@ exports.markAsSeen = async (req, res) => {
       });
     }
 
-    // Prepare payload for broadcast (with full seenBy arrays from AFTER)
     const updatedMessages = newlySeen.map(m => ({
       messageId: m.messageId,
       seenBy: m.seenBy || [],
     }));
 
-    // 5) Broadcast only for newly seen messages
     broadcast(req.app, roomId, {
       type: 'messagesSeen',
       roomId,
@@ -560,13 +588,9 @@ exports.markAsSeen = async (req, res) => {
       messages: updatedMessages,
     });
 
-    // 6) Gentle notify counterparty ONCE per new seen set
-    //    (i.e., this will not fire again unless new messages get seen later)
     const self = (after.participants || []).find(p => p.userId === userId) || {};
     const other = (after.participants || []).find(p => p.userId !== userId) || {};
     if (other && other.userId) {
-      // You can keep this for all cases or restrict to "no messageIds" like before.
-      // Either way it'll only trigger when there are *newly* seen messages now.
       createAndEmit({
         brandId: other.role === 'brand' ? String(other.userId) : null,
         influencerId: other.role === 'influencer' ? String(other.userId) : null,
@@ -624,7 +648,87 @@ exports.getUnseenCount = async (req, res) => {
   }
 };
 
-// POST download (kept as-is; no notification needed)
+/* -----------------------------------------------------------
+   9) Secure stream of a specific attachment (inline by default)
+   GET /chat/attachment/:roomId/:attachmentId?download=1
+----------------------------------------------------------- */
+exports.streamAttachment = async (req, res) => {
+  try {
+    const { roomId, attachmentId } = req.params;
+    const asAttachment = req.query.download === '1';
+
+    const userId = String(req.query.userId || req.body.userId || req.headers['x-user-id'] || '');
+    if (!roomId || !attachmentId) return res.status(400).json({ message: 'roomId and attachmentId are required' });
+    if (!userId) return res.status(400).json({ message: 'userId is required (query, header or body)' });
+
+    const room = await ChatRoom.findOne({ roomId }).lean();
+    if (!room) return res.status(404).json({ message: 'Chat room not found' });
+
+    // Authorization
+    if (!isUserInRoom(room, userId)) {
+      return res.status(403).json({ message: 'You are not a participant of this room' });
+    }
+
+    // Locate attachment
+    let targetAttachment = null;
+    for (const m of (room.messages || [])) {
+      const found = (m.attachments || []).find(a => a.attachmentId === attachmentId);
+      if (found) { targetAttachment = found; break; }
+    }
+    if (!targetAttachment) return res.status(404).json({ message: 'Attachment not found' });
+
+    // Handle storage kinds
+    if (targetAttachment.storage === 'gridfs' && targetAttachment.gridfsFilename) {
+      return streamGridFsByFilename(req, res, targetAttachment.gridfsFilename, {
+        asAttachment,
+        preferType: targetAttachment.mimeType || guessType(targetAttachment.gridfsFilename),
+        downloadName: targetAttachment.originalName || targetAttachment.gridfsFilename
+      });
+    }
+
+    if (targetAttachment.storage === 'local' && targetAttachment.path) {
+      if (!fs.existsSync(targetAttachment.path)) return res.status(404).json({ message: 'File not found on disk' });
+      const type = targetAttachment.mimeType || guessType(targetAttachment.originalName || targetAttachment.path);
+      res.setHeader('Content-Type', type);
+      res.setHeader('Content-Disposition', contentDispositionInline(targetAttachment.originalName || 'file', asAttachment));
+      return fs.createReadStream(targetAttachment.path).pipe(res);
+    }
+
+    if (targetAttachment.url) {
+      // For remote URLs, redirect; client can decide to open/preview
+      return res.redirect(302, targetAttachment.url);
+    }
+
+    return res.status(500).json({ message: 'Attachment is not streamable' });
+  } catch (err) {
+    console.error('streamAttachment error:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+/* -----------------------------------------------------------
+   10) (Optional) Public GridFS streamer by filename
+   Mount: GET /file/:filename?download=1
+   - inline by default for images/PDFs
+   - supports Range for media scrubbing
+----------------------------------------------------------- */
+exports.streamGridFsFile = async (req, res) => {
+  const filename = req.params.filename;
+  const asAttachment = req.query.download === '1';
+  if (!filename) return res.status(400).json({ message: 'filename is required' });
+
+  try {
+    return streamGridFsByFilename(req, res, filename, { asAttachment });
+  } catch (err) {
+    console.error('streamGridFsFile error:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+/* -----------------------------------------------------------
+   11) Legacy POST download (kept)
+   POST /chat/download
+----------------------------------------------------------- */
 exports.downloadAttachmentPost = async (req, res) => {
   try {
     const { roomId, attachmentId, userId } = req.body;
@@ -664,7 +768,8 @@ exports.downloadAttachmentPost = async (req, res) => {
     }
 
     if (targetAttachment.storage === 'gridfs' && targetAttachment.gridfsFilename) {
-      return res.redirect(302, `/file/${encodeURIComponent(targetAttachment.gridfsFilename)}`);
+      // Redirect to public streamer (download=1 forces attachment)
+      return res.redirect(302, `/file/${encodeURIComponent(targetAttachment.gridfsFilename)}?download=1`);
     }
 
     if (targetAttachment.url) {
@@ -677,3 +782,63 @@ exports.downloadAttachmentPost = async (req, res) => {
     return res.status(500).json({ message: 'Internal server error' });
   }
 };
+
+
+/* ===========================================================
+   Internal: GridFS streaming with Range + headers
+=========================================================== */
+async function streamGridFsByFilename(req, res, filename, opts = {}) {
+  const bucket = getBucket();
+  const fileDoc = await findGridFileByFilename(filename);
+  if (!fileDoc) {
+    res.status(404).json({ message: 'File not found' });
+    return;
+  }
+
+  const total = fileDoc.length;
+  const type =
+    opts.preferType ||
+    fileDoc.contentType ||
+    (fileDoc.metadata && fileDoc.metadata.mimetype) ||
+    guessType(fileDoc.filename);
+
+  const asAttachmentExplicit = opts.asAttachment === true;
+  const shouldInline = !asAttachmentExplicit && isInlineType(type);
+
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('Content-Type', type);
+  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+  res.setHeader('Content-Disposition', contentDispositionInline(
+    opts.downloadName || fileDoc.filename,
+    asAttachmentExplicit && !shouldInline // explicit download wins
+  ));
+
+  const range = req.headers.range;
+  if (range) {
+    // Parse Range: bytes=start-end
+    const m = String(range).match(/bytes=(\d*)-(\d*)/);
+    if (m) {
+      let start = m[1] ? parseInt(m[1], 10) : 0;
+      let end = m[2] ? parseInt(m[2], 10) : total - 1;
+      if (isNaN(start) || isNaN(end) || start > end || start >= total) {
+        res.status(416).setHeader('Content-Range', `bytes */${total}`).end();
+        return;
+      }
+
+      res.status(206);
+      res.setHeader('Content-Range', `bytes ${start}-${end}/${total}`);
+      res.setHeader('Content-Length', (end - start + 1).toString());
+
+      const stream = bucket.openDownloadStreamByName(fileDoc.filename, { start, end: end + 1 });
+      stream.on('error', () => res.end());
+      stream.pipe(res);
+      return;
+    }
+  }
+
+  // Full file
+  res.setHeader('Content-Length', total.toString());
+  const stream = bucket.openDownloadStreamByName(fileDoc.filename);
+  stream.on('error', () => res.end());
+  stream.pipe(res);
+}
