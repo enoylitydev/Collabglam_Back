@@ -147,7 +147,7 @@ async function checkAndNotifyUnseenMessages() {
           const now = new Date();
 
           if (lastNotification && (now - new Date(lastNotification)) < ONE_HOUR) {
-            console.log(`⏭️  Skipping notification for ${participant.userId} (sent recently)`);
+            // console.log(`⏭️  Skipping notification for ${participant.userId} (sent recently)`);
             continue;
           }
 

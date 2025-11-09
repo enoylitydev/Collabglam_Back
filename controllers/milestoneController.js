@@ -1,5 +1,7 @@
+// controllers/milestoneController.js
 const Milestone = require('../models/milestone');
 const Campaign = require('../models/campaign');
+const { createAndEmit } = require('../utils/notifier'); // ⬅️ use centralized notifier
 
 // POST /milestone/create
 // body: { brandId, influencerId, campaignId, milestoneTitle, amount, milestoneDescription }
@@ -11,9 +13,8 @@ exports.createMilestone = async (req, res) => {
     milestoneTitle,
     amount,
     milestoneDescription = ''
-  } = req.body; 
+  } = req.body;
 
-  // 0) Coerce and validate amount
   const amountNum = Number(amount);
   if (isNaN(amountNum)) {
     return res.status(400).json({ message: 'amount must be a valid number' });
@@ -39,16 +40,11 @@ exports.createMilestone = async (req, res) => {
 
     // 2a) Check previous milestone for this influencer+campaign
     const prev = doc.milestoneHistory
-      .filter(e =>
-        e.influencerId === influencerId &&
-        e.campaignId === campaignId
-      );
+      .filter(e => e.influencerId === influencerId && e.campaignId === campaignId);
 
     if (prev.length > 0) {
-      // find the very last one for this exact pair
       prev.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
       const last = prev[0];
-
       if (!last.released) {
         return res.status(400).json({
           message: 'Cannot create new milestone until the previous milestone is released'
@@ -56,15 +52,15 @@ exports.createMilestone = async (req, res) => {
       }
     }
 
-    // 3) Append a new history entry (with default released=false)
+    // 3) Append a new history entry
     const entry = {
       influencerId,
       campaignId,
       milestoneTitle,
       amount: amountNum,
       milestoneDescription,
-      released: false,          // <-- new flag
-      createdAt: new Date()     // <-- ensure you record a timestamp
+      released: false,
+      createdAt: new Date()
     };
     doc.milestoneHistory.push(entry);
 
@@ -74,7 +70,30 @@ exports.createMilestone = async (req, res) => {
     // 5) Save
     await doc.save();
 
-    // 6) Respond with milestoneId
+    // 6) Notifications (non-blocking)
+    // Influencer → campaign view
+    createAndEmit({
+      influencerId,
+      type: 'milestone.created',
+      title: `New milestone: ${milestoneTitle}`,
+      message: `An amount of $${amountNum.toFixed(2)} was created for this campaign.`,
+      entityType: 'campaign',
+      entityId: String(campaignId),
+      actionPath: `/influencer/my-campaign`,
+    }).catch(e => console.error('notify influencer (created) failed:', e));
+
+    // Brand → milestone history
+    createAndEmit({
+      brandId,
+      type: 'milestone.created',
+      title: `Milestone created for influencer ${influencerId}`,
+      message: `${milestoneTitle} • $${amountNum.toFixed(2)}`,
+      entityType: 'campaign',
+      entityId: String(campaignId),
+      actionPath: `/brand/active-campaign`,
+    }).catch(e => console.error('notify brand (created) failed:', e));
+
+    // 7) Respond
     return res.status(201).json({
       message: 'Milestone created',
       milestoneId: doc.milestoneId,
@@ -109,7 +128,6 @@ exports.getMilestonesByCampaign = async (req, res) => {
         }))
     );
 
-    // Newest-first sort inline
     entries.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
     return res.status(200).json({
@@ -149,7 +167,6 @@ exports.getMilestonesByInfluencerAndCampaign = async (req, res) => {
         }))
     );
 
-    // Newest-first sort inline
     entries.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
     return res.status(200).json({
@@ -186,7 +203,6 @@ exports.getMilestonesByInfluencer = async (req, res) => {
         }))
     );
 
-    // Newest-first sort inline
     entries.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
     return res.status(200).json({
@@ -225,7 +241,6 @@ exports.getMilestonesByBrand = async (req, res) => {
       walletBalance: doc.walletBalance
     }));
 
-    // Newest-first sort inline
     entries.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
     return res.status(200).json({
@@ -287,6 +302,29 @@ exports.releaseMilestone = async (req, res) => {
     entry.releasedAt = new Date();
 
     await doc.save();
+
+    // Notifications (non-blocking)
+    // Influencer → campaign view
+    createAndEmit({
+      influencerId: entry.influencerId,
+      type: 'milestone.released',
+      title: `Milestone released${entry.milestoneTitle ? `: ${entry.milestoneTitle}` : ''}`,
+      message: `You received $${Number(entry.amount).toFixed(2)}.`,
+      entityType: 'campaign',
+      entityId: String(entry.campaignId),
+      actionPath: `/influencer/my-campaign`,
+    }).catch(e => console.error('notify influencer (released) failed:', e));
+
+    // Brand → milestone history
+    createAndEmit({
+      brandId: doc.brandId,
+      type: 'milestone.released',
+      title: `Released $${Number(entry.amount).toFixed(2)}`,
+      message: `${entry.milestoneTitle || 'Milestone'} marked as released.`,
+      entityType: 'campaign',
+      entityId: String(entry.campaignId),
+      actionPath: `/brand/active-campaign`,
+    }).catch(e => console.error('notify brand (released) failed:', e));
 
     return res.status(200).json({
       message: 'Milestone released successfully.',

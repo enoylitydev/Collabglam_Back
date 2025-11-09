@@ -1,6 +1,14 @@
 "use strict";
 
 // ============================ Imports ============================
+// controllers/contractsController.js
+// CollabGlam — Contracts Controller (rewritten, cleaned + resend support + notifications)
+// - Adds "resend" support via:
+//     a) POST /contract/initiate with { isResend: true, resendOf: "<contractId>" }
+//     b) POST /contract/resend with { contractId, brandUpdates? }
+// - Adds in-website notifications for initiate, edits, confirms/accepts, sign, fully-locked, and reject
+// - IMPORTANT CHANGE: Brand edits are allowed **only before any confirmations** (brand or influencer).
+
 const PDFDocument = require('pdfkit');
 const moment = require('moment-timezone');
 const puppeteer = require('puppeteer');
@@ -13,6 +21,7 @@ const Brand = require('../models/brand');
 const Influencer = require('../models/influencer');
 const MASTER_TEMPLATE = require('../template/ContractTemplate');
 const Contract = require('../models/contract');
+const { createAndEmit } = require('../utils/notifier'); // ← notifications
 
 // Files
 const TIMEZONES_FILE = path.join(__dirname, '..', 'data', 'timezones.json');
@@ -996,6 +1005,32 @@ exports.initiate = async (req, res) => {
         { $set: { isContracted: 1, contractId: child.contractId, isAccepted: 0 } }
       );
 
+      // 🔔 notify influencer (resend)
+      await createAndEmit({
+        recipientType: 'influencer',
+        influencerId: String(influencerId),
+        type: 'contract.initiated',
+        title: `Contract resent by ${brandDoc.name}`,
+        message: `Updated contract for "${campaign.productOrServiceName}".`,
+        entityType: 'contract',
+        entityId: String(child.contractId),
+        actionPath: `/influencer/my-campaign`,
+        meta: { campaignId, brandId, influencerId, resendOf: parent.contractId }
+      });
+
+      // 🔔 self receipt for brand (resend)
+      await createAndEmit({
+        recipientType: 'brand',
+        brandId: String(brandId),
+        type: 'contract.initiated.self',
+        title: 'Contract resent',
+        message: `You resent the contract to ${influencerDoc?.name || 'Influencer'} for “${campaign?.productOrServiceName || 'Campaign'}”.`,
+        entityType: 'contract',
+        entityId: String(child.contractId),
+        actionPath: `/brand/created-campaign/applied-inf?id=${campaignId}`,
+        meta: { campaignId, influencerId, resendOf: parent.contractId }
+      });
+
       return respondOK(res, { message: 'Resent contract created', contract: child }, 201);
     }
 
@@ -1013,6 +1048,32 @@ exports.initiate = async (req, res) => {
       { campaignId },
       { $set: { isContracted: 1, contractId: contract.contractId, isAccepted: 0 } }
     );
+
+    // 🔔 notify influencer (initiate)
+    await createAndEmit({
+      recipientType: 'influencer',
+      influencerId: String(influencerId),
+      type: 'contract.initiated',
+      title: `Contract initiated by ${brandDoc.name}`,
+      message: `Contract created for "${campaign.productOrServiceName}".`,
+      entityType: 'contract',
+      entityId: String(contract.contractId),
+      actionPath: `/influencer/my-campaign`,
+      meta: { campaignId, brandId, influencerId }
+    });
+
+    // 🔔 self receipt for brand (initiate)
+    await createAndEmit({
+      recipientType: 'brand',
+      brandId: String(brandId),
+      type: 'contract.initiated.self',
+      title: 'Contract sent',
+      message: `You sent a contract to ${influencerDoc.name || 'Influencer'} for “${campaign.productOrServiceName}”.`,
+      entityType: 'contract',
+      entityId: String(contract.contractId),
+      actionPath: `/brand/created-campaign/applied-inf?id=${campaignId}`,
+      meta: { campaignId, influencerId }
+    });
 
     return respondOK(res, { message: 'Contract initialized successfully', contract }, 201);
   } catch (err) {
@@ -1072,6 +1133,31 @@ exports.influencerConfirm = async (req, res) => {
       { $set: { isAccepted: 1, isContracted: 1, contractId: contract.contractId } }
     );
 
+    // 🔔 notify brand (influencer accepted/confirmed)
+    await createAndEmit({
+      recipientType: 'brand',
+      brandId: String(contract.brandId),
+      type: 'contract.confirm.influencer',
+      title: `Influencer accepted`,
+      message: `${contract.influencerName || 'Influencer'} accepted the contract.`,
+      entityType: 'contract',
+      entityId: String(contract.contractId),
+      actionPath: `/brand/contracts/${contract.contractId}`
+    });
+
+    // 🔔 self receipt for influencer (accepted)
+    await createAndEmit({
+      recipientType: 'influencer',
+      influencerId: String(contract.influencerId),
+      type: 'contract.confirm.influencer.self',
+      title: 'You accepted the contract',
+      message: `You accepted “${contract.brand?.campaignTitle || contract.brandName || 'Contract'}”.`,
+      entityType: 'contract',
+      entityId: String(contract.contractId),
+      actionPath: `/influencer/my-campaign`,
+      meta: { campaignId: contract.campaignId, brandId: contract.brandId }
+    });
+
     return respondOK(res, { message: 'Influencer confirmation saved', contract });
   } catch (err) {
     return respondError(res, 'influencerConfirm error', err.status || 500, err);
@@ -1090,6 +1176,32 @@ exports.brandConfirm = async (req, res) => {
     if (contract.status === 'sent') contract.status = 'viewed';
     await contract.save();
     await emitEvent(contract, 'BRAND_CONFIRMED');
+
+    // 🔔 notify influencer (brand confirmed)
+    await createAndEmit({
+      recipientType: 'influencer',
+      influencerId: String(contract.influencerId),
+      type: 'contract.confirm.brand',
+      title: `Brand confirmed`,
+      message: `${contract.brandName || 'Brand'} confirmed the contract.`,
+      entityType: 'contract',
+      entityId: String(contract.contractId),
+      actionPath: `/influencer/my-campaign`
+    });
+
+    // 🔔 self receipt for brand (confirmed)
+    await createAndEmit({
+      recipientType: 'brand',
+      brandId: String(contract.brandId),
+      type: 'contract.confirm.brand.self',
+      title: 'You confirmed the contract',
+      message: `You confirmed the contract for “${contract.brand?.campaignTitle || 'Campaign'}”.`,
+      entityType: 'contract',
+      entityId: String(contract.contractId),
+      actionPath: `/brand/created-campaign/applied-inf?id=${contract.campaignId}`,
+      meta: { campaignId: contract.campaignId, influencerId: contract.influencerId }
+    });
+
     return respondOK(res, { message: 'Brand confirmation saved', contract });
   } catch (err) {
     return respondError(res, 'brandConfirm error', 500, err);
@@ -1162,10 +1274,9 @@ exports.preview = async (req, res) => {
 
     const html = renderContractHTML({ contract, templateText: text });
     const tokens = buildTokenMap(contract);
-    const headerTitle = 'COLLABGLAM MASTER BRAND–INFLUENCER AGREEMENT (TRI-PARTY)';
     const headerDate = tokens['Agreement.EffectiveDateLong'] || formatDateTZ(new Date(), tz, 'Do MMMM YYYY');
 
-    return await renderPDFWithPuppeteer({ html, res, filename: `Contract-${contractId}.pdf`, headerTitle, headerDate });
+    return await renderPDFWithPuppeteer({ html, res, filename: `Contract-${contractId}.pdf`, headerTitle: 'COLLABGLAM MASTER BRAND–INFLUENCER AGREEMENT (TRI-PARTY)', headerDate });
   } catch (err) {
     return respondError(res, 'preview error', 500, err);
   }
@@ -1186,10 +1297,9 @@ exports.viewContractPdf = async (req, res) => {
     const html = renderContractHTML({ contract, templateText: text });
 
     const tokens = buildTokenMap(contract);
-    const headerTitle = 'COLLABGLAM MASTER BRAND–INFLUENCER AGREEMENT (TRI-PARTY)';
     const headerDate = tokens['Agreement.EffectiveDateLong'] || formatDateTZ(new Date(), tz, 'Do MMMM YYYY');
 
-    return await renderPDFWithPuppeteer({ html, res, filename: `Contract-${contractId}.pdf`, headerTitle, headerDate });
+    return await renderPDFWithPuppeteer({ html, res, filename: `Contract-${contractId}.pdf`, headerTitle: 'COLLABGLAM MASTER BRAND–INFLUENCER AGREEMENT (TRI-PARTY)', headerDate });
   } catch (err) {
     console.error('viewContractPdf error:', err);
     try {
@@ -1264,6 +1374,78 @@ exports.sign = async (req, res) => {
       { $set: campaignSync }
     );
 
+    // counterparty notification
+    const opp = role === 'brand'
+      ? { recipientType: 'influencer', influencerId: String(contract.influencerId), type: 'contract.signed.brand', path: `/influencer/my-campaign` }
+      : role === 'influencer'
+        ? { recipientType: 'brand', brandId: String(contract.brandId), type: 'contract.signed.influencer', path: `/brand/created-campaign/applied-inf?id=${contract.campaignId}` }
+        : null;
+
+    if (opp) {
+      await createAndEmit({
+        recipientType: opp.recipientType,
+        brandId: opp.brandId,
+        influencerId: opp.influencerId,
+        type: opp.type,
+        title: `${role === 'brand' ? 'Brand' : 'Influencer'} signed`,
+        message: `${role === 'brand' ? (contract.brandName || 'Brand') : (contract.influencerName || 'Influencer')} added a signature.`,
+        entityType: 'contract',
+        entityId: String(contract.contractId),
+        actionPath: opp.path
+      });
+    }
+
+    // self receipt for acting party
+    if (role === 'brand') {
+      await createAndEmit({
+        recipientType: 'brand',
+        brandId: String(contract.brandId),
+        type: 'contract.signed.brand.self',
+        title: 'You signed the contract',
+        message: 'Your signature has been recorded.',
+        entityType: 'contract',
+        entityId: String(contract.contractId),
+        actionPath: `/brand/created-campaign/applied-inf?id=${contract.campaignId}`
+      });
+    } else if (role === 'influencer') {
+      await createAndEmit({
+        recipientType: 'influencer',
+        influencerId: String(contract.influencerId),
+        type: 'contract.signed.influencer.self',
+        title: 'You signed the contract',
+        message: 'Your signature has been recorded.',
+        entityType: 'contract',
+        entityId: String(contract.contractId),
+        actionPath: `/influencer/my-campaign`
+      });
+    }
+
+    // fully signed => notify both
+    if (locked) {
+      await Promise.all([
+        createAndEmit({
+          recipientType: 'brand',
+          brandId: String(contract.brandId),
+          type: 'contract.locked',
+          title: 'Contract fully signed',
+          message: 'All parties signed. Your contract is locked.',
+          entityType: 'contract',
+          entityId: String(contract.contractId),
+          actionPath: `/brand/created-campaign/applied-inf?id=${contract.campaignId}`
+        }),
+        createAndEmit({
+          recipientType: 'influencer',
+          influencerId: String(contract.influencerId),
+          type: 'contract.locked',
+          title: 'Contract fully signed',
+          message: 'All parties signed. Your contract is locked.',
+          entityType: 'contract',
+          entityId: String(contract.contractId),
+          actionPath: `/influencer/my-campaign`
+        })
+      ]);
+    }
+
     return respondOK(res, { message: (locked ? 'Signed & locked' : 'Signature recorded'), contract });
   } catch (err) {
     if (err && err.status && err.message) return respondError(res, err.message, err.status, err);
@@ -1334,6 +1516,32 @@ exports.brandUpdateFields = async (req, res) => {
 
     await contract.save();
     await emitEvent(contract, 'BRAND_EDITED', { brandUpdates: Object.keys(brandUpdates), editedFields });
+
+    // 🔔 notify influencer (brand edited)
+    await createAndEmit({
+      recipientType: 'influencer',
+      influencerId: String(contract.influencerId),
+      type: 'contract.edited.brand',
+      title: `Contract updated by ${contract.brandName || 'Brand'}`,
+      message: `Brand made changes to your contract.`,
+      entityType: 'contract',
+      entityId: String(contract.contractId),
+      actionPath: `/influencer/my-campaign`
+    });
+
+    // 🔔 self receipt for brand (brand edited)
+    await createAndEmit({
+      recipientType: 'brand',
+      brandId: String(contract.brandId),
+      type: 'contract.edited.brand.self',
+      title: 'You updated the contract',
+      message: 'Your changes were saved and shared with the influencer.',
+      entityType: 'contract',
+      entityId: String(contract.contractId),
+      actionPath: `/brand/created-campaign/applied-inf?id=${campaignId}`,
+      meta: { editedFields }
+    });
+
     return respondOK(res, { message: 'Brand fields updated', contract });
   } catch (err) {
     if (err && err.status && err.message) return respondError(res, err.message, err.status, err);
@@ -1367,6 +1575,32 @@ exports.influencerUpdateFields = async (req, res) => {
 
     await contract.save();
     await emitEvent(contract, 'INFLUENCER_EDITED', { editedFields });
+
+    // 🔔 notify brand (influencer edited)
+    await createAndEmit({
+      recipientType: 'brand',
+      brandId: String(contract.brandId),
+      type: 'contract.edited.influencer',
+      title: `Contract updated by ${contract.influencerName || 'Influencer'}`,
+      message: `Influencer submitted updates to the contract.`,
+      entityType: 'contract',
+      entityId: String(contract.contractId),
+      actionPath: `/brand/created-campaign/applied-inf?id=${campaignId}`
+    });
+
+    // 🔔 self receipt for influencer (influencer edited)
+    await createAndEmit({
+      recipientType: 'influencer',
+      influencerId: String(contract.influencerId),
+      type: 'contract.edited.influencer.self',
+      title: 'You updated the contract',
+      message: 'Your updates were sent to the brand.',
+      entityType: 'contract',
+      entityId: String(contract.contractId),
+      actionPath: `/influencer/my-campaign`,
+      meta: { editedFields }
+    });
+
     return respondOK(res, { message: 'Influencer fields updated', contract });
   } catch (err) {
     return respondError(res, 'influencerUpdateFields error', 500, err);
@@ -1412,6 +1646,18 @@ exports.reject = async (req, res) => {
       { campaignId: contract.campaignId },
       { $set: { isContracted: 0, contractId: null, isAccepted: 0 } }
     );
+
+    // 🔔 notify brand (rejected)
+    await createAndEmit({
+      recipientType: 'brand',
+      brandId: String(contract.brandId),
+      type: 'contract.rejected',
+      title: 'Contract rejected by influencer',
+      message: reason ? `Reason: ${reason}` : 'Influencer rejected the contract.',
+      entityType: 'contract',
+      entityId: String(contract.contractId),
+      actionPath: `/brand/created-campaign/applied-inf?id=${campaignId}`
+    });
 
     return respondOK(res, { message: 'Contract rejected', contract });
   } catch (err) {
@@ -1503,6 +1749,32 @@ exports.resend = async (req, res) => {
       { campaignId: parent.campaignId },
       { $set: { isContracted: 1, contractId: child.contractId, isAccepted: 0 } }
     );
+
+    // 🔔 notify influencer (resend)
+    await createAndEmit({
+      recipientType: 'influencer',
+      influencerId: String(parent.influencerId),
+      type: 'contract.initiated',
+      title: `Contract resent by ${parent.brandName || 'Brand'}`,
+      message: `Updated contract is available.`,
+      entityType: 'contract',
+      entityId: String(child.contractId),
+      actionPath: `/influencer/my-campaign`,
+      meta: { campaignId: parent.campaignId, brandId: parent.brandId, influencerId: parent.influencerId, resendOf: parent.contractId }
+    });
+
+    // 🔔 self receipt for brand (resend)
+    await createAndEmit({
+      recipientType: 'brand',
+      brandId: String(parent.brandId),
+      type: 'contract.initiated.self',
+      title: 'Contract resent',
+      message: 'You resent an updated contract to the influencer.',
+      entityType: 'contract',
+      entityId: String(child.contractId),
+      actionPath: `/brand/created-campaign/applied-inf?id=${campaignId}`,
+      meta: { campaignId: parent.campaignId, influencerId: parent.influencerId, resendOf: parent.contractId }
+    });
 
     return respondOK(res, { message: 'Resent contract created', contract: child }, 201);
   } catch (err) {
