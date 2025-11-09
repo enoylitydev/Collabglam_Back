@@ -1,10 +1,9 @@
 // controllers/chatController.js
 const { v4: uuidv4 } = require('uuid');
-const path = require('path');
 const fs = require('fs');
-const mime = require('mime-types');
-const sizeOf = require('image-size');
 const multer = require('multer');
+const mongoose = require('mongoose');
+const { uploadToGridFS, deleteGridFsFiles } = require('../utils/gridfs');
 
 const ChatRoom       = require('../models/chat');
 const Brand          = require('../models/brand');
@@ -46,29 +45,22 @@ function makeReplySnapshot(room, replyTo) {
 }
 
 /* -----------------------------------------------------------
-   Multer setup for /chat/send-file
+   Multer + GridFS for /chat/send-file
 ----------------------------------------------------------- */
-const uploadsRoot = path.join(__dirname, '..', 'uploads', 'chat');
-
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    const { roomId } = req.body;
-    const dir = path.join(uploadsRoot, roomId || 'misc');
-    fs.mkdirSync(dir, { recursive: true });
-    cb(null, dir);
-  },
-  filename: function (req, file, cb) {
-    const ext = path.extname(file.originalname) || `.${mime.extension(file.mimetype) || 'bin'}`;
-    cb(null, `${Date.now()}-${uuidv4()}${ext}`);
-  }
-});
-
+// Use memory storage; we stream buffers to GridFS
 const upload = multer({
-  storage,
-  limits: {
-    fileSize: 1024 * 1024 * 100 // 100 MB per file (adjust as you like)
-  }
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 1024 * 1024 * 100 } // 100 MB per file
 });
+
+async function saveFilesToGridFS(files = [], req) {
+  if (!Array.isArray(files) || files.length === 0) return [];
+  return uploadToGridFS(files, {
+    prefix: 'chat',
+    metadata: { kind: 'chat_attachment' },
+    req
+  });
+}
 
 /* -----------------------------------------------------------
    1) Create (or return) a one-to-one room
@@ -263,41 +255,26 @@ exports.postFileMessage = [
       if (!room) return res.status(404).json({ message: 'Chat room not found' });
       if (!isUserInRoom(room, senderId)) return res.status(403).json({ message: 'Sender is not a participant of this room' });
 
-      const files = req.files || [];
+      const files = Array.isArray(req.files) ? req.files : [];
       if (files.length === 0 && !text) {
         return res.status(400).json({ message: 'Provide at least one file or text' });
       }
 
-      // Build public URLs for served static files
-      const host = req.get('host');
-      const protocol = (req.headers['x-forwarded-proto'] || req.protocol || 'http');
-      const baseUrl = `${protocol}://${host}`;
+      // Stream files to GridFS
+      const saved = await saveFilesToGridFS(files, req);
 
-      const attachments = files.map(f => {
-        let width = null, height = null;
-        try {
-          if (f.mimetype && f.mimetype.startsWith('image/')) {
-            const dim = sizeOf(f.path);
-            width = dim?.width || null;
-            height = dim?.height || null;
-          }
-        } catch { /* ignore dimension errors */ }
-
-        const rel = path.relative(path.join(__dirname, '..'), f.path).split(path.sep).join('/'); // relative to project root
-        const url = `${baseUrl}/${rel.replace(/^public\//, '')}`; // if you mount static on '/'
-
-        return {
-          attachmentId: uuidv4(),
-          url,
-          path: f.path,
-          originalName: f.originalname,
-          mimeType: f.mimetype || 'application/octet-stream',
-          size: f.size || 0,
-          width,
-          height,
-          storage: 'local'
-        };
-      });
+      const attachments = saved.map(s => ({
+        attachmentId: uuidv4(),
+        url: s.url,
+        originalName: s.originalName || 'file',
+        mimeType: s.mimeType || 'application/octet-stream',
+        size: s.size || 0,
+        width: null,
+        height: null,
+        storage: 'gridfs',
+        gridfsFilename: s.filename,
+        gridfsId: s.id
+      }));
 
       const reply = makeReplySnapshot(room, replyTo);
 
@@ -390,12 +367,22 @@ exports.deleteMessage = async (req, res) => {
       return res.status(403).json({ message: 'You can delete only your own messages' });
     }
 
-    // Try to unlink local attachments
-    for (const att of (msg.attachments || [])) {
-      if (att.storage === 'local' && att.path) {
-        fs.promises.unlink(att.path).catch(() => { }); // ignore errors
+    // Cleanup attachments (local disk or GridFS)
+    try {
+      // Local
+      for (const att of (msg.attachments || [])) {
+        if (att.storage === 'local' && att.path) {
+          fs.promises.unlink(att.path).catch(() => { }); // ignore errors
+        }
       }
-    }
+      // GridFS
+      const gridIds = (msg.attachments || [])
+        .filter(a => a.storage === 'gridfs' && a.gridfsId)
+        .map(a => a.gridfsId);
+      if (gridIds.length) {
+        await deleteGridFsFiles(gridIds);
+      }
+    } catch { /* ignore */ }
 
     room.messages.splice(idx, 1);
     await room.save();
@@ -586,6 +573,11 @@ exports.downloadAttachmentPost = async (req, res) => {
 
       // Let Express handle headers + stream
       return res.download(targetAttachment.path, filename);
+    }
+
+    // GridFS storage: redirect to file route
+    if (targetAttachment.storage === 'gridfs' && targetAttachment.gridfsFilename) {
+      return res.redirect(302, `/file/${encodeURIComponent(targetAttachment.gridfsFilename)}`);
     }
 
     // Remote storage: pass through to the public URL (or upgrade later to signed URL)

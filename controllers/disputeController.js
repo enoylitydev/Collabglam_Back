@@ -116,6 +116,12 @@ exports.listMine = async (req, res) => {
       if (role === 'influencer') filter['createdBy.role'] = 'Influencer';
     }
 
+    // By default, influencers should only see disputes they created themselves
+    if (me.role === 'Influencer' && !appliedBy) {
+      filter['createdBy.role'] = 'Influencer';
+      filter['createdBy.id'] = me.id;
+    }
+
     const total = await Dispute.countDocuments(filter);
     const rows = await Dispute.find(filter)
       .select('disputeId subject description status campaignId brandId influencerId assignedTo comments createdAt updatedAt')
@@ -124,13 +130,34 @@ exports.listMine = async (req, res) => {
       .limit(l)
       .lean();
 
-    return res.status(200).json({
-      page: p,
-      limit: l,
-      total,
-      totalPages: Math.ceil(total / l),
-      disputes: rows
-    });
+    // Enrich disputes with campaign name for brand/influencer list views
+    try {
+      const campaignIds = Array.from(new Set(rows.map(r => r.campaignId).filter(Boolean))).map(String);
+      const campaigns = campaignIds.length
+        ? await Campaign.find({ campaignsId: { $in: campaignIds } })
+            .select('campaignsId productOrServiceName')
+            .lean()
+        : [];
+      const cmap = new Map((campaigns || []).map(c => [String(c.campaignsId), c.productOrServiceName]));
+      const enriched = rows.map(r => ({ ...r, campaignName: r.campaignId ? (cmap.get(String(r.campaignId)) || null) : null }));
+
+      return res.status(200).json({
+        page: p,
+        limit: l,
+        total,
+        totalPages: Math.ceil(total / l),
+        disputes: enriched
+      });
+    } catch {
+      // If enrichment fails, return base rows
+      return res.status(200).json({
+        page: p,
+        limit: l,
+        total,
+        totalPages: Math.ceil(total / l),
+        disputes: rows
+      });
+    }
   } catch (err) {
     console.error('Error in listMine:', err);
     return res.status(500).json({ message: 'Internal server error' });
@@ -153,6 +180,16 @@ exports.getById = async (req, res) => {
     } else if (me.role === 'Unknown') {
       return res.status(403).json({ message: 'Forbidden' });
     }
+
+    // Enrich with campaign name for brand/influencer detail views
+    try {
+      if (d.campaignId) {
+        const c = await Campaign.findOne({ campaignsId: d.campaignId }).select('campaignsId productOrServiceName').lean();
+        d.campaignName = c?.productOrServiceName || null;
+      } else {
+        d.campaignName = null;
+      }
+    } catch {}
 
     return res.status(200).json({ dispute: d });
   } catch (err) {

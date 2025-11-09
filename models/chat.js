@@ -14,7 +14,9 @@ const attachmentSchema = new mongoose.Schema({
   height: { type: Number, default: null },
   duration: { type: Number, default: null }, // seconds for audio/video if you measure it
   thumbnailUrl: { type: String, default: null }, // if you generate thumbs later
-  storage: { type: String, enum: ['local', 'remote'], default: 'local' }
+  storage: { type: String, enum: ['local', 'remote', 'gridfs'], default: 'local' },
+  gridfsFilename: { type: String, default: null },
+  gridfsId: { type: String, default: null }
 }, { _id: false });
 
 const replySnapshotSchema = new mongoose.Schema({
