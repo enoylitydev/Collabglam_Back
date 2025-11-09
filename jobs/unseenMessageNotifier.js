@@ -127,7 +127,7 @@ async function sendUnseenMessageNotification(email, userName, unseenCount, roomI
 async function checkAndNotifyUnseenMessages() {
   try {
     const rooms = await ChatRoom.find();
-    const ONE_HOUR = 60 * 60 * 1000;
+    const ONE_HOUR = 600 * 60 * 60 * 1000;
 
     for (const room of rooms) {
       for (const participant of room.participants) {
