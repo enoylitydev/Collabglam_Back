@@ -15,6 +15,9 @@ const getFeature = require('../utils/getFeature');
 const Milestone = require('../models/milestone');
 const Country = require('../models/country');
 
+// ✅ NEW: persisted notifications helper (creates DB row + emits via socket.io)
+const { createAndEmit } = require('../utils/notifier');
+
 // ===============================
 //  Multer setup
 // ===============================
@@ -34,40 +37,6 @@ const storage = multer.diskStorage({
     cb(null, `${baseName}_${timestamp}${ext}`);
   }
 });
-
-async function buildSubToParentNumMap() {
-  const rows = await Category.find({}, 'id subcategories').lean();
-  const subIdToParentNum = new Map(); // uuid -> Number
-
-  for (const r of rows) {
-    for (const s of (r.subcategories || [])) {
-      subIdToParentNum.set(String(s.subcategoryId), r.id);
-    }
-  }
-  return subIdToParentNum;
-}
-
-function buildSearchOr(q) {
-  return [
-    { brandName: { $regex: q, $options: 'i' } },
-    { productOrServiceName: { $regex: q, $options: 'i' } },
-    { description: { $regex: q, $options: 'i' } },
-    { 'categories.categoryName': { $regex: q, $options: 'i' } },
-    { 'categories.subcategoryName': { $regex: q, $options: 'i' } }
-  ];
-}
-
-
-// Basic search fields (fallback if you already have a builder, keep yours)
-function buildSearchOr(q) {
-  return [
-    { brandName: { $regex: q, $options: 'i' } },
-    { productOrServiceName: { $regex: q, $options: 'i' } },
-    { description: { $regex: q, $options: 'i' } },
-    { 'categories.categoryName': { $regex: q, $options: 'i' } },
-    { 'categories.subcategoryName': { $regex: q, $options: 'i' } }
-  ];
-}
 
 const upload = multer({
   storage,
@@ -111,7 +80,7 @@ async function milestoneSetForInfluencer(influencerId, campaignIds = []) {
 
 /**
  * Expand & validate categories payload into:
- * [{ categoryId(ObjectId), categoryName, subcategoryId(string), subcategoryName }]
+ * [{ categoryId(Number), categoryName, subcategoryId(string), subcategoryName }]
  */
 async function normalizeCategoriesPayload(raw) {
   if (!raw) return [];
@@ -157,64 +126,14 @@ async function normalizeCategoriesPayload(raw) {
 }
 
 /**
- * Try to extract influencer-selected subcategoryIds from multiple shapes.
- * Returns Set<string> of subcategoryId.
- */
-function extractSubcategoryIdsFromInfluencerDoc(inf) {
-  const out = new Set();
-
-  // Common shapes we might see:
-  // 1) inf.subcategories: [{ subcategoryId, name, ... }]
-  if (Array.isArray(inf?.subcategories)) {
-    inf.subcategories.forEach((s) => {
-      if (s?.subcategoryId) out.add(String(s.subcategoryId));
-    });
-  }
-
-  // 2) inf.categories: could be array of string subcategoryIds or objects
-  if (Array.isArray(inf?.categories)) {
-    inf.categories.forEach((c) => {
-      if (typeof c === 'string') out.add(c);
-      else if (c?.subcategoryId) out.add(String(c.subcategoryId));
-    });
-  }
-
-  // 3) inf.socialProfiles?.categories: [{ subcategoryId, ... }]
-  if (Array.isArray(inf?.socialProfiles)) {
-    inf.socialProfiles.forEach((sp) => {
-      if (Array.isArray(sp?.categories)) {
-        sp.categories.forEach((c) => {
-          if (c?.subcategoryId) out.add(String(c.subcategoryId));
-        });
-      }
-    });
-  }
-
-  // 4) inf.onboarding?.categories or .subcategories
-  if (inf?.onboarding) {
-    if (Array.isArray(inf.onboarding.categories)) {
-      inf.onboarding.categories.forEach((c) => {
-        if (typeof c === 'string') out.add(c);
-        else if (c?.subcategoryId) out.add(String(c.subcategoryId));
-      });
-    }
-    if (Array.isArray(inf.onboarding.subcategories)) {
-      inf.onboarding.subcategories.forEach((s) => {
-        if (s?.subcategoryId) out.add(String(s.subcategoryId));
-      });
-    }
-  }
-
-  return out;
-}
-
-/**
  * Build case-insensitive $or for text search across brand name, product, subcategory/category names.
+ * Also treat numeric term as "budget <= term".
  */
 function buildSearchOr(term) {
   const or = [
     { brandName: { $regex: term, $options: 'i' } },
     { productOrServiceName: { $regex: term, $options: 'i' } },
+    { description: { $regex: term, $options: 'i' } },
     { 'categories.subcategoryName': { $regex: term, $options: 'i' } },
     { 'categories.categoryName': { $regex: term, $options: 'i' } }
   ];
@@ -223,8 +142,52 @@ function buildSearchOr(term) {
   return or;
 }
 
+/** Build a map subcategoryId(string) -> parent numeric Category.id */
+async function buildSubToParentNumMap() {
+  const rows = await Category.find({}, 'id subcategories').lean();
+  const subIdToParentNum = new Map(); // uuid -> Number
+  for (const r of rows) {
+    for (const s of (r.subcategories || [])) {
+      subIdToParentNum.set(String(s.subcategoryId), r.id);
+    }
+  }
+  return subIdToParentNum;
+}
+
+/** Find influencers who match any of the given subcategoryIds or parent numeric categoryIds */
+async function findMatchingInfluencers({ subIds = [], catNumIds = [] }) {
+  if (!subIds.length && !catNumIds.length) return [];
+
+  // We match several common shapes seen in Influencer docs
+  const or = [];
+  if (subIds.length) {
+    or.push(
+      { 'onboarding.subcategories.subcategoryId': { $in: subIds } },
+      { 'subcategories.subcategoryId': { $in: subIds } },
+      { 'categories.subcategoryId': { $in: subIds } },
+      { 'socialProfiles.categories.subcategoryId': { $in: subIds } },
+      { 'categories': { $in: subIds } } // in case categories is an array of subcategoryId strings
+    );
+  }
+  if (catNumIds.length) {
+    or.push(
+      { 'onboarding.categoryId': { $in: catNumIds } },
+      { 'categories.categoryId': { $in: catNumIds } }
+    );
+  }
+
+  const filter = or.length ? { $or: or } : {};
+  const influencers = await Influencer.find(
+    filter,
+    'influencerId name primaryPlatform handle onboarding socialProfiles'
+  ).lean();
+
+  return influencers || [];
+}
+
 // ===============================
 //  CREATE CAMPAIGN  (uses categories)
+//  + emits notifications to matching influencers (preferred campaign)
 // ===============================
 exports.createCampaign = (req, res) => {
   upload(req, res, async (err) => {
@@ -368,6 +331,40 @@ exports.createCampaign = (req, res) => {
           { brandId, 'subscription.features.key': 'live_campaigns_limit' },
           { $inc: { 'subscription.features.$.used': 1 } }
         );
+      }
+
+      // ==== ✅ Persisted notifications to matching influencers ====
+      try {
+        // Derive matches (category or subcategory)
+        const subIds = Array.from(new Set((categoriesData || []).map(c => String(c.subcategoryId))));
+        const catNumIds = Array.from(new Set((categoriesData || []).map(c => Number(c.categoryId)).filter(Number.isFinite)));
+
+        if (subIds.length || catNumIds.length) {
+          const influencers = await findMatchingInfluencers({ subIds, catNumIds });
+
+          if (Array.isArray(influencers) && influencers.length) {
+            const campaignIdForUrl = newCampaign.campaignsId || String(newCampaign._id);
+            const actionPath = `/influencer/dashboard/view-campaign?id=${campaignIdForUrl}`;
+            const title = 'New campaign matches your profile';
+            const message = `${newCampaign.brandName} posted "${newCampaign.productOrServiceName}".`;
+
+            await Promise.all(
+              influencers.map((inf) =>
+                createAndEmit({
+                  influencerId: String(inf.influencerId),
+                  type: 'campaign.match',
+                  title,
+                  message,
+                  entityType: 'campaign',
+                  entityId: String(campaignIdForUrl),
+                  actionPath
+                }).catch(e => console.warn('notify influencer failed', inf.influencerId, e.message))
+              )
+            );
+          }
+        }
+      } catch (notifErr) {
+        console.warn('createCampaign: notification flow failed (non-fatal)', notifErr.message);
       }
 
       return res.status(201).json({ message: 'Campaign created successfully.' });
