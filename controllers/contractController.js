@@ -133,12 +133,17 @@ function legalTextToHTML(raw) {
     const sch = line.match(/^Schedule\s+([A-Z])\s+–\s+(.+)$/);
     if (sch) {
       flushP();
+      if (afterBOpen) { out.push('</div>'); afterBOpen = false; }
+
       const letter = sch[1];
       inSchedules = true;
-      if (letter >= 'C') openAfterB();
+
+      if (letter >= 'C') { out.push('<div class="afterB">'); afterBOpen = true; }
+
       out.push(`<h3>Schedule ${esc(letter)} – ${esc(sch[2])}</h3>`);
       continue;
     }
+
 
     if (/^Signatures$/i.test(line)) {
       flushP(); out.push('<h2>Signatures</h2>'); out.push('<div id="__SIG_PANEL__"></div>'); continue;
@@ -210,44 +215,128 @@ function clampDraftDue(goLiveStart, now = new Date()) {
 const fmtBool = (v) => (v ? 'Yes' : 'No');
 const fmtList = (arr) => (Array.isArray(arr) ? arr.filter(Boolean).join(', ') : '');
 
-// ============================ Rendering (Tables & Bundle) ============================
 function renderDeliverablesTable(delivs = [], tz) {
   if (!delivs.length) return '<p class="muted">No deliverables defined.</p>';
-  const rows = delivs.map((d, i) => {
-    const pwStart = d?.postingWindow?.start ? formatDateTZ(d.postingWindow.start, tz) : '';
-    const pwEnd = d?.postingWindow?.end ? formatDateTZ(d.postingWindow.end, tz) : '';
-    const draftDue = d?.draftDueDate ? formatDateTZ(d.draftDueDate, tz) : '';
+
+  const ensureAt = (s) => {
+    const t = (s || "").trim();
+    return t ? (t.startsWith("@") ? t : `@${t}`) : "";
+  };
+
+  const fmtHandles = (arr) => {
+    const list = Array.isArray(arr) ? arr.map(ensureAt).filter(Boolean) : [];
+    return list.length ? fmtList(list) : "";
+  };
+
+  const fmtRetention = (d) => {
+    // Prefer months; fallback to hours (preserve 0)
+    if (d.liveRetentionMonths !== undefined && d.liveRetentionMonths !== null) {
+      const m = Number(d.liveRetentionMonths);
+      return Number.isFinite(m) ? `${m} month${m === 1 ? "" : "s"}` : "";
+    }
+    if (d.minLiveHours !== undefined && d.minLiveHours !== null) {
+      const h = Number(d.minLiveHours);
+      return Number.isFinite(h) ? `${h} hour${h === 1 ? "" : "s"}` : "";
+    }
+    return "";
+  };
+
+  const fmtRevisionsIncluded = (d) => {
+    const v = d.revisionRoundsIncluded ?? d.revisionsIncluded;
+    return (v === 0 || v > 0) ? String(v) : "";
+  };
+
+  const fmtExtraRevisionFee = (d) => {
+    const v = d.additionalRevisionFee;
+    return (v === 0 || v) ? String(v) : "";
+  };
+
+  // Generic row builder: hide empty values except for core rows
+  const row = (label, val, { keepWhenEmpty = false } = {}) =>
+    (keepWhenEmpty || (val !== "" && val !== null && val !== undefined))
+      ? `<tr><td><strong>${label}</strong></td><td>${val}</td></tr>`
+      : "";
+
+  const colgroup = `
+    <colgroup>
+      <col style="width:30%;">  <!-- Field -->
+      <col style="width:70%;">  <!-- Value -->
+    </colgroup>
+  `.trim();
+
+  const groups = delivs.map((d, i) => {
+    const idx = i + 1;
+
+    const type   = esc(d.type || "");
+    const qty    = (d.quantity === 0 || d.quantity) ? String(d.quantity) : "";
+    const format = esc(d.format || "");
+    const durSec = (d.durationSec === 0 || d.durationSec) ? String(d.durationSec) : "";
+
+    const pwStart = d?.postingWindow?.start ? formatDateTZ(d.postingWindow.start, tz) : "";
+    const pwEnd   = d?.postingWindow?.end   ? formatDateTZ(d.postingWindow.end, tz)   : "";
+    const posting = `${pwStart}${pwStart && pwEnd ? " – " : ""}${pwEnd}`;
+
+    const draftDue = d?.draftDueDate ? formatDateTZ(d.draftDueDate, tz) : "";
+    const draftCell = `${fmtBool(d.draftRequired)}${draftDue ? `<br><span class="muted">Due: ${draftDue}</span>` : ""}`;
+
+    const revisionsInc = fmtRevisionsIncluded(d);
+    const extraRevFee  = fmtExtraRevisionFee(d);
+    const retention    = fmtRetention(d);
+
+    const tags     = esc(fmtList(d?.tags));
+    const handles  = esc(fmtHandles(d?.handles));
+    const captions = esc(d.captions || "");
+    const links    = (Array.isArray(d?.links) && d.links.length) ? fmtList(d.links) : "";
+    const disclosures = esc(d.disclosures || "");
+
+    const whitelist = (d.whitelisting ?? d.whitelistingEnabled);
+    const sparkAds  = (d.sparkAds ?? d.sparkAdsEnabled);
+    const wlSpark   = `${fmtBool(whitelist)} / ${fmtBool(sparkAds)}`;
+
+    const header = `
+      <tr class="deliv-head">
+        <th colspan="2">Deliverable ${idx}</th>
+      </tr>
+    `;
+
+    // Ordered, minimal, and consistent
+    const rowsHtml = [
+      row("Type", type, { keepWhenEmpty: true }),
+      row("Quantity", qty, { keepWhenEmpty: true }),
+      row("Format", format, { keepWhenEmpty: true }),
+      row("Duration (sec)", durSec),
+      row("Posting Window", posting, { keepWhenEmpty: true }),
+      row("Draft Required / Due", draftCell, { keepWhenEmpty: true }),
+      row("Revisions Included", revisionsInc),
+      row("Extra Revision Fee", extraRevFee),
+      row("Live Retention", retention),
+      row("Tags", tags),
+      row("Handles", handles),
+      row("Captions", captions),
+      row("Links", links),
+      row("Disclosures", disclosures),
+      row("Whitelist / Spark", wlSpark, { keepWhenEmpty: true }),
+      // Add more rows here if you later surface additional fields
+    ].join("");
+
+    // Keep each deliverable together on a page (works with your CSS too)
     return `
-      <tr>
-        <td>${i + 1}</td>
-        <td>${esc(d.type || '')}</td>
-        <td>${d.quantity ?? ''}</td>
-        <td>${esc(d.format || '')}</td>
-        <td>${d.durationSec ?? ''}</td>
-        <td>${pwStart}${pwStart && pwEnd ? ' – ' : ''}${pwEnd}</td>
-        <td>${fmtBool(d.draftRequired)}${draftDue ? `<br><span class="muted">Due: ${draftDue}</span>` : ''}</td>
-        <td>${d.revisionRoundsIncluded ?? ''}</td>
-        <td>${(d.additionalRevisionFee ?? '') !== '' ? String(d.additionalRevisionFee) : ''}</td>
-        <td>${d.liveRetentionMonths ?? ''}</td>
-        <td>${[fmtList(d.tags), '@' + fmtList(d.handles)].filter(Boolean).join(' / ')}</td>
-        <td>${esc(d.captions || '')}${(d.links || []).length ? `<br>${fmtList(d.links)}` : ''}</td>
-        <td>${esc(d.disclosures || '')}</td>
-        <td>${fmtBool(d.whitelisting)} / ${fmtBool(d.sparkAds)}</td>
-      </tr>`;
-  }).join('');
+      <tbody class="block-avoid">
+        ${header}
+        ${rowsHtml}
+      </tbody>
+    `;
+  }).join("");
+
   return `
-    <table>
+    <table class="table--condensed deliverables-table">
+      ${colgroup}
       <thead>
-        <tr>
-          <th>#</th><th>Type</th><th>Qty</th><th>Format</th><th>Duration (sec)</th>
-          <th>Posting Window</th><th>Draft Req./Due</th><th>Revisions Included</th>
-          <th>Extra Revision Fee</th><th>Live Retention (months)</th>
-          <th>Tags/Handles</th><th>Captions/Links</th><th>Disclosures</th>
-          <th>Whitelist / Spark</th>
-        </tr>
+        <tr><th>Field</th><th>Value</th></tr>
       </thead>
-      <tbody>${rows}</tbody>
-    </table>`;
+      ${groups}
+    </table>
+  `.trim();
 }
 
 function renderUsageBundleTokens(ub = {}, currency = 'USD') {
@@ -467,29 +556,66 @@ function renderContractHTML({ contract, templateText }) {
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <style>
-    @page { size: A4; margin: 25.4mm; }
+    /* --- Page & base typography --- */
+    @page { size: A4; margin: 18mm 16mm; }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body { font-family: "Times New Roman", Times, serif; color: #000; font-size: 10.5pt; line-height: 1.35; }
+    main { max-width: 100%; }
+    img, table { max-width: 100%; }
 
-    body { font-family: "Times New Roman", Times, serif; color: #000; font-size: 11pt; line-height: 1.3; }
-    h1, h2, h3 { font-size: 11pt; font-weight: 700; margin: 12pt 0 6pt; color: #000; }
-    h1 { text-align: center; text-transform: uppercase; letter-spacing: .3px; }
-    p { margin: 0 0 6pt; text-align: justify; color: #000; }
-    .secno { font-weight: 700; }
-    .numli, .subli, .bull { text-align: justify; padding-left: 18pt; text-indent: -18pt; }
+    /* --- Headings & paragraphs (print-friendly) --- */
+    h1, h2, h3 { font-weight: 700; color: #000; margin: 10pt 0 6pt; }
+    h1 { font-size: 13pt; text-align: center; text-transform: uppercase; letter-spacing: .2px; }
+    h2 { font-size: 11pt; }
+    h3 { font-size: 10.5pt; }
+
+    /* Only h1 strictly avoids breaking; allow h2/h3 to flow to reduce large gaps */
+    h1 { page-break-after: avoid; break-after: avoid-page; }
+    h2, h3 { page-break-after: auto; break-after: auto; }
+
+    p { margin: 0 0 5pt; text-align: justify; color: #000; orphans: 3; widows: 3; }
+
+    /* --- List-like paragraphs produced by legalTextToHTML --- */
+    .numli, .subli, .bull { text-align: justify; padding-left: 18pt; text-indent: -18pt; margin-bottom: 4pt; }
     .marker { display: inline-block; width: 18pt; }
-
-    .signatures { margin: 12pt 0 6pt; display: grid; grid-template-columns: 1fr 1fr; gap: 12pt; break-inside: avoid; page-break-inside: avoid; }
-    .signature-block { break-inside: avoid; page-break-inside: avoid; border: 1px solid #000; padding: 8pt; }
-    .sigrole { font-weight: 700; margin-bottom: 4pt; }
-    .sigimg { display: block; max-height: 60pt; max-width: 100%; margin: 0 0 6pt; }
-    .sigmeta { font-size: 10pt; color: #000; }
+    .secno { font-weight: 700; }
     .muted { color: #444; }
 
-    table { width: 100%; border-collapse: collapse; font-size: 10pt; margin: 8pt 0; }
-    th, td { border: 1px solid #000; padding: 5pt 6pt; vertical-align: top; }
+    /* --- Signature blocks --- */
+    .signatures { margin: 10pt 0 6pt; display: grid; grid-template-columns: 1fr 1fr; gap: 10pt; }
+    .signature-block { border: 1px solid #000; padding: 8pt; break-inside: avoid; page-break-inside: avoid; }
+    .sigrole { font-weight: 700; margin-bottom: 4pt; }
+    .sigimg { display: block; max-height: 60pt; max-width: 100%; margin: 0 0 6pt; }
+    .sigmeta { font-size: 9.5pt; color: #000; }
+
+    /* --- Tables: fixed layout + wrapping + repeated headers on each page --- */
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 9.5pt; margin: 6pt 0; }
+    thead { display: table-header-group; }
+    tfoot { display: table-footer-group; }
+    /* Keep rows intact where possible (prevents mid-row splits without causing huge blanks) */
+    tr { break-inside: avoid; page-break-inside: avoid; }
+    th, td {
+      border: 1px solid #000;
+      padding: 3pt 4pt;
+      vertical-align: top;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+      hyphens: auto;
+    }
     th { text-align: left; background: #fff; font-weight: 700; }
     tr:nth-child(even) td { background: #fafafa; }
 
+    /* --- Condensed tables (e.g., Deliverables) --- */
+    .table--condensed th, .table--condensed td { padding: 3pt 3.5pt; font-size: 9pt; line-height: 1.3; }
+    .deliverables-table th, .deliverables-table td { white-space: normal; }
+
+    /* --- Keep post-Section B schedules tidy (style only) --- */
     .afterB p { margin-bottom: 5pt; }
+
+    /* --- Avoid ugly breaks around only the blocks that must not split --- */
+    .block-avoid, .signature-block { break-inside: avoid; page-break-inside: avoid; }
+    /* NOTE: .afterB intentionally has NO break-inside rules so it won’t force huge blank space */
   </style>
 </head>
 <body>
@@ -497,6 +623,7 @@ function renderContractHTML({ contract, templateText }) {
 </body>
 </html>`;
 }
+
 
 async function renderPDFWithPuppeteer({ html, res, filename = 'Contract.pdf', headerTitle, headerDate }) {
   let browser;
@@ -510,21 +637,28 @@ async function renderPDFWithPuppeteer({ html, res, filename = 'Contract.pdf', he
       <div class="title">${esc(headerTitle || '')}</div>
       <div class="date">Effective Date: ${esc(headerDate || '')}</div>
     </div>`;
+
   try {
     browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox'] });
     const page = await browser.newPage();
     await page.emulateMediaType('print');
     await page.setContent(html, { waitUntil: ['load', 'domcontentloaded', 'networkidle0'] });
+
+    // Auto-landscape if a wide table is present
+    const needsLandscape = /data-require-landscape="1"/i.test(html);
+
     const pdf = await page.pdf({
       preferCSSPageSize: true,
       format: 'A4',
+      landscape: needsLandscape,
       printBackground: true,
       displayHeaderFooter: true,
       headerTemplate,
       footerTemplate: '<div></div>',
-      margin: { top: '25.4mm', bottom: '15mm', left: '25.4mm', right: '25.4mm' },
+      margin: { top: '18mm', bottom: '14mm', left: '16mm', right: '16mm' },
       scale: 1
     });
+
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename=${filename}`);
     res.end(pdf);
@@ -546,6 +680,7 @@ async function renderPDFWithPuppeteer({ html, res, filename = 'Contract.pdf', he
     try { if (browser) await browser.close(); } catch (_) { }
   }
 }
+
 
 async function emitEvent(contract, event, details = {}) {
   contract.audit = contract.audit || [];

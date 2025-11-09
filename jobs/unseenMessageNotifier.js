@@ -127,7 +127,7 @@ async function sendUnseenMessageNotification(email, userName, unseenCount, roomI
 async function checkAndNotifyUnseenMessages() {
   try {
     const rooms = await ChatRoom.find();
-    const ONE_HOUR = 60 * 60 * 1000;
+    const ONE_HOUR = 600 * 60 * 60 * 1000;
 
     for (const room of rooms) {
       for (const participant of room.participants) {
@@ -146,10 +146,10 @@ async function checkAndNotifyUnseenMessages() {
           const lastNotification = room.lastNotificationSent?.get(participant.userId);
           const now = new Date();
 
-          // if (lastNotification && (now - new Date(lastNotification)) < ONE_HOUR) {
-          //   console.log(`⏭️  Skipping notification for ${participant.userId} (sent recently)`);
-          //   continue;
-          // }
+          if (lastNotification && (now - new Date(lastNotification)) < ONE_HOUR) {
+            console.log(`⏭️  Skipping notification for ${participant.userId} (sent recently)`);
+            continue;
+          }
 
           const user = await getUserDetails(participant.userId, participant.role);
           if (user && user.email) {

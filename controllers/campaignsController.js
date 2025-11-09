@@ -1502,3 +1502,36 @@ exports.getRejectedCampaignsByInfluencer = async (req, res) => {
     return res.status(500).json({ message: 'Internal server error while fetching rejected campaigns.' });
   }
 };
+
+exports.getCampaignSummary = async (req, res) => {
+  try {
+    const campaignsId = req.query.id || req.params?.id;
+    if (!campaignsId) {
+      return res
+        .status(400)
+        .json({ message: 'Query parameter id (campaignsId) is required.' });
+    }
+
+    // Select just the fields we care about
+    const campaign = await Campaign.findOne(
+      { campaignsId },
+      'productOrServiceName budget timeline'
+    ).lean();
+
+    if (!campaign) {
+      return res.status(404).json({ message: 'Campaign not found.' });
+    }
+
+    // Map productOrServiceName as the "campaign name"
+    return res.json({
+      campaignName: campaign.productOrServiceName,
+      budget: campaign.budget ?? 0,
+      timeline: campaign.timeline || {}
+    });
+  } catch (error) {
+    console.error('Error in getCampaignSummary:', error);
+    return res
+      .status(500)
+      .json({ message: 'Internal server error while fetching campaign summary.' });
+  }
+};
