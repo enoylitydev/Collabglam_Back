@@ -58,23 +58,36 @@ const esc = (s = '') => String(s).replace(/[&<>"]/g, (c) => ({ '&':'&amp;','<':'
 const nl2br = (s = '') => esc(s).replace(/\r?\n/g, '<br>');
 const safe = (v) => (v == null || v === '' ? '—' : esc(String(v)));
 
-// Email-safe design tokens (inline CSS)
+// ================= THEME: ORANGE / YELLOW =================
+
+// Shell
 const WRAP = 'max-width:680px;margin:0 auto;padding:0;background:#f7fafc;color:#0f172a;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;';
 const SHELL = 'padding:24px;';
 const CARD  = 'border-radius:14px;background:#ffffff;border:1px solid #e5e7eb;overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,0.04);';
-const BRAND_BAR  = 'padding:16px 20px;background:linear-gradient(90deg,#FFBF00,#FFDB58);color:#111827;';
-const BRAND_NAME = 'font-weight:800;font-size:16px;letter-spacing:.2px;';
-const HDR   = 'padding:20px 24px 4px 24px;font-weight:800;font-size:18px;color:#111827;';
-const SUBHDR= 'padding:0 24px 14px 24px;color:#374151;font-size:13px;';
+
+// Header (white with warm border) + thin orange→amber accent strip
+const BRAND_BAR  = 'padding:18px 20px;background:#ffffff;color:#111827;border-bottom:1px solid #FFE8B7;';
+const BRAND_NAME = 'font-weight:900;font-size:16px;letter-spacing:.2px;';
+const ACCENT_BAR = 'height:4px;background:linear-gradient(90deg,#FF6A00 0%, #FF8A00 30%, #FF9A00 60%, #FFBF00 100%);';
+
+// Body typography & layout
+const HDR   = 'padding:20px 24px 6px 24px;font-weight:800;font-size:18px;color:#111827;';
+const SUBHDR= 'padding:0 24px 16px 24px;color:#374151;font-size:13px;';
 const BODY  = 'padding:0 24px 24px 24px;';
 const KVTBL = 'width:100%;border-collapse:separate;border-spacing:0 8px;';
 const KEY   = 'width:160px;color:#6b7280;font-size:13px;padding:6px 0;vertical-align:top;';
 const VAL   = 'color:#111827;font-size:14px;font-weight:600;padding:6px 0;';
-const CHIP  = 'display:inline-block;padding:2px 10px;border-radius:999px;background:#fff7cc;border:1px solid #ffe680;color:#7a5200;font-weight:600;font-size:12px;';
+
+// Base chip; we tint via statusBadge
+const CHIP  = 'display:inline-block;padding:2px 10px;border-radius:999px;background:#f9fafb;border:1px solid #e5e7eb;color:#111827;font-weight:700;font-size:12px;';
+
 const BOX   = 'border:1px dashed #e5e7eb;border-radius:10px;padding:12px 14px;background:#fafafa;';
 const FOOT  = 'padding:16px 24px;color:#6b7280;font-size:12px;border-top:1px solid #f1f5f9;background:#fcfcfd;';
-const BTN   = 'display:inline-block;background:#111827;color:#ffffff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:700;';
-const BTN_ALT = 'display:inline-block;background:linear-gradient(90deg,#FFBF00,#FFDB58);color:#111827;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800;';
+
+// Buttons: black primary; orange gradient alt
+const BTN   = 'display:inline-block;background:#111827;color:#ffffff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800;';
+const BTN_ALT = 'display:inline-block;background:linear-gradient(90deg,#FF6A00,#FF8A00,#FFBF00);color:#ffffff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800;';
+
 const GRID2 = 'display:grid;grid-template-columns:1fr;gap:12px;margin:10px 0 0 0;';
 const GRID2_MD = 'display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:10px 0 0 0;';
 const H6    = 'margin:0 0 6px 0;font-weight:700;font-size:13px;color:#111827;';
@@ -92,9 +105,41 @@ function partyBox(label, { name, email, id }) {
   </div>`;
 }
 
-// ----------- ✉️ Templates (PROFESSIONAL/ATTRACTIVE) -----------
+// --- extra helpers for UX ---
+function fmtDate(iso) {
+  if (!iso) return '—';
+  try {
+    return new Date(iso).toLocaleString('en-US', {
+      year: 'numeric', month: 'short', day: '2-digit',
+      hour: '2-digit', minute: '2-digit'
+    });
+  } catch { return safe(iso); }
+}
 
-// ----------- ✉️ TEMPLATES (sleek, clear, professional; no IDs) -----------
+// Status badge hues (orange/yellow for non-final; semantic green/red for final)
+function statusBadge(status) {
+  const s = String(status || '').toLowerCase();
+  const orange = `${CHIP};background:#FFF7E6;border-color:#FFE2B3;color:#7A3E00;`;
+  const styles = {
+    open:          orange,
+    in_review:     orange,
+    awaiting_user: orange,
+    resolved:      `${CHIP};background:#ecfdf5;border-color:#a7f3d0;color:#065f46;`,
+    rejected:      `${CHIP};background:#fef2f2;border-color:#fecaca;color:#991b1b;`,
+  };
+  return `<span style="${styles[s] || orange}">${esc(status)}</span>`;
+}
+
+function viewLinkBlock(url, label) {
+  if (!url) return '';
+  return `
+    <div style="margin-top:16px;">
+      <a href="${url}" style="${BTN}">${esc(label)}</a>
+      <div style="${SMALL};margin-top:8px;">If the button doesn’t work, copy &amp; paste this link:<br><span style="word-break:break-all;color:#111827;">${esc(url)}</span></div>
+    </div>`;
+}
+
+// ----------- ✉️ Templates (sleek, orange/yellow) -----------
 
 function adminCreatedTemplate({ dispute, brand, influencer, campaign }) {
   const raisedByRole = dispute?.createdBy?.role || 'User';
@@ -110,6 +155,7 @@ function adminCreatedTemplate({ dispute, brand, influencer, campaign }) {
     ? `${ADMIN_DISPUTE_URL_BASE}/${encodeURIComponent(dispute.disputeId)}`
     : null;
 
+  const status = dispute?.status || 'open';
   const preheader = `New dispute submitted by ${raisedByRole}: “${dispute.subject}”`;
 
   return `
@@ -120,53 +166,61 @@ function adminCreatedTemplate({ dispute, brand, influencer, campaign }) {
         <div style="${BRAND_BAR}">
           <div style="${BRAND_NAME}">CollabGlam • Disputes</div>
         </div>
+        <div style="${ACCENT_BAR}"></div>
 
-        <div style="${HDR}">New Dispute</div>
+        <div style="${HDR}">New Dispute ${statusBadge(status)}</div>
         <div style="${SUBHDR}">
-          A dispute has been submitted. Please review the details below.
+          A new dispute was submitted. Review the details and take action.
         </div>
 
         <div style="${BODY}">
-          <table style="${KVTBL}">
-            <tr>
-              <td style="${KEY}">Subject</td>
-              <td style="${VAL}">${esc(dispute.subject)}</td>
-            </tr>
-            <tr>
-              <td style="${KEY}">Campaign</td>
-              <td style="${VAL}">${safe(campaign?.productOrServiceName || 'N/A')}</td>
-            </tr>
-            <tr>
-              <td style="${KEY}">Raised by</td>
-              <td style="${VAL}">
-                ${esc(raisedByRole)} — ${safe(raisedBy?.name)}
-                ${raisedBy?.email ? `<span style="${SMALL}">&nbsp;&lt;${esc(raisedBy.email)}&gt;</span>` : ''}
-              </td>
-            </tr>
-            <tr>
-              <td style="${KEY}">Counterparty</td>
-              <td style="${VAL}">
-                ${safe(counterparty?.name)}
-                ${counterparty?.email ? `<span style="${SMALL}">&nbsp;&lt;${esc(counterparty.email)}&gt;</span>` : ''}
-              </td>
-            </tr>
-            ${dispute.description
-              ? `<tr>
-                   <td style="${KEY}">Description</td>
-                   <td style="${VAL}">${nl2br(dispute.description)}</td>
-                 </tr>`
-              : ''
-            }
-          </table>
+          <div style="${GRID2}">
+            <table style="${KVTBL}">
+              <tr>
+                <td style="${KEY}">Subject</td>
+                <td style="${VAL}">${esc(dispute.subject)}</td>
+              </tr>
+              <tr>
+                <td style="${KEY}">Campaign</td>
+                <td style="${VAL}">${safe(campaign?.productOrServiceName || 'N/A')}</td>
+              </tr>
+              <tr>
+                <td style="${KEY}">Created</td>
+                <td style="${VAL}">${fmtDate(dispute.createdAt)}</td>
+              </tr>
+              <tr>
+                <td style="${KEY}">Reference</td>
+                <td style="${VAL}">#${safe(dispute.disputeId)}</td>
+              </tr>
+            </table>
+          </div>
 
-          ${viewUrl ? `
-          <div style="margin-top:16px;">
-            <a href="${viewUrl}" style="${BTN}">Open in Admin</a>
-          </div>` : ''}
+          <div style="margin-top:12px;${GRID2_MD}">
+            ${partyBox('Raised by', {
+              name: raisedBy?.name,
+              email: raisedBy?.email,
+              id: raisedByRole === 'Brand' ? brand?.brandId : influencer?.influencerId
+            })}
+            ${partyBox('Counterparty', {
+              name: counterparty?.name,
+              email: counterparty?.email,
+              id: raisedByRole === 'Brand' ? influencer?.influencerId : brand?.brandId
+            })}
+          </div>
+
+          ${dispute.description
+            ? `<div style="margin-top:14px;">
+                 <div style="${H6}">Description</div>
+                 <div style="font-weight:600;color:#111827;">${nl2br(dispute.description)}</div>
+               </div>`
+            : ''
+          }
+
+          ${viewLinkBlock(viewUrl, 'Open in Admin')}
         </div>
 
         <div style="${FOOT}">
-          You’re receiving this because you’re an administrator.
+          You’re receiving this because you’re an administrator for CollabGlam Disputes.
         </div>
       </div>
     </div>
@@ -195,8 +249,9 @@ function statusUpdatedTemplate({ dispute, brand, influencer, toRole }) {
         <div style="${BRAND_BAR}">
           <div style="${BRAND_NAME}">CollabGlam • Disputes</div>
         </div>
+        <div style="${ACCENT_BAR}"></div>
 
-        <div style="${HDR}">Dispute Status Updated</div>
+        <div style="${HDR}">Status Updated ${statusBadge(dispute.status)}</div>
         <div style="${SUBHDR}">
           Hi ${esc(recipientName)}, the status of your dispute has changed.
         </div>
@@ -209,11 +264,19 @@ function statusUpdatedTemplate({ dispute, brand, influencer, toRole }) {
             </tr>
             <tr>
               <td style="${KEY}">Current status</td>
-              <td style="${VAL}">${esc(dispute.status)}</td>
+              <td style="${VAL}">${statusBadge(dispute.status)}</td>
             </tr>
             <tr>
               <td style="${KEY}">Other party</td>
               <td style="${VAL}">${safe(otherPartyName)}</td>
+            </tr>
+            <tr>
+              <td style="${KEY}">Last updated</td>
+              <td style="${VAL}">${fmtDate(dispute.updatedAt)}</td>
+            </tr>
+            <tr>
+              <td style="${KEY}">Reference</td>
+              <td style="${VAL}">#${safe(dispute.disputeId)}</td>
             </tr>
             ${latestNote
               ? `<tr>
@@ -224,10 +287,7 @@ function statusUpdatedTemplate({ dispute, brand, influencer, toRole }) {
             }
           </table>
 
-          ${viewUrl ? `
-          <div style="margin-top:16px;">
-            <a href="${viewUrl}" style="${BTN}">View Dispute</a>
-          </div>` : ''}
+          ${viewLinkBlock(viewUrl, 'View Dispute')}
         </div>
 
         <div style="${FOOT}">
@@ -237,7 +297,6 @@ function statusUpdatedTemplate({ dispute, brand, influencer, toRole }) {
     </div>
   </div>`;
 }
-
 
 async function sendMail({ to, subject, html }) {
   if (!to || !SMTP_HOST || !SMTP_USER) {
@@ -256,7 +315,7 @@ async function sendMail({ to, subject, html }) {
   }
 }
 
-// ----------------- ROUTES (unchanged business logic) -----------------
+// ----------------- ROUTES (business logic) -----------------
 
 exports.createDispute = async (req, res) => {
   const me = requireUser(req, res);
