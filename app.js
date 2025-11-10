@@ -1,13 +1,9 @@
-// app.js
-require('dotenv').config();
-
 const express   = require('express');
 const cors      = require('cors');
 const mongoose  = require('mongoose');
 const { GridFSBucket, ObjectId } = require('mongodb');
 const http      = require('http');
 const path      = require('path');
-const { v4: uuidv4 } = require('uuid');
 
 // routes
 const influencerRoutes    = require('./routes/influencerRoutes');
@@ -48,16 +44,12 @@ const sockets = require('./sockets');
 const app    = express();
 const server = http.createServer(app);
 
-
-
 // ====== Socket.IO setup (replaces old ws) ======
 const io = sockets.init(server);
-
-// expose helpers to controllers/jobs if they want to emit without importing sockets
 app.set('io', io);
 app.set('emitToBrand', sockets.emitToBrand);
 app.set('emitToInfluencer', sockets.emitToInfluencer);
-app.set('broadcastToRoom', sockets.legacyBroadcastToRoom); // back-compat for any legacy broadcast usage
+app.set('broadcastToRoom', sockets.legacyBroadcastToRoom);
 
 // ====== Express middleware ======
 app.use(cors({
@@ -65,21 +57,12 @@ app.use(cors({
   credentials: true
 }));
 
-// Increase JSON/urlencoded limits
 const JSON_LIMIT = process.env.JSON_LIMIT || '8mb';
 app.use(express.json({ limit: JSON_LIMIT }));
 app.use(express.urlencoded({ extended: true, limit: JSON_LIMIT, parameterLimit: 100000 }));
 
 // Legacy static: serve any historical disk uploads if present
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-
-// Friendly 413 response
-app.use((err, req, res, next) => {
-  if (err && (err.type === 'entity.too.large' || err.status === 413)) {
-    return res.status(413).json({ message: 'Payload too large. Try reducing the request size or increase JSON_LIMIT.' });
-  }
-  return next(err);
-});
 
 // ====== REST routes ======
 app.use('/influencer', influencerRoutes);
@@ -111,6 +94,14 @@ app.use('/unsubscribe', unsubscribeRoutes);
 app.use('/dispute', disputeRoutes);
 app.use('/notifications', notificationsRoutes);
 
+// Friendly 413 response (must be after body parsers)
+app.use((err, req, res, next) => {
+  if (err && (err.type === 'entity.too.large' || err.status === 413)) {
+    return res.status(413).json({ message: 'Payload too large. Reduce size or increase JSON_LIMIT.' });
+  }
+  return next(err);
+});
+
 /* Mongo & start */
 const PORT = process.env.PORT || 5000;
 
@@ -120,10 +111,9 @@ mongoose.connect(process.env.MONGODB_URI)
 
     // Init GridFS
     const bucket = new GridFSBucket(mongoose.connection.db, { bucketName: 'uploads' });
-    // Expose for controllers if needed
     app.set('gridfsBucket', bucket);
 
-    // Serve files from GridFS
+    // Serve files from GridFS by filename
     app.get('/file/:filename', async (req, res) => {
       try {
         const filename = req.params.filename;
@@ -133,8 +123,18 @@ mongoose.connect(process.env.MONGODB_URI)
         }
         const doc = files[0];
         const contentType = doc.contentType || doc.metadata?.mimeType || 'application/octet-stream';
+
         res.set('Content-Type', contentType);
         res.set('Cache-Control', 'public, max-age=31536000, immutable');
+
+        // Inline for images; download for others
+        if (!/^image\//.test(contentType)) {
+          const safe = encodeURIComponent(doc.metadata?.originalName || doc.filename);
+          res.set('Content-Disposition', `attachment; filename*=UTF-8''${safe}`);
+        } else {
+          res.set('Content-Disposition', 'inline');
+        }
+
         const stream = bucket.openDownloadStreamByName(filename);
         stream.on('error', (err) => {
           console.error('Error streaming file from GridFS:', err);
@@ -163,8 +163,17 @@ mongoose.connect(process.env.MONGODB_URI)
         }
         const doc = files[0];
         const contentType = doc.contentType || doc.metadata?.mimeType || 'application/octet-stream';
+
         res.set('Content-Type', contentType);
         res.set('Cache-Control', 'public, max-age=31536000, immutable');
+
+        if (!/^image\//.test(contentType)) {
+          const safe = encodeURIComponent(doc.metadata?.originalName || doc.filename);
+          res.set('Content-Disposition', `attachment; filename*=UTF-8''${safe}`);
+        } else {
+          res.set('Content-Disposition', 'inline');
+        }
+
         const stream = bucket.openDownloadStream(_id);
         stream.on('error', (err) => {
           console.error('Error streaming file from GridFS:', err);
@@ -176,7 +185,7 @@ mongoose.connect(process.env.MONGODB_URI)
         return res.status(500).json({ message: 'Internal server error' });
       }
     });
-    
+
     // Start the unseen message notifier job
     unseenMessageNotifier.start();
     console.log('✅ Started unseen message notifier job');
