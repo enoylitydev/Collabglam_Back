@@ -768,10 +768,17 @@ exports.getAppliedCampaignsByInfluencer = async (req, res) => {
   if (!influencerId) return res.status(400).json({ message: 'influencerId is required' });
 
   try {
-    const applyRecs = await ApplyCampaign.find({ 'applicants.influencerId': influencerId }, 'campaignId').lean();
+    const applyRecs = await ApplyCampaign.find(
+      { 'applicants.influencerId': influencerId },
+      'campaignId'
+    ).lean();
+
     let campaignIds = applyRecs.map((r) => r.campaignId);
     if (campaignIds.length === 0) {
-      return res.status(200).json({ meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 }, campaigns: [] });
+      return res.status(200).json({
+        meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 },
+        campaigns: []
+      });
     }
 
     const contracted = await Contract.find(
@@ -782,7 +789,10 @@ exports.getAppliedCampaignsByInfluencer = async (req, res) => {
     const excludedIds = new Set(contracted.map((c) => c.campaignId));
     campaignIds = campaignIds.filter((id) => !excludedIds.has(id));
     if (campaignIds.length === 0) {
-      return res.status(200).json({ meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 }, campaigns: [] });
+      return res.status(200).json({
+        meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 },
+        campaigns: []
+      });
     }
 
     const filter = { campaignsId: { $in: campaignIds } };
@@ -792,14 +802,26 @@ exports.getAppliedCampaignsByInfluencer = async (req, res) => {
     const limNum = Math.max(1, parseInt(limit, 10));
     const skip = (pageNum - 1) * limNum;
 
+    // Projection explicitly excludes "description"
+    const projection = '-description';
+
     const [total, rawCampaigns] = await Promise.all([
       Campaign.countDocuments(filter),
-      Campaign.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limNum).lean()
+      Campaign.find(filter, projection).sort({ createdAt: -1 }).skip(skip).limit(limNum).lean()
     ]);
 
-    const campaigns = rawCampaigns.map((c) => ({ ...c, hasApplied: 1, isContracted: 0, isAccepted: 0 }));
+    // Defensive omit of description if it slipped through from any source
+    const campaigns = rawCampaigns.map(({ description, ...c }) => ({
+      ...c,
+      hasApplied: 1,
+      isContracted: 0,
+      isAccepted: 0
+    }));
 
-    return res.json({ meta: { total, page: pageNum, limit: limNum, totalPages: Math.ceil(total / limNum) }, campaigns });
+    return res.json({
+      meta: { total, page: pageNum, limit: limNum, totalPages: Math.ceil(total / limNum) },
+      campaigns
+    });
   } catch (err) {
     console.error('Error in getAppliedCampaignsByInfluencer:', err);
     return res.status(500).json({ message: 'Internal server error' });
