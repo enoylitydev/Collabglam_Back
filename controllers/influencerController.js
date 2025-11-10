@@ -17,6 +17,9 @@ const Language = require('../models/language');
 const VerifyEmail = require('../models/verifyEmail');
 const ApplyCampaign = require('../models/applyCampaign');
 const Campaign = require('../models/campaign');
+// These two are referenced later in updateProfile; include them if you use them
+const Audience = require('../models/audience');            // ensure this path exists
+const AudienceRange = require('../models/audienceRange');  // ensure this path exists
 
 // Utils
 const subscriptionHelper = require('../utils/subscriptionHelper');
@@ -24,14 +27,16 @@ const { escapeRegExp } = require('../utils/searchTokens');
 
 const UUIDv4Regex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-// SMTP
+/* ========================= SMTP / Mailer (brand-style) ========================= */
 const SMTP_HOST = process.env.SMTP_HOST;
-const SMTP_PORT = parseInt(process.env.SMTP_PORT, 10);
+const SMTP_PORT = parseInt(process.env.SMTP_PORT || '587', 10);
 const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASS = process.env.SMTP_PASS;
 const JWT_SECRET = process.env.JWT_SECRET;
 
-// Mailer
+const MAIL_FROM_NAME = process.env.MAIL_FROM_NAME || 'CollabGlam';
+const PRODUCT_NAME   = process.env.PRODUCT_NAME   || 'CollabGlam';
+
 const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
   port: SMTP_PORT,
@@ -39,15 +44,113 @@ const transporter = nodemailer.createTransport({
   auth: { user: SMTP_USER, pass: SMTP_PASS }
 });
 
+/* ===== Shared professional HTML OTP template (orange/yellow accents) ===== */
+const esc = (s = '') => String(s).replace(/[&<>"]/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+const PREHEADER = (t) => `<div style="display:none;opacity:0;visibility:hidden;overflow:hidden;height:0;width:0;mso-hide:all;">${esc(t)}</div>`;
+
+const WRAP  = 'max-width:640px;margin:0 auto;padding:0;background:#f7fafc;color:#0f172a;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;';
+const SHELL = 'padding:24px;';
+const CARD  = 'border-radius:16px;background:#ffffff;border:1px solid #e5e7eb;overflow:hidden;box-shadow:0 8px 20px rgba(17,24,39,0.06);';
+const BRAND_BAR  = 'padding:18px 20px;background:#ffffff;color:#111827;border-bottom:1px solid #FFE8B7;';
+const BRAND_NAME = 'font-weight:900;font-size:15px;letter-spacing:.2px;';
+const ACCENT_BAR = 'height:4px;background:linear-gradient(90deg,#FF6A00 0%, #FF8A00 30%, #FF9A00 60%, #FFBF00 100%);';
+const HDR   = 'padding:20px 24px 6px 24px;font-weight:800;font-size:20px;color:#111827;';
+const SUBHDR= 'padding:0 24px 10px 24px;color:#374151;font-size:13px;';
+const BODY  = 'padding:0 24px 24px 24px;';
+const FOOT  = 'padding:14px 24px;color:#6b7280;font-size:12px;border-top:1px solid #f1f5f9;background:#fcfcfd;';
+const BTN   = 'display:inline-block;background:#111827;color:#ffffff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800;';
+const SMALL = 'color:#6b7280;font-size:12px;';
+
+const CODE_WRAPPER = 'margin-top:12px;margin-bottom:6px;';
+const CODE = [
+  'display:inline-block',
+  'font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace',
+  'font-weight:900',
+  'font-size:26px',
+  'letter-spacing:6px',
+  'color:#111827',
+  'background:#FFF7E6',
+  'border:1px solid #FFE2B3',
+  'border-radius:14px',
+  'padding:14px 18px',
+].join(';');
+
+function otpHtmlTemplate({
+  title = 'Your verification code',
+  subtitle = 'Use the one-time code below to continue.',
+  code,
+  minutes = 10,
+  ctaHref,
+  ctaLabel,
+  footerNote = 'If you didn’t request this, you can safely ignore this email.',
+  preheader = 'Your one-time verification code',
+}) {
+  const hasCta = Boolean(ctaHref && ctaLabel);
+  return `
+  ${PREHEADER(`${preheader}: ${code}`)}
+  <div style="${WRAP}">
+    <div style="${SHELL}">
+      <div style="${CARD}">
+        <div style="${BRAND_BAR}">
+          <div style="${BRAND_NAME}">${esc(PRODUCT_NAME)}</div>
+        </div>
+        <div style="${ACCENT_BAR}"></div>
+
+        <div style="${HDR}">${esc(title)}</div>
+        <div style="${SUBHDR}">${esc(subtitle)}</div>
+
+        <div style="${BODY}">
+          <div style="${CODE_WRAPPER}">
+            <span style="${CODE}">${esc(code)}</span>
+          </div>
+          <div style="${SMALL}">This code expires in ${minutes} minutes.</div>
+
+          ${hasCta ? `
+            <div style="margin-top:16px;">
+              <a href="${esc(ctaHref)}" style="${BTN}">${esc(ctaLabel)}</a>
+              <div style="${SMALL};margin-top:8px;">If the button doesn’t work, copy &amp; paste this link:<br><span style="word-break:break-all;color:#111827;">${esc(ctaHref)}</span></div>
+            </div>` : ''}
+
+        </div>
+
+        <div style="${FOOT}">
+          ${esc(footerNote)}
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function otpTextFallback({ code, minutes = 10, title = 'Your verification code' }) {
+  return `${title}\n\nCode: ${code}\nThis code expires in ${minutes} minutes.\n\nIf you didn’t request this, you can ignore this email.`;
+}
+
+async function sendMail({ to, subject, html, text }) {
+  if (!to || !SMTP_HOST || !SMTP_USER) {
+    console.warn('[mailer] Missing recipient or SMTP config; skipping email');
+    return;
+  }
+  try {
+    await transporter.sendMail({
+      from: `"${MAIL_FROM_NAME}" <${SMTP_USER}>`,
+      to,
+      subject,
+      html,
+      text,
+    });
+  } catch (e) {
+    console.error('[mailer] sendMail failed:', e?.message || e);
+  }
+}
+
+/* ============================ Misc Normalizers ============================ */
 const ALLOWED_GENDERS = new Set(['Female', 'Male', 'Non-binary', 'Prefer not to say', '']);
-// primaryPlatform must match Influencer schema enum
 const ALLOWED_PLATFORMS = new Set(['youtube', 'tiktok', 'instagram', 'other', null]);
 
 function normalizeGender(value) {
   if (typeof value === 'undefined' || value === null) return null; // don't update
   const raw = String(value).trim();
 
-  // common loose inputs
   const t = raw.toLowerCase();
   if (t === '' || t === 'none' || t === 'na' || t === 'n/a') return '';
   if (t === 'male' || t === 'm') return 'Male';
@@ -55,10 +158,8 @@ function normalizeGender(value) {
   if (t === 'non-binary' || t === 'nonbinary' || t === 'nb') return 'Non-binary';
   if (t === 'prefer not to say' || t === 'prefer-not-to-say') return 'Prefer not to say';
 
-  // already a valid enum value?
   if (ALLOWED_GENDERS.has(raw)) return raw;
 
-  // reject unknowns
   return '__INVALID__';
 }
 
@@ -71,7 +172,6 @@ function normalizePrimaryPlatform(value) {
 }
 
 async function upsertOnboardingFromPayload(inf, onboardingPayload) {
-  // Accept either a JSON string or an object
   let ob = onboardingPayload;
   if (typeof ob === 'string') {
     try { ob = JSON.parse(ob); } catch {
@@ -84,23 +184,18 @@ async function upsertOnboardingFromPayload(inf, onboardingPayload) {
     err.statusCode = 400; throw err;
   }
 
-  // categoryId is required when onboarding is provided
   const catIdNum = Number(ob.categoryId);
   if (!Number.isFinite(catIdNum)) {
     const err = new Error('categoryId must be a number.');
     err.statusCode = 400; throw err;
   }
 
-  // Look up category by your Category schema's "id" field
   const catDoc = await Category.findOne({ id: catIdNum }).lean();
   if (!catDoc) {
     const err = new Error('Invalid categoryId.');
     err.statusCode = 400; throw err;
   }
 
-  // Collect subcategoryIds from either:
-  // 1) ob.subcategories: [{ subcategoryId, subcategoryName? }...], or
-  // 2) ob.subcategoryIds: [uuid, uuid, ...]
   let incomingIds = [];
   if (Array.isArray(ob.subcategories) && ob.subcategories.length) {
     incomingIds = ob.subcategories
@@ -110,9 +205,8 @@ async function upsertOnboardingFromPayload(inf, onboardingPayload) {
     incomingIds = [...ob.subcategoryIds];
   }
 
-  // Validate subcategories (no limit; can be empty)
-  const valid = new Set(catDoc.subcategories.map(s => s.subcategoryId));
-  const nameById = new Map(catDoc.subcategories.map(s => [s.subcategoryId, s.name]));
+  const valid = new Set((catDoc.subcategories || []).map(s => s.subcategoryId));
+  const nameById = new Map((catDoc.subcategories || []).map(s => [s.subcategoryId, s.name]));
 
   for (const id of incomingIds) {
     if (!valid.has(id)) {
@@ -121,13 +215,11 @@ async function upsertOnboardingFromPayload(inf, onboardingPayload) {
     }
   }
 
-  // Map to Influencer.onboarding storage shape: { subcategoryId, subcategoryName }
   const finalSubs = incomingIds.map(id => ({
     subcategoryId: id,
     subcategoryName: nameById.get(id)
   }));
 
-  // Save onto document (derive names from DB; ignore client-sent categoryName)
   inf.onboarding = {
     ...(inf.onboarding || {}),
     categoryId: catDoc.id,
@@ -136,8 +228,7 @@ async function upsertOnboardingFromPayload(inf, onboardingPayload) {
   };
 }
 
-
-// Uploads
+/* =============================== Uploads =============================== */
 const uploadDir = path.join(__dirname, '../uploads/profile_images');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
@@ -176,7 +267,6 @@ exports.requestOtpInfluencer = async (req, res) => {
   }
 
   try {
-    // block if already registered for that role
     const emailRegexCI = new RegExp(`^${escapeRegExp(normalizedEmail)}$`, 'i');
     const alreadyRegistered =
       normalizedRole === 'Influencer'
@@ -185,7 +275,6 @@ exports.requestOtpInfluencer = async (req, res) => {
 
     if (alreadyRegistered) return res.status(409).json({ message: 'User already present' });
 
-    // create/update verification record
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
@@ -195,58 +284,17 @@ exports.requestOtpInfluencer = async (req, res) => {
       { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true }
     );
 
-    try {
-      const subject = 'CollabGlam email verification';
+    const subject = `${PRODUCT_NAME} email verification`;
+    const html = otpHtmlTemplate({
+      title: 'Verify your email',
+      subtitle: `Use this verification code to continue signing up as an ${normalizedRole}.`,
+      code,
+      minutes: 10,
+      preheader: `${PRODUCT_NAME} verification code`,
+    });
+    const text = otpTextFallback({ code, minutes: 10, title: 'Verify your email' });
 
-      const plainText = `Dear Customer,
-
-We require your confirmation that your CollabGlam ${normalizedRole} account setup has been completed and that access is working as expected.
-
-Please provide this Email Verification Code ${code} to confirm your email. The code expires in 10 minutes.
-
-Thank you,
-Team CollabGlam`;
-
-      const html = `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="x-apple-disable-message-reformatting">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>CollabGlam email verification</title>
-    <style>
-      body { margin:0; padding:0; background:#ffffff; font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; color:#111; }
-      .wrap { max-width:620px; margin:0 auto; padding:24px 20px; }
-      .brand { font-size:16px; color:#666; }
-      .content p { line-height:1.6; margin:0 0 14px; }
-      .code { display:inline-block; font-size:18px; letter-spacing:2px; padding:8px 12px; border:1px solid #ddd; border-radius:6px; background:#f7f7f7; }
-      .footer { margin-top:18px; color:#444; }
-    </style>
-  </head>
-  <body>
-    <div class="wrap">
-      <div class="brand">CollabGlam Notifications</div>
-      <div class="content" style="margin-top:14px">
-        <p>Dear Customer,</p>
-        <p>We require your confirmation that your CollabGlam ${normalizedRole} account setup has been completed and that access is working as expected.</p>
-        <p>Please provide this Email Verification Code <span class="code">${code}</span> to confirm your email. The code expires in 10 minutes.</p>
-        <p class="footer">Thank you,<br/>Team CollabGlam</p>
-      </div>
-    </div>
-  </body>
-</html>`;
-
-      await transporter.sendMail({
-        from: `"CollabGlam Notifications" <${SMTP_USER}>`,
-        to: normalizedEmail,
-        subject,
-        text: plainText,  // plaintext fallback
-        html,             // styled HTML
-      });
-    } catch (mailErr) {
-      console.warn('Failed to send OTP email:', mailErr.message);
-      // best-effort: still return success to avoid email enumeration
-    }
+    await sendMail({ to: normalizedEmail, subject, html, text });
 
     return res.json({ message: 'OTP sent to email' });
   } catch (err) {
@@ -482,7 +530,7 @@ const mapPayload = (provider, input) => {
 
     bio: root.description || root.bio,
 
-    categories: [], // will be normalized later
+    categories: [],
 
     hashtags: root.hashtags,
     mentions: root.mentions,
@@ -506,7 +554,6 @@ const mapPayload = (provider, input) => {
 };
 
 /* ============================== Registration ============================== */
-// (unchanged)
 exports.registerInfluencer = async (req, res) => {
   try {
     let {
@@ -582,8 +629,6 @@ exports.registerInfluencer = async (req, res) => {
 
       countryId,
       country: countryDoc.countryName,
-      // callingId,
-      // callingcode: callingDoc.callingCode,
 
       city: city || '',
       gender: gender || '',
@@ -633,8 +678,8 @@ exports.saveQuickOnboarding = async (req, res) => {
       projectLength = '',
       capacity = '',
 
-      categoryId,              // Category._id or numeric id
-      subcategories = [],      // UUID strings / names / objects
+      categoryId,
+      subcategories = [],
 
       collabTypes = [],
       allowlisting = false,
@@ -655,7 +700,6 @@ exports.saveQuickOnboarding = async (req, res) => {
     const inf = await Influencer.findOne(query);
     if (!inf) return res.status(404).json({ message: 'Influencer not found' });
 
-    // budgets → array
     let budgetArr = [];
     if (Array.isArray(budgets)) {
       budgetArr = budgets;
@@ -663,25 +707,20 @@ exports.saveQuickOnboarding = async (req, res) => {
       budgetArr = Object.entries(budgets).map(([format, range]) => ({ format, range }));
     }
 
-    // Resolve selected category basics
     const { categoryId: catNumId, categoryName: catName } = await resolveCategoryBasics(categoryId);
 
-    // Normalize incoming subcategories to full link nodes
     const idx = await buildCategoryIndex();
     let subLinks = normalizeCategories(subcategories, idx);
 
-    // If a category was chosen, restrict to its subs
     if (typeof catNumId === 'number') {
       subLinks = subLinks.filter(s => s.categoryId === catNumId);
     }
 
-    // ✅ Store only minimal fields in onboarding.subcategories
     const onboardingSubs = subLinks.map(s => ({
       subcategoryId: s.subcategoryId,
       subcategoryName: s.subcategoryName
     }));
 
-    // Persist onboarding
     inf.onboarding = {
       formats: Array.isArray(formats) ? formats : [],
       budgets: budgetArr,
@@ -723,7 +762,6 @@ exports.login = async (req, res) => {
       return res.status(404).json({ message: 'Influencer not found' });
     }
 
-    // ⛔ If locked, block regardless of password correctness
     const now = new Date();
     if (influencer.lockUntil && influencer.lockUntil > now) {
       const msLeft = influencer.lockUntil.getTime() - now.getTime();
@@ -737,11 +775,10 @@ exports.login = async (req, res) => {
 
     const isMatch = await influencer.comparePassword(password);
     if (!isMatch) {
-      // ❌ Wrong password → count & maybe lock
       influencer.failedLoginAttempts = (influencer.failedLoginAttempts || 0) + 1;
 
       if (influencer.failedLoginAttempts >= 3) {
-        const LOCK_WINDOW_MS = 24 * 60 * 60 * 1000; // 24h
+        const LOCK_WINDOW_MS = 24 * 60 * 60 * 1000;
         influencer.lockUntil = new Date(Date.now() + LOCK_WINDOW_MS);
       }
 
@@ -761,7 +798,6 @@ exports.login = async (req, res) => {
       });
     }
 
-    // ✅ Correct password & not locked → reset counters
     if (influencer.failedLoginAttempts || influencer.lockUntil) {
       influencer.failedLoginAttempts = 0;
       influencer.lockUntil = null;
@@ -823,7 +859,7 @@ exports.getById = async (req, res) => {
     }
 
     const influencer = await Influencer.findOne({ influencerId: id })
-      .select('-password -__v') // return full doc except sensitive/internal fields
+      .select('-password -__v')
       .lean();
 
     if (!influencer) {
@@ -852,7 +888,6 @@ exports.getCampaignsByInfluencer = async (req, res) => {
       return res.status(400).json({ message: 'influencerId is required' });
     }
 
-    // Step 1️⃣: Find all ApplyCampaign docs where influencer appears
     const applyDocs = await ApplyCampaign.find({
       $or: [
         { 'applicants.influencerId': influencerId },
@@ -869,10 +904,8 @@ exports.getCampaignsByInfluencer = async (req, res) => {
       });
     }
 
-    // Step 2️⃣: Extract UUID campaignIds (these are strings)
     const campaignIds = applyDocs.map(doc => doc.campaignId);
 
-    // Step 3️⃣: Query by `campaignId` field in Campaign collection (not _id)
     const filter = { campaignId: { $in: campaignIds } };
 
     if (search.trim()) {
@@ -882,7 +915,6 @@ exports.getCampaignsByInfluencer = async (req, res) => {
       ];
     }
 
-    // Step 4️⃣: Pagination and sorting
     const skip = (Math.max(page, 1) - 1) * Math.max(limit, 1);
     const sortDirection = sortOrder === 'asc' ? 1 : -1;
 
@@ -892,7 +924,6 @@ exports.getCampaignsByInfluencer = async (req, res) => {
       .skip(skip)
       .limit(limit);
 
-    // Step 5️⃣: Determine status (approved / pending)
     const result = campaigns.map(campaign => {
       const related = applyDocs.find(
         d => d.campaignId === campaign.campaignId
@@ -904,7 +935,7 @@ exports.getCampaignsByInfluencer = async (req, res) => {
       }
 
       return {
-        id: campaign.campaignId, // use UUID as id
+        id: campaign.campaignId,
         name: campaign.name,
         appliedDate: related?.createdAt || campaign.createdAt,
         status
@@ -934,6 +965,7 @@ exports.requestPasswordResetOtpInfluencer = async (req, res) => {
   });
 
   if (!influencer) {
+    // keep message consistent with your brand controller if desired
     return res.status(200).json({ message: 'Email not exist' });
   }
 
@@ -945,11 +977,21 @@ exports.requestPasswordResetOtpInfluencer = async (req, res) => {
   influencer.passwordResetVerified = false;
   await influencer.save();
 
-  await transporter.sendMail({
-    from: `"No-Reply" <${SMTP_USER}>`,
+  const subject = 'Password reset code';
+  const html = otpHtmlTemplate({
+    title: 'Password reset code',
+    subtitle: 'Use this one-time code to reset your password.',
+    code,
+    minutes: 10,
+    preheader: 'Your password reset code',
+  });
+  const text = otpTextFallback({ code, minutes: 10, title: 'Password reset code' });
+
+  await sendMail({
     to: influencer.email,
-    subject: 'Password reset code',
-    text: `Your password reset OTP is ${code}. It expires in 10 minutes.`
+    subject,
+    html,
+    text,
   });
 
   return res.status(200).json({ message: 'OTP has been sent.' });
@@ -1009,14 +1051,9 @@ exports.resetPasswordInfluencer = async (req, res) => {
       return res.status(400).json({ message: 'Password reset not verified' });
     }
 
-    // set new password (will hash via pre-save hook)
     influencer.password = newPassword;
-
-    // 🔄 Clear lock & attempts after successful reset
     influencer.failedLoginAttempts = 0;
     influencer.lockUntil = null;
-
-    // finalize reset flow
     influencer.passwordResetVerified = false;
 
     await influencer.save();
@@ -1028,14 +1065,11 @@ exports.resetPasswordInfluencer = async (req, res) => {
   }
 };
 
-
-
-
+/* ============================ Payments (CRUD) ============================ */
 exports.addPaymentMethod = async (req, res) => {
   try {
     const { type, bank = {}, paypal = {}, isDefault = false, influencerId } = req.body;
 
-    // validate type
     if (![0, 1].includes(Number(type))) {
       return res.status(400).json({ message: 'type must be 0 (PayPal) or 1 (Bank)' });
     }
@@ -1054,7 +1088,6 @@ exports.addPaymentMethod = async (req, res) => {
     };
 
     if (Number(type) === 1) {
-      // 2) require new bank.countryId
       const required = ['accountHolder', 'accountNumber', 'bankName', 'countryId'];
       for (const f of required) {
         if (!bank[f] || !bank[f].toString().trim()) {
@@ -1062,7 +1095,6 @@ exports.addPaymentMethod = async (req, res) => {
         }
       }
 
-      // 3) fetch country to get its name
       const countryDoc = await Country.findById(bank.countryId);
       if (!countryDoc) {
         return res.status(400).json({ message: 'Invalid bank.countryId' });
@@ -1075,12 +1107,11 @@ exports.addPaymentMethod = async (req, res) => {
         swift: bank.swift?.trim(),
         bankName: bank.bankName.trim(),
         branch: bank.branch?.trim(),
-        countryId: countryDoc._id,              // store the ObjectId
-        countryName: countryDoc.countryName            // store the fetched name
+        countryId: countryDoc._id,
+        countryName: countryDoc.countryName
       };
 
     } else {
-      // PayPal
       if (!paypal.email || !paypal.email.trim()) {
         return res.status(400).json({ message: 'paypal.email is required' });
       }
@@ -1090,11 +1121,9 @@ exports.addPaymentMethod = async (req, res) => {
       };
     }
 
-    // ensure only one default
     if (paymentObj.isDefault) {
       inf.paymentMethods.forEach(pm => (pm.isDefault = false));
     } else if (inf.paymentMethods.length === 0) {
-      // first method becomes default
       paymentObj.isDefault = true;
     }
 
@@ -1139,10 +1168,6 @@ exports.deletePaymentMethod = async (req, res) => {
   }
 };
 
-
-
-
-
 const mask = (val = '', keep = 4) =>
   val.length <= keep ? val : '*'.repeat(val.length - keep) + val.slice(-keep);
 
@@ -1151,7 +1176,6 @@ exports.viewPaymentByType = async (req, res) => {
     const requester = req.influencer;
     const { influencerId, type } = req.body || {};
 
-    // validate inputs
     if (!influencerId) {
       return res.status(400).json({ message: 'influencerId is required' });
     }
@@ -1173,13 +1197,11 @@ exports.viewPaymentByType = async (req, res) => {
     let methods = inf.paymentMethods.filter(pm => pm.type === Number(type));
 
     if (Number(type) === 1) {
-      // mask account numbers
       methods = methods.map(pm => {
         const obj = pm.toObject();
         if (obj.bank?.accountNumber) {
           obj.bank.accountNumber = mask(obj.bank.accountNumber);
         }
-        // countryName is safe to return
         return obj;
       });
     }
@@ -1196,10 +1218,6 @@ exports.viewPaymentByType = async (req, res) => {
   }
 };
 
-
-
-
-
 exports.updatePaymentMethod = async (req, res) => {
   try {
     const {
@@ -1211,7 +1229,6 @@ exports.updatePaymentMethod = async (req, res) => {
       influencerId
     } = req.body || {};
 
-    // validate
     if (!paymentId) {
       return res.status(400).json({ message: 'paymentId is required' });
     }
@@ -1229,11 +1246,9 @@ exports.updatePaymentMethod = async (req, res) => {
       return res.status(404).json({ message: 'Payment method not found' });
     }
 
-    // set new type
     pm.type = Number(type);
 
     if (pm.type === 1) {
-      // bank update: require core fields + countryId
       const required = ['accountHolder', 'accountNumber', 'bankName', 'countryId'];
       for (const f of required) {
         const val = bank[f] ?? pm.bank?.[f];
@@ -1242,9 +1257,8 @@ exports.updatePaymentMethod = async (req, res) => {
         }
       }
 
-      // fetch country if changed or use existing
       let countryDoc;
-      if (bank.countryId && bank.countryId !== String(pm.bank?.countryId)) {
+      if (bank.countryId && String(bank.countryId) !== String(pm.bank?.countryId)) {
         countryDoc = await Country.findById(bank.countryId);
         if (!countryDoc) {
           return res.status(400).json({ message: 'Invalid bank.countryId' });
@@ -1263,11 +1277,9 @@ exports.updatePaymentMethod = async (req, res) => {
         countryId: countryDoc._id,
         countryName: countryDoc.countryName
       };
-      // clear PayPal
       pm.paypal = undefined;
 
     } else {
-      // PayPal update
       const emailVal = paypal.email ?? pm.paypal?.email;
       if (!emailVal || !String(emailVal).trim()) {
         return res.status(400).json({ message: 'paypal.email is required' });
@@ -1279,14 +1291,12 @@ exports.updatePaymentMethod = async (req, res) => {
       pm.bank = undefined;
     }
 
-    // handle default flag
     if (typeof isDefault === 'boolean') {
       if (isDefault) {
         inf.paymentMethods.forEach(x => (x.isDefault = false));
         pm.isDefault = true;
       } else {
         pm.isDefault = false;
-        // ensure at least one default
         if (!inf.paymentMethods.some(x => x.isDefault)) {
           pm.isDefault = true;
         }
@@ -1307,11 +1317,7 @@ exports.updatePaymentMethod = async (req, res) => {
   }
 };
 
-
-
-
-
-
+/* ============================ Search Endpoints ============================ */
 const delay = ms => new Promise(res => setTimeout(res, ms));
 
 exports.searchInfluencers = async (req, res) => {
@@ -1328,8 +1334,10 @@ exports.searchInfluencers = async (req, res) => {
 
     await delay(300);
 
-    const q = search.trim().toLowerCase();
-    const rx = new RegExp('^' + escapeRegExp(q));
+    const q = search.trim();
+    const rx = new RegExp(q, 'i');
+    const docs = await Influencer.find({ name: rx }, 'name influencerId').limit(10).lean();
+
     if (docs.length === 0) {
       return res.status(404).json({ message: 'No influencers found' });
     }
@@ -1341,9 +1349,6 @@ exports.searchInfluencers = async (req, res) => {
     return res.status(500).json({ message: 'Internal server error' });
   }
 };
-
-
-
 
 exports.searchBrands = async (req, res) => {
   try {
@@ -1380,7 +1385,6 @@ exports.searchBrands = async (req, res) => {
   }
 };
 
-
 exports.suggestInfluencers = async (req, res) => {
   try {
     const { q: rawQ = '', limit: rawLimit = 8 } = req.body || {};
@@ -1388,9 +1392,9 @@ exports.suggestInfluencers = async (req, res) => {
     const limit = Math.max(1, Math.min(20, parseInt(rawLimit, 10) || 8));
     if (!q) return res.json({ success: true, suggestions: [] });
 
-    const rx = new RegExp('^' + escapeRegExp(q));
     const candidates = await Influencer.find(
-      { name: 1, categoryName: 1, platformName: 1, country: 1, socialMedia: 1 }
+      { },
+      'name categoryName platformName country socialMedia'
     ).limit(100).lean();
 
     const set = new Set();
@@ -1403,8 +1407,8 @@ exports.suggestInfluencers = async (req, res) => {
     }
 
     const list = Array.from(set);
-    const starts = list.filter(s => s.toLowerCase().startsWith(q));
-    const contains = list.filter(s => !s.toLowerCase().startsWith(q) && s.toLowerCase().includes(q));
+    const starts = list.filter(s => String(s).toLowerCase().startsWith(q));
+    const contains = list.filter(s => !String(s).toLowerCase().startsWith(q) && String(s).toLowerCase().includes(q));
     const ordered = [...starts, ...contains].slice(0, limit);
 
     res.json({ success: true, suggestions: ordered });
@@ -1414,21 +1418,17 @@ exports.suggestInfluencers = async (req, res) => {
   }
 };
 
-
-// =====================================
-// 1) updateProfile  (no email updates)
-// =====================================
+/* ========================= Profile Update (no email) ========================= */
 exports.updateProfile = async (req, res) => {
   try {
     const {
       influencerId,
-      // DO NOT accept email here – email changes via requestEmailUpdate + verifyotp only
       name,
       password,
       phone,
       socialMedia,
       gender,
-      primaryPlatform,      // <--- use string enum
+      primaryPlatform,
       profileLink,
       malePercentage,
       femalePercentage,
@@ -1437,7 +1437,7 @@ exports.updateProfile = async (req, res) => {
       countryId,
       callingId,
       bio,
-      onboarding            // <--- { categoryId, subcategories?: [{subcategoryId}], subcategoryIds?: [] }
+      onboarding
     } = req.body || {};
 
     if (!influencerId) {
@@ -1453,29 +1453,25 @@ exports.updateProfile = async (req, res) => {
       return res.status(400).json({ message: 'Email cannot be updated here. Use requestEmailUpdate & verifyotp.' });
     }
 
-    // Optional: update profile image if sent (multer single upload)
     if (req.file) {
       inf.profileImage = `/uploads/profile_images/${req.file.filename}`;
     }
 
-    // Basic fields
     if (typeof name !== 'undefined') inf.name = name;
-    if (typeof password !== 'undefined' && password) inf.password = password; // hashed by pre-save hook
+    if (typeof password !== 'undefined' && password) inf.password = password;
     if (typeof phone !== 'undefined') inf.phone = phone;
     if (typeof socialMedia !== 'undefined') inf.socialMedia = socialMedia;
     if (typeof profileLink !== 'undefined') inf.profileLink = profileLink;
     if (typeof bio !== 'undefined') inf.bio = bio;
 
-    // Gender (string enum)
     if (typeof gender !== 'undefined') {
       const g = normalizeGender(gender);
       if (g === '__INVALID__') {
         return res.status(400).json({ message: 'Invalid gender. Allowed: Male, Female, Non-binary, Prefer not to say, or empty.' });
       }
-      if (g !== null) inf.gender = g; // null means "do not update"
+      if (g !== null) inf.gender = g;
     }
 
-    // Primary platform (string enum from Influencer schema)
     if (typeof primaryPlatform !== 'undefined') {
       const p = normalizePrimaryPlatform(primaryPlatform);
       if (p === '__INVALID__') {
@@ -1484,7 +1480,6 @@ exports.updateProfile = async (req, res) => {
       inf.primaryPlatform = p;
     }
 
-    // Audience bifurcation (optional)
     const hasMale = typeof malePercentage !== 'undefined';
     const hasFemale = typeof femalePercentage !== 'undefined';
     if (hasMale || hasFemale) {
@@ -1494,7 +1489,6 @@ exports.updateProfile = async (req, res) => {
       };
     }
 
-    // Audience Age Range (optional)
     if (typeof audienceAgeRangeId !== 'undefined') {
       const ageRangeDoc = await Audience.findOne({ audienceId: audienceAgeRangeId });
       if (!ageRangeDoc) return res.status(400).json({ message: 'Invalid audienceAgeRangeId' });
@@ -1502,7 +1496,6 @@ exports.updateProfile = async (req, res) => {
       inf.audienceAgeRange = ageRangeDoc.range;
     }
 
-    // Audience Count Range (optional)
     if (typeof audienceId !== 'undefined') {
       const countRangeDoc = await AudienceRange.findById(audienceId);
       if (!countRangeDoc) return res.status(400).json({ message: 'Invalid audienceId' });
@@ -1510,7 +1503,6 @@ exports.updateProfile = async (req, res) => {
       inf.audienceRange = countRangeDoc.range;
     }
 
-    // Country / Calling code (optional)
     if (typeof countryId !== 'undefined') {
       const countryDoc = await Country.findById(countryId);
       if (!countryDoc) return res.status(400).json({ message: 'Invalid countryId' });
@@ -1524,14 +1516,12 @@ exports.updateProfile = async (req, res) => {
       inf.callingcode = callingDoc.callingCode;
     }
 
-    // Onboarding (Category/Subcategories) – validate & save against Category model
     if (typeof onboarding !== 'undefined') {
       await upsertOnboardingFromPayload(inf, onboarding);
     }
 
     await inf.save();
 
-    // Optional: return a small snapshot (helps client rehydrate without another GET)
     return res.status(200).json({
       message: 'Profile updated successfully',
       onboarding: inf.onboarding,
@@ -1549,11 +1539,7 @@ exports.updateProfile = async (req, res) => {
   }
 };
 
-
-
-// =====================================================
-// 2) requestEmailUpdate  (send OTP to old & new emails)
-// =====================================================
+/* ================= Email Update (two-OTP flow, same template) ================= */
 exports.requestEmailUpdate = async (req, res) => {
   try {
     const { influencerId, newEmail, role = 'Influencer' } = req.body || {};
@@ -1563,7 +1549,6 @@ exports.requestEmailUpdate = async (req, res) => {
     if (!['Influencer', 'Brand'].includes(String(role))) {
       return res.status(400).json({ message: 'role must be "Influencer" or "Brand"' });
     }
-    // This API updates an Influencer only
     if (role !== 'Influencer') {
       return res.status(400).json({ message: 'This endpoint is for Influencer role only' });
     }
@@ -1576,19 +1561,16 @@ exports.requestEmailUpdate = async (req, res) => {
     if (!nextEmail) return res.status(400).json({ message: 'newEmail is required' });
     if (nextEmail === oldEmail) return res.status(400).json({ message: 'New email must be different from current email' });
 
-    // Ensure new email is not already taken by another Influencer
     const emailRegexCI = new RegExp(`^${escapeRegExp(nextEmail)}$`, 'i');
     const exists = await Influencer.findOne({ email: emailRegexCI }, '_id influencerId');
     if (exists && String(exists.influencerId) !== String(influencerId)) {
       return res.status(409).json({ message: 'New email already in use' });
     }
 
-    // Generate OTPs
     const codeOld = Math.floor(100000 + Math.random() * 900000).toString();
     const codeNew = Math.floor(100000 + Math.random() * 900000).toString();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
-    // Upsert VerifyEmail for OLD email (keep role = Influencer). Do not change verified flag here.
     await VerifyEmail.findOneAndUpdate(
       { email: oldEmail, role: 'Influencer' },
       {
@@ -1598,7 +1580,6 @@ exports.requestEmailUpdate = async (req, res) => {
       { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true }
     );
 
-    // Upsert VerifyEmail for NEW email (role = Influencer). Leave verified=false until success.
     await VerifyEmail.findOneAndUpdate(
       { email: nextEmail, role: 'Influencer' },
       {
@@ -1608,28 +1589,31 @@ exports.requestEmailUpdate = async (req, res) => {
       { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true }
     );
 
-    // Send OTPs
-    try {
-      await transporter.sendMail({
-        from: `"No-Reply" <${SMTP_USER}>`,
-        to: oldEmail,
-        subject: 'Confirm your email change (OLD email)',
-        text: `OTP to confirm email change (old email): ${codeOld}. It expires in 10 minutes.`
-      });
-    } catch (e) {
-      console.warn('Failed to send OTP to old email:', e.message);
-    }
+    // HTML emails (brand-style)
+    const oldSubject = 'Confirm email change (old email verification)';
+    const oldHtml = otpHtmlTemplate({
+      title: 'Confirm email change',
+      subtitle: 'Use this code to confirm changing away from this email.',
+      code: codeOld,
+      minutes: 10,
+      preheader: 'Confirm email change (old email)',
+    });
+    const oldText = otpTextFallback({ code: codeOld, minutes: 10, title: 'Confirm email change' });
 
-    try {
-      await transporter.sendMail({
-        from: `"No-Reply" <${SMTP_USER}>`,
-        to: nextEmail,
-        subject: 'Confirm your email change (NEW email)',
-        text: `OTP to confirm email change (new email): ${codeNew}. It expires in 10 minutes.`
-      });
-    } catch (e) {
-      console.warn('Failed to send OTP to new email:', e.message);
-    }
+    const newSubject = 'Confirm email change (new email verification)';
+    const newHtml = otpHtmlTemplate({
+      title: 'Verify your new email',
+      subtitle: 'Use this code to confirm your new email address.',
+      code: codeNew,
+      minutes: 10,
+      preheader: 'Confirm email change (new email)',
+    });
+    const newText = otpTextFallback({ code: codeNew, minutes: 10, title: 'Verify your new email' });
+
+    await Promise.all([
+      sendMail({ to: oldEmail, subject: oldSubject, html: oldHtml, text: oldText }),
+      sendMail({ to: nextEmail, subject: newSubject, html: newHtml, text: newText }),
+    ]);
 
     return res.status(200).json({ message: 'OTPs sent to old and new emails' });
   } catch (err) {
@@ -1638,10 +1622,6 @@ exports.requestEmailUpdate = async (req, res) => {
   }
 };
 
-
-// ======================================================================
-// 3) verifyotp  (verify both OTPs; swap email; flip old verified=false)
-// ======================================================================
 exports.verifyotp = async (req, res) => {
   try {
     const { influencerId, role = 'Influencer', oldEmailOtp, newEmailOtp, newEmail } = req.body || {};
@@ -1660,7 +1640,6 @@ exports.verifyotp = async (req, res) => {
     if (!nextEmail) return res.status(400).json({ message: 'newEmail is required' });
     if (nextEmail === oldEmail) return res.status(400).json({ message: 'New email must be different from current email' });
 
-    // Double-check new email is still available
     const emailRegexCI = new RegExp(`^${escapeRegExp(nextEmail)}$`, 'i');
     const exists = await Influencer.findOne({ email: emailRegexCI }, '_id influencerId');
     if (exists && String(exists.influencerId) !== String(influencerId)) {
@@ -1669,7 +1648,6 @@ exports.verifyotp = async (req, res) => {
 
     const now = new Date();
 
-    // Verify OLD email OTP
     const oldVE = await VerifyEmail.findOne({
       email: oldEmail,
       role: 'Influencer',
@@ -1680,7 +1658,6 @@ exports.verifyotp = async (req, res) => {
       return res.status(400).json({ message: 'Invalid or expired OTP for old email' });
     }
 
-    // Verify NEW email OTP
     const newVE = await VerifyEmail.findOne({
       email: nextEmail,
       role: 'Influencer',
@@ -1691,19 +1668,15 @@ exports.verifyotp = async (req, res) => {
       return res.status(400).json({ message: 'Invalid or expired OTP for new email' });
     }
 
-    // All good → update influencer email
     inf.email = nextEmail;
     await inf.save();
 
-    // Update verifyEmail rows:
-    // - Old email → set verified=false; clear OTP
     oldVE.verified = false;
     oldVE.otpCode = undefined;
     oldVE.otpExpiresAt = undefined;
     oldVE.verifiedAt = new Date();
     await oldVE.save();
 
-    // - New email → set verified=true; clear OTP
     newVE.verified = true;
     newVE.otpCode = undefined;
     newVE.otpExpiresAt = undefined;
