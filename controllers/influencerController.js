@@ -531,13 +531,8 @@ exports.registerInfluencer = async (req, res) => {
     const already = await Influencer.findOne({ email: emailRegexCI }, '_id');
     if (already) return res.status(400).json({ message: 'Already registered' });
 
-<<<<<<< HEAD
-    const [countryDoc, callingDoc] = await Promise.all([Country.findById(countryId), Country.findById(callingId)]);
-    if (!countryDoc || !callingDoc) return res.status(400).json({ message: 'Invalid countryId or callingId' });
-=======
     const [countryDoc] = await Promise.all([ Country.findById(countryId)]);
     if (!countryDoc) return res.status(400).json({ message: 'Invalid countryId' });
->>>>>>> origin/Priyanshu
 
     const profiles = [];
     if (Array.isArray(platforms)) {
