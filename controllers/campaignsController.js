@@ -532,7 +532,12 @@ exports.getActiveCampaignsByBrand = async (req, res) => {
     const sortObj = { [sortBy]: sortDir };
 
     const [campaigns, totalCount] = await Promise.all([
-      Campaign.find(filter).sort(sortObj).skip(skip).limit(perPage).lean(),
+      Campaign.find(filter)
+        .select('-description') // ← exclude description
+        .sort(sortObj)
+        .skip(skip)
+        .limit(perPage)
+        .lean(),
       Campaign.countDocuments(filter)
     ]);
 
