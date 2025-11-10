@@ -1,8 +1,7 @@
 // controllers/campaignController.js
-const path = require('path');
-const fs = require('fs');
 const mongoose = require('mongoose');
 const multer = require('multer');
+const { uploadToGridFS } = require('../utils/gridfs');
 
 const Campaign = require('../models/campaign');
 const Brand = require('../models/brand');
@@ -15,59 +14,15 @@ const getFeature = require('../utils/getFeature');
 const Milestone = require('../models/milestone');
 const Country = require('../models/country');
 
+// ✅ NEW: persisted notifications helper (creates DB row + emits via socket.io)
+const { createAndEmit } = require('../utils/notifier');
+
 // ===============================
-//  Multer setup
+//  Multer setup (memory) + GridFS helpers
 // ===============================
-const uploadDir = path.join(__dirname, '..', 'uploads');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir);
-}
 
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, uploadDir);
-  },
-  filename: function (req, file, cb) {
-    const timestamp = Date.now();
-    const ext = path.extname(file.originalname);
-    const baseName = path.basename(file.originalname, ext).replace(/\s+/g, '_');
-    cb(null, `${baseName}_${timestamp}${ext}`);
-  }
-});
-
-async function buildSubToParentNumMap() {
-  const rows = await Category.find({}, 'id subcategories').lean();
-  const subIdToParentNum = new Map(); // uuid -> Number
-
-  for (const r of rows) {
-    for (const s of (r.subcategories || [])) {
-      subIdToParentNum.set(String(s.subcategoryId), r.id);
-    }
-  }
-  return subIdToParentNum;
-}
-
-function buildSearchOr(q) {
-  return [
-    { brandName: { $regex: q, $options: 'i' } },
-    { productOrServiceName: { $regex: q, $options: 'i' } },
-    { description: { $regex: q, $options: 'i' } },
-    { 'categories.categoryName': { $regex: q, $options: 'i' } },
-    { 'categories.subcategoryName': { $regex: q, $options: 'i' } }
-  ];
-}
-
-
-// Basic search fields (fallback if you already have a builder, keep yours)
-function buildSearchOr(q) {
-  return [
-    { brandName: { $regex: q, $options: 'i' } },
-    { productOrServiceName: { $regex: q, $options: 'i' } },
-    { description: { $regex: q, $options: 'i' } },
-    { 'categories.categoryName': { $regex: q, $options: 'i' } },
-    { 'categories.subcategoryName': { $regex: q, $options: 'i' } }
-  ];
-}
+// Use memory storage to receive buffers, then hand them to the shared GridFS helper.
+const storage = multer.memoryStorage();
 
 const upload = multer({
   storage,
@@ -111,7 +66,7 @@ async function milestoneSetForInfluencer(influencerId, campaignIds = []) {
 
 /**
  * Expand & validate categories payload into:
- * [{ categoryId(ObjectId), categoryName, subcategoryId(string), subcategoryName }]
+ * [{ categoryId(Number), categoryName, subcategoryId(string), subcategoryName }]
  */
 async function normalizeCategoriesPayload(raw) {
   if (!raw) return [];
@@ -157,64 +112,14 @@ async function normalizeCategoriesPayload(raw) {
 }
 
 /**
- * Try to extract influencer-selected subcategoryIds from multiple shapes.
- * Returns Set<string> of subcategoryId.
- */
-function extractSubcategoryIdsFromInfluencerDoc(inf) {
-  const out = new Set();
-
-  // Common shapes we might see:
-  // 1) inf.subcategories: [{ subcategoryId, name, ... }]
-  if (Array.isArray(inf?.subcategories)) {
-    inf.subcategories.forEach((s) => {
-      if (s?.subcategoryId) out.add(String(s.subcategoryId));
-    });
-  }
-
-  // 2) inf.categories: could be array of string subcategoryIds or objects
-  if (Array.isArray(inf?.categories)) {
-    inf.categories.forEach((c) => {
-      if (typeof c === 'string') out.add(c);
-      else if (c?.subcategoryId) out.add(String(c.subcategoryId));
-    });
-  }
-
-  // 3) inf.socialProfiles?.categories: [{ subcategoryId, ... }]
-  if (Array.isArray(inf?.socialProfiles)) {
-    inf.socialProfiles.forEach((sp) => {
-      if (Array.isArray(sp?.categories)) {
-        sp.categories.forEach((c) => {
-          if (c?.subcategoryId) out.add(String(c.subcategoryId));
-        });
-      }
-    });
-  }
-
-  // 4) inf.onboarding?.categories or .subcategories
-  if (inf?.onboarding) {
-    if (Array.isArray(inf.onboarding.categories)) {
-      inf.onboarding.categories.forEach((c) => {
-        if (typeof c === 'string') out.add(c);
-        else if (c?.subcategoryId) out.add(String(c.subcategoryId));
-      });
-    }
-    if (Array.isArray(inf.onboarding.subcategories)) {
-      inf.onboarding.subcategories.forEach((s) => {
-        if (s?.subcategoryId) out.add(String(s.subcategoryId));
-      });
-    }
-  }
-
-  return out;
-}
-
-/**
  * Build case-insensitive $or for text search across brand name, product, subcategory/category names.
+ * Also treat numeric term as "budget <= term".
  */
 function buildSearchOr(term) {
   const or = [
     { brandName: { $regex: term, $options: 'i' } },
     { productOrServiceName: { $regex: term, $options: 'i' } },
+    { description: { $regex: term, $options: 'i' } },
     { 'categories.subcategoryName': { $regex: term, $options: 'i' } },
     { 'categories.categoryName': { $regex: term, $options: 'i' } }
   ];
@@ -223,8 +128,52 @@ function buildSearchOr(term) {
   return or;
 }
 
+/** Build a map subcategoryId(string) -> parent numeric Category.id */
+async function buildSubToParentNumMap() {
+  const rows = await Category.find({}, 'id subcategories').lean();
+  const subIdToParentNum = new Map(); // uuid -> Number
+  for (const r of rows) {
+    for (const s of (r.subcategories || [])) {
+      subIdToParentNum.set(String(s.subcategoryId), r.id);
+    }
+  }
+  return subIdToParentNum;
+}
+
+/** Find influencers who match any of the given subcategoryIds or parent numeric categoryIds */
+async function findMatchingInfluencers({ subIds = [], catNumIds = [] }) {
+  if (!subIds.length && !catNumIds.length) return [];
+
+  // We match several common shapes seen in Influencer docs
+  const or = [];
+  if (subIds.length) {
+    or.push(
+      { 'onboarding.subcategories.subcategoryId': { $in: subIds } },
+      { 'subcategories.subcategoryId': { $in: subIds } },
+      { 'categories.subcategoryId': { $in: subIds } },
+      { 'socialProfiles.categories.subcategoryId': { $in: subIds } },
+      { 'categories': { $in: subIds } } // in case categories is an array of subcategoryId strings
+    );
+  }
+  if (catNumIds.length) {
+    or.push(
+      { 'onboarding.categoryId': { $in: catNumIds } },
+      { 'categories.categoryId': { $in: catNumIds } }
+    );
+  }
+
+  const filter = or.length ? { $or: or } : {};
+  const influencers = await Influencer.find(
+    filter,
+    'influencerId name primaryPlatform handle onboarding socialProfiles'
+  ).lean();
+
+  return influencers || [];
+}
+
 // ===============================
 //  CREATE CAMPAIGN  (uses categories)
+//  + emits notifications to matching influencers (preferred campaign)
 // ===============================
 exports.createCampaign = (req, res) => {
   upload(req, res, async (err) => {
@@ -336,11 +285,19 @@ exports.createCampaign = (req, res) => {
 
       const isActiveFlag = computeIsActive(tlData);
 
-      // files
-      const images = (req.files.image || []).map((f) => path.join('uploads', path.basename(f.path)));
-      const creativePDFs = (req.files.creativeBrief || []).map((f) =>
-        path.join('uploads', path.basename(f.path))
-      );
+      // files → stream to GridFS, store returned filenames
+      const imagesUploaded = await uploadToGridFS(req.files.image || [], {
+        prefix: 'campaign_image',
+        metadata: { kind: 'campaign_image', brandId },
+        req
+      });
+      const creativeUploaded = await uploadToGridFS(req.files.creativeBrief || [], {
+        prefix: 'campaign_brief',
+        metadata: { kind: 'campaign_brief', brandId },
+        req
+      });
+      const images = imagesUploaded.map((f) => f.filename);
+      const creativePDFs = creativeUploaded.map((f) => f.filename);
 
       // save
       const newCampaign = new Campaign({
@@ -368,6 +325,40 @@ exports.createCampaign = (req, res) => {
           { brandId, 'subscription.features.key': 'live_campaigns_limit' },
           { $inc: { 'subscription.features.$.used': 1 } }
         );
+      }
+
+      // ==== ✅ Persisted notifications to matching influencers ====
+      try {
+        // Derive matches (category or subcategory)
+        const subIds = Array.from(new Set((categoriesData || []).map(c => String(c.subcategoryId))));
+        const catNumIds = Array.from(new Set((categoriesData || []).map(c => Number(c.categoryId)).filter(Number.isFinite)));
+
+        if (subIds.length || catNumIds.length) {
+          const influencers = await findMatchingInfluencers({ subIds, catNumIds });
+
+          if (Array.isArray(influencers) && influencers.length) {
+            const campaignIdForUrl = newCampaign.campaignsId || String(newCampaign._id);
+            const actionPath = `/influencer/dashboard/view-campaign?id=${campaignIdForUrl}`;
+            const title = 'New campaign matches your profile';
+            const message = `${newCampaign.brandName} posted "${newCampaign.productOrServiceName}".`;
+
+            await Promise.all(
+              influencers.map((inf) =>
+                createAndEmit({
+                  influencerId: String(inf.influencerId),
+                  type: 'campaign.match',
+                  title,
+                  message,
+                  entityType: 'campaign',
+                  entityId: String(campaignIdForUrl),
+                  actionPath
+                }).catch(e => console.warn('notify influencer failed', inf.influencerId, e.message))
+              )
+            );
+          }
+        }
+      } catch (notifErr) {
+        console.warn('createCampaign: notification flow failed (non-fatal)', notifErr.message);
       }
 
       return res.status(201).json({ message: 'Campaign created successfully.' });
@@ -529,14 +520,22 @@ exports.updateCampaign = (req, res) => {
         updates.isActive = computeIsActive(timelineData);
       }
 
-      // files
+      // files → stream to GridFS, store returned filenames
       if (Array.isArray(req.files['image']) && req.files['image'].length > 0) {
-        updates.images = req.files['image'].map((file) => path.join('uploads', path.basename(file.path)));
+        const uploadedImages = await uploadToGridFS(req.files['image'], {
+          prefix: 'campaign_image',
+          metadata: { kind: 'campaign_image', campaignsId },
+          req
+        });
+        updates.images = uploadedImages.map((f) => f.filename);
       }
       if (Array.isArray(req.files['creativeBrief']) && req.files['creativeBrief'].length > 0) {
-        updates.creativeBrief = req.files['creativeBrief'].map((file) =>
-          path.join('uploads', path.basename(file.path))
-        );
+        const uploadedBriefs = await uploadToGridFS(req.files['creativeBrief'], {
+          prefix: 'campaign_brief',
+          metadata: { kind: 'campaign_brief', campaignsId },
+          req
+        });
+        updates.creativeBrief = uploadedBriefs.map((f) => f.filename);
       }
 
       const updatedCampaign = await Campaign.findOneAndUpdate({ campaignsId }, updates, {
@@ -1500,5 +1499,38 @@ exports.getRejectedCampaignsByInfluencer = async (req, res) => {
   } catch (err) {
     console.error('Error in getRejectedCampaignsByInfluencer:', err);
     return res.status(500).json({ message: 'Internal server error while fetching rejected campaigns.' });
+  }
+};
+
+exports.getCampaignSummary = async (req, res) => {
+  try {
+    const campaignsId = req.query.id || req.params?.id;
+    if (!campaignsId) {
+      return res
+        .status(400)
+        .json({ message: 'Query parameter id (campaignsId) is required.' });
+    }
+
+    // Select just the fields we care about
+    const campaign = await Campaign.findOne(
+      { campaignsId },
+      'productOrServiceName budget timeline'
+    ).lean();
+
+    if (!campaign) {
+      return res.status(404).json({ message: 'Campaign not found.' });
+    }
+
+    // Map productOrServiceName as the "campaign name"
+    return res.json({
+      campaignName: campaign.productOrServiceName,
+      budget: campaign.budget ?? 0,
+      timeline: campaign.timeline || {}
+    });
+  } catch (error) {
+    console.error('Error in getCampaignSummary:', error);
+    return res
+      .status(500)
+      .json({ message: 'Internal server error while fetching campaign summary.' });
   }
 };

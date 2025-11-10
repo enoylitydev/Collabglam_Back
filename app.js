@@ -4,12 +4,12 @@ require('dotenv').config();
 const express   = require('express');
 const cors      = require('cors');
 const mongoose  = require('mongoose');
+const { GridFSBucket, ObjectId } = require('mongodb');
 const http      = require('http');
-const WebSocket = require('ws');
 const path      = require('path');
 const { v4: uuidv4 } = require('uuid');
 
-
+// routes
 const influencerRoutes    = require('./routes/influencerRoutes');
 const countryRoutes       = require('./routes/countryRoutes');
 const brandRoutes         = require('./routes/brandRoutes');
@@ -37,173 +37,27 @@ const languageRoutes      = require('./routes/languageRoutes');
 const businessRoutes      = require('./routes/businessRoutes');
 const unsubscribeRoutes   = require('./routes/unsubscribeRoutes');
 const disputeRoutes       = require('./routes/disputeRoutes');
+const notificationsRoutes = require('./routes/notificationsRoutes');
 
-// Models needed inside WS handlers
-const ChatRoom = require('./models/chat');
-
-// Start unseen message notifier job
+// jobs
 const unseenMessageNotifier = require('./jobs/unseenMessageNotifier');
+
+// sockets (Socket.IO)
+const sockets = require('./sockets');
 
 const app    = express();
 const server = http.createServer(app);
 
-// ====== Static uploads (so attachment URLs work) ======
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// ====== WebSocket (ws) setup ======
-const wss   = new WebSocket.Server({ server, path: '/ws' });
-const rooms = new Map(); // roomId -> Set<ws>
 
-function broadcastToRoom(roomId, payloadString) {
-  const clients = rooms.get(roomId);
-  if (!clients) return;
-  for (const client of clients) {
-    if (client.readyState === WebSocket.OPEN) client.send(payloadString);
-  }
-}
+// ====== Socket.IO setup (replaces old ws) ======
+const io = sockets.init(server);
 
-// Optional heartbeat to terminate dead connections
-function noop() {}
-function heartbeat() { this.isAlive = true; }
-
-function makeReplySnapshot(room, replyTo) {
-  if (!replyTo) return null;
-  const target = room.messages.find(m => m.messageId === replyTo);
-  if (!target) return null;
-  const firstAtt = target.attachments?.[0];
-  return {
-    messageId:  target.messageId,
-    senderId:   target.senderId,
-    text:       (target.text || '').slice(0, 200),
-    hasAttachment: !!firstAtt,
-    attachment: firstAtt ? {
-      originalName: firstAtt.originalName,
-      mimeType: firstAtt.mimeType
-    } : undefined
-  };
-}
-
-wss.on('connection', (ws) => {
-  ws.isAlive = true;
-  ws.on('pong', heartbeat);
-
-  let joinedRoom = null;
-
-  ws.on('message', async (raw) => {
-    let data;
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      console.error('Invalid WS JSON:', raw);
-      return;
-    }
-
-    switch (data.type) {
-      case 'joinChat': {
-        const { roomId } = data;
-        if (!roomId) return;
-
-        joinedRoom = roomId;
-        if (!rooms.has(roomId)) rooms.set(roomId, new Set());
-        rooms.get(roomId).add(ws);
-        ws.send(JSON.stringify({ type: 'joined', roomId }));
-        break;
-      }
-
-      case 'sendChatMessage': {
-        const { roomId, senderId, text = '', replyTo, attachments = [] } = data;
-        if (!roomId || !senderId || (!text && (!attachments || attachments.length === 0))) return;
-
-        const room = await ChatRoom.findOne({ roomId });
-        if (!room) {
-          console.warn(`WS: room ${roomId} not found`);
-          return;
-        }
-        const isMember = room.participants.some(p => p.userId === senderId);
-        if (!isMember) {
-          console.warn(`WS: sender ${senderId} not in room ${roomId}`);
-          return;
-        }
-
-        const reply = makeReplySnapshot(room, replyTo);
-
-        const normalized = Array.isArray(attachments) ? attachments.map(a => ({
-          attachmentId: uuidv4(),
-          url: a.url,
-          path: a.path || null,
-          originalName: a.originalName || 'file',
-          mimeType: a.mimeType || 'application/octet-stream',
-          size: Number(a.size || 0),
-          width: a.width || null,
-          height: a.height || null,
-          duration: a.duration || null,
-          thumbnailUrl: a.thumbnailUrl || null,
-          storage: a.storage || 'remote'
-        })) : [];
-
-        const msg = {
-          messageId: uuidv4(),
-          senderId,
-          text,
-          timestamp: new Date(),
-          replyTo: replyTo || null,
-          reply: reply || null,
-          attachments: normalized
-        };
-
-        room.messages.push(msg);
-        await room.save();
-
-        const payload = JSON.stringify({
-          type: 'chatMessage',
-          roomId,
-          message: msg
-        });
-        broadcastToRoom(roomId, payload);
-        break;
-      }
-
-      case 'typing': {
-        const { roomId, senderId, isTyping } = data;
-        if (!roomId || !senderId) return;
-        const payload = JSON.stringify({
-          type: 'typing',
-          roomId,
-          senderId,
-          isTyping: !!isTyping
-        });
-        broadcastToRoom(roomId, payload);
-        break;
-      }
-
-      default:
-        console.warn('WS: unknown type', data.type);
-    }
-  });
-
-  ws.on('close', () => {
-    if (joinedRoom && rooms.has(joinedRoom)) {
-      rooms.get(joinedRoom).delete(ws);
-      if (rooms.get(joinedRoom).size === 0) rooms.delete(joinedRoom);
-    }
-  });
-});
-
-// ping clients every 30s
-const interval = setInterval(() => {
-  wss.clients.forEach((ws) => {
-    if (ws.isAlive === false) return ws.terminate();
-    ws.isAlive = false;
-    ws.ping(noop);
-  });
-}, 30000);
-
-wss.on('close', () => clearInterval(interval));
-
-/* Expose helpers to controllers */
-app.set('wss', wss);
-app.set('wsRooms', rooms);
-app.set('broadcastToRoom', broadcastToRoom);
+// expose helpers to controllers/jobs if they want to emit without importing sockets
+app.set('io', io);
+app.set('emitToBrand', sockets.emitToBrand);
+app.set('emitToInfluencer', sockets.emitToInfluencer);
+app.set('broadcastToRoom', sockets.legacyBroadcastToRoom); // back-compat for any legacy broadcast usage
 
 // ====== Express middleware ======
 app.use(cors({
@@ -211,13 +65,15 @@ app.use(cors({
   credentials: true
 }));
 
-// Increase JSON/urlencoded limits to avoid PayloadTooLargeError on /register
-// You can tune via env: JSON_LIMIT=8mb (default 8mb)
+// Increase JSON/urlencoded limits
 const JSON_LIMIT = process.env.JSON_LIMIT || '8mb';
 app.use(express.json({ limit: JSON_LIMIT }));
 app.use(express.urlencoded({ extended: true, limit: JSON_LIMIT, parameterLimit: 100000 }));
 
-// Friendly 413 response instead of crashing stack traces
+// Legacy static: serve any historical disk uploads if present
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+// Friendly 413 response
 app.use((err, req, res, next) => {
   if (err && (err.type === 'entity.too.large' || err.status === 413)) {
     return res.status(413).json({ message: 'Payload too large. Try reducing the request size or increase JSON_LIMIT.' });
@@ -253,6 +109,7 @@ app.use('/languages', languageRoutes);
 app.use('/business', businessRoutes);
 app.use('/unsubscribe', unsubscribeRoutes);
 app.use('/dispute', disputeRoutes);
+app.use('/notifications', notificationsRoutes);
 
 /* Mongo & start */
 const PORT = process.env.PORT || 5000;
@@ -260,11 +117,70 @@ const PORT = process.env.PORT || 5000;
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => {
     console.log('✅ Connected to MongoDB');
+
+    // Init GridFS
+    const bucket = new GridFSBucket(mongoose.connection.db, { bucketName: 'uploads' });
+    // Expose for controllers if needed
+    app.set('gridfsBucket', bucket);
+
+    // Serve files from GridFS
+    app.get('/file/:filename', async (req, res) => {
+      try {
+        const filename = req.params.filename;
+        const files = await bucket.find({ filename }).toArray();
+        if (!files || files.length === 0) {
+          return res.status(404).json({ message: 'File not found.' });
+        }
+        const doc = files[0];
+        const contentType = doc.contentType || doc.metadata?.mimeType || 'application/octet-stream';
+        res.set('Content-Type', contentType);
+        res.set('Cache-Control', 'public, max-age=31536000, immutable');
+        const stream = bucket.openDownloadStreamByName(filename);
+        stream.on('error', (err) => {
+          console.error('Error streaming file from GridFS:', err);
+          return res.status(404).json({ message: 'File not found.' });
+        });
+        stream.pipe(res);
+      } catch (err) {
+        console.error('Error handling /file/:filename:', err);
+        return res.status(500).json({ message: 'Internal server error' });
+      }
+    });
+
+    // Serve files by ObjectId
+    app.get('/file/id/:id', async (req, res) => {
+      try {
+        const id = req.params.id;
+        let _id;
+        try {
+          _id = new ObjectId(id);
+        } catch {
+          return res.status(400).json({ message: 'Invalid file id.' });
+        }
+        const files = await bucket.find({ _id }).toArray();
+        if (!files || files.length === 0) {
+          return res.status(404).json({ message: 'File not found.' });
+        }
+        const doc = files[0];
+        const contentType = doc.contentType || doc.metadata?.mimeType || 'application/octet-stream';
+        res.set('Content-Type', contentType);
+        res.set('Cache-Control', 'public, max-age=31536000, immutable');
+        const stream = bucket.openDownloadStream(_id);
+        stream.on('error', (err) => {
+          console.error('Error streaming file from GridFS:', err);
+          return res.status(404).json({ message: 'File not found.' });
+        });
+        stream.pipe(res);
+      } catch (err) {
+        console.error('Error handling /file/id/:id:', err);
+        return res.status(500).json({ message: 'Internal server error' });
+      }
+    });
     
     // Start the unseen message notifier job
     unseenMessageNotifier.start();
     console.log('✅ Started unseen message notifier job');
-    
+
     server.listen(PORT, () => {
       console.log(`🚀 Server listening on port ${PORT}`);
     });
@@ -273,3 +189,5 @@ mongoose.connect(process.env.MONGODB_URI)
     console.error('❌ MongoDB connection error:', err);
     process.exit(1);
   });
+
+module.exports = app;
