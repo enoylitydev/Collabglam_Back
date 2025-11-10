@@ -250,10 +250,10 @@ function computeStatusFlags(doc) {
     isInfluencerConfirm: influencerConfirmed,
     isBothSigned: both,
 
-    canEditBrandFields: !locked && !both && !brandConfirmed && !influencerConfirmed,
-    canEditInfluencerFields: !locked && !both && influencerConfirmed,
-    canSignBrand: !locked && brandConfirmed,
-    canSignInfluencer: !locked && influencerConfirmed,
+    canEditBrandFields: !locked && !both && !brandConfirmed && !influencerConfirmed && !finalizeOrBeyond,
+    canEditInfluencerFields: !locked && !both && influencerConfirmed && !finalizeOrBeyond,
+    canSignBrand: !locked && brandConfirmed && influencerConfirmed,
+    canSignInfluencer: !locked && influencerConfirmed && brandConfirmed,
 
     isResendChild
   };

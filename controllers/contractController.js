@@ -226,6 +226,13 @@ function formatDateTZ(date, tz, fmt = "MMMM D, YYYY") {
   return moment(date).tz(tz).format(fmt);
 }
 
+function getBrandSelectedEffectiveDate(contract) {
+  return contract?.requestedEffectiveDate
+    || contract?.brand?.requestedEffectiveDate
+    || null;
+}
+
+
 function signaturePanelHTML(contract) {
   const tz = tzOr(contract);
   const roles = [
@@ -249,13 +256,12 @@ function signaturePanelHTML(contract) {
       const when = s.at ? formatDateTZ(s.at, tz, "YYYY-MM-DD HH:mm z") : "";
       const img = s.sigImageDataUrl
         ? `<img class="sigimg" alt="Signature image" src="${esc(
-            s.sigImageDataUrl
-          )}">`
+          s.sigImageDataUrl
+        )}">`
         : "";
       const meta = s.signed
-        ? `<div class="sigmeta">SIGNED by ${esc(s.name || "")}${
-            s.email ? ` &lt;${esc(s.email)}&gt;` : ""
-          }${when ? ` on ${esc(when)}` : ""}</div>`
+        ? `<div class="sigmeta">SIGNED by ${esc(s.name || "")}${s.email ? ` &lt;${esc(s.email)}&gt;` : ""
+        }${when ? ` on ${esc(when)}` : ""}</div>`
         : `<div class="sigmeta muted">Pending signature</div>`;
       return `
       <div class="signature-block">
@@ -294,9 +300,7 @@ function normalizeDeliverable(d = {}, opts = {}) {
   const nd = { ...d };
 
   // Prefer canonical *Enabled fields, but accept legacy aliases too
-  // If both exist, *Enabled takes precedence
-  nd.whitelistingEnabled =
-    d.whitelistingEnabled ?? d.whitelisting ?? false;
+  nd.whitelistingEnabled = d.whitelistingEnabled ?? d.whitelisting ?? false;
   nd.sparkAdsEnabled = d.sparkAdsEnabled ?? d.sparkAds ?? false;
 
   // Enforce handle list with server truth
@@ -313,7 +317,7 @@ function normalizeDeliverable(d = {}, opts = {}) {
   if (nd.additionalRevisionFee === undefined)
     nd.additionalRevisionFee = opts.extraRevisionFee ?? 0;
   if (nd.liveRetentionMonths === undefined)
-    nd.liveRetentionMonths = nd.minLiveHours === undefined ? "-" : nd.liveRetentionMonths; // keep if set elsewhere
+    nd.liveRetentionMonths = nd.minLiveHours === undefined ? "-" : nd.liveRetentionMonths;
 
   return nd;
 }
@@ -387,9 +391,8 @@ function renderDeliverablesTable(delivs = [], tz) {
       const posting = `${pwStart}${pwStart && pwEnd ? " – " : ""}${pwEnd}`;
 
       const draftDue = d?.draftDueDate ? formatDateTZ(d.draftDueDate, tz) : "";
-      const draftCell = `${fmtBool(d.draftRequired)}${
-        draftDue ? `<br><span class="muted">Due: ${draftDue}</span>` : ""
-      }`;
+      const draftCell = `${fmtBool(d.draftRequired)}${draftDue ? `<br><span class="muted">Due: ${draftDue}</span>` : ""
+        }`;
 
       const revisionsInc = fmtRevisionsIncluded(d);
       const extraRevFee = fmtExtraRevisionFee(d);
@@ -401,7 +404,6 @@ function renderDeliverablesTable(delivs = [], tz) {
       const links = Array.isArray(d?.links) && d.links.length ? fmtList(d.links) : "";
       const disclosures = esc(d.disclosures || "");
 
-      // Prefer canonical *Enabled fields, but accept legacy aliases
       const whitelist = d.whitelistingEnabled ?? d.whitelisting ?? false;
       const sparkAds = d.sparkAdsEnabled ?? d.sparkAds ?? false;
       const wlSpark = `${fmtBool(whitelist)} / ${fmtBool(sparkAds)}`;
@@ -463,11 +465,10 @@ function renderUsageBundleTokens(ub = {}, currency = "USD") {
       <strong>Geographies:</strong> ${geos || "—"} |
       <strong>Derivative Edits:</strong> ${fmtBool(ub.derivativeEditsAllowed)} |
       <strong>Spend Cap:</strong> ${spendCap}
-      ${
-        ub.audienceRestrictions
-          ? `<br><strong>Audience Restrictions:</strong> ${esc(ub.audienceRestrictions)}`
-          : ""
-      }
+      ${ub.audienceRestrictions
+      ? `<br><strong>Audience Restrictions:</strong> ${esc(ub.audienceRestrictions)}`
+      : ""
+    }
     </p>`.trim();
 
   const table = `
@@ -532,12 +533,13 @@ function buildTokenMap(contract) {
   const b = contract.brand || {};
   const admin = contract.admin || {};
   const channels = (b.platforms || []).join(", ");
-  const displayDate = contract.requestedEffectiveDate || contract.effectiveDate || new Date();
+  const displayDate = getBrandSelectedEffectiveDate(contract) || contract.effectiveDate || null;
 
   const tokens = {
     // Agreement dates
     "Agreement.EffectiveDate": formatDateTZ(displayDate, tz),
-    "Agreement.EffectiveDateLong": formatDateTZ(displayDate, tz, "Do MMMM YYYY"),
+
+    "Agreement.EffectiveDateLong": displayDate ? formatDateTZ(displayDate, tz, "Do MMMM YYYY") : "",
 
     // Brand
     "Brand.LegalName": brandProfile.legalName || contract.brandName || "",
@@ -828,7 +830,7 @@ async function renderPDFWithPuppeteer({ html, res, filename = "Contract.pdf", he
   } finally {
     try {
       if (browser) await browser.close();
-    } catch (_) {}
+    } catch (_) { }
   }
 }
 
@@ -892,24 +894,37 @@ function requireNoEditsAfterBothSigned(contract) {
 }
 function requireInfluencerConfirmed(contract) {
   if (!contract.confirmations?.influencer?.confirmed) {
-    const e = new Error("Influencer must confirm before this action");
+    const e = new Error("Influencer must accept the contract first");
     e.status = 400;
     throw e;
   }
 }
 function requireBrandConfirmed(contract) {
   if (!contract.confirmations?.brand?.confirmed) {
-    const e = new Error("Brand must confirm before this action");
+    const e = new Error("Brand must accept the contract first");
     e.status = 400;
     throw e;
   }
 }
-function requireNoPartyConfirmations(contract) {
-  if (contract.confirmations?.brand?.confirmed || contract.confirmations?.influencer?.confirmed) {
-    const e = new Error("Edits are allowed only before any confirmations");
+// NEW: both must be confirmed before any signing
+function requireBothConfirmed(contract) {
+  if (!contract.confirmations?.influencer?.confirmed) {
+    const e = new Error("Influencer must accept before signing is allowed");
     e.status = 400;
     throw e;
   }
+  if (!contract.confirmations?.brand?.confirmed) {
+    const e = new Error("Brand must accept before signing is allowed");
+    e.status = 400;
+    throw e;
+  }
+}
+
+// (kept for backward compatibility but unused in new flow)
+function requireNoPartyConfirmations(_contract) {
+  const e = new Error("Edits are allowed only after the influencer accepts");
+  e.status = 400;
+  throw e;
 }
 
 function resolveEffectiveDate(contract) {
@@ -927,7 +942,11 @@ function resolveEffectiveDate(contract) {
 
 function maybeLockIfReady(contract) {
   if (bothSigned(contract)) {
-    contract.effectiveDate = resolveEffectiveDate(contract) || new Date();
+    contract.effectiveDate =
+      contract.effectiveDateOverride
+      || getBrandSelectedEffectiveDate(contract)
+      || resolveEffectiveDate(contract)
+      || new Date();
     contract.effectiveDateTimezone = tzOr(contract);
 
     const tokens = buildTokenMap(contract);
@@ -1051,7 +1070,6 @@ async function buildResendChildContract(
   };
 
   if (asPlain) {
-    // For previews: return a POJO to prevent Mongoose from stripping unknown keys
     return baseChild;
   }
 
@@ -1136,29 +1154,29 @@ exports.initiate = async (req, res) => {
       Array.isArray(brandInput.deliverablesExpanded) && brandInput.deliverablesExpanded.length
         ? brandInput.deliverablesExpanded
         : [
-            {
-              type: "Video",
-              quantity: 1,
-              format: "MP4",
-              durationSec: 60,
-              postingWindow: {
-                start: brandInput.goLive?.start,
-                end: brandInput.goLive?.end,
-              },
-              draftRequired: (brandInput.revisionsIncluded ?? 1) > 0,
-              minLiveHours: 720,
-              revisionRoundsIncluded: brandInput.revisionsIncluded ?? 1,
-              additionalRevisionFee: admin.extraRevisionFee ?? 0,
-              liveRetentionMonths: "-",
-              tags: [],
-              handles: [],
-              captions: "",
-              links: [],
-              disclosures: "#ad",
-              whitelistingEnabled: false,
-              sparkAdsEnabled: false,
+          {
+            type: "Video",
+            quantity: 1,
+            format: "MP4",
+            durationSec: 60,
+            postingWindow: {
+              start: brandInput.goLive?.start,
+              end: brandInput.goLive?.end,
             },
-          ];
+            draftRequired: (brandInput.revisionsIncluded ?? 1) > 0,
+            minLiveHours: 720,
+            revisionRoundsIncluded: brandInput.revisionsIncluded ?? 1,
+            additionalRevisionFee: admin.extraRevisionFee ?? 0,
+            liveRetentionMonths: "-",
+            tags: [],
+            handles: [],
+            captions: "",
+            links: [],
+            disclosures: "#ad",
+            whitelistingEnabled: false,
+            sparkAdsEnabled: false,
+          },
+        ];
 
     const draftDue = clampDraftDue(brandInput.goLive?.start || new Date());
     const enforcedHandle = influencerDoc.handle || "";
@@ -1192,7 +1210,7 @@ exports.initiate = async (req, res) => {
       influencerHandle: other.influencerProfile.handle,
     };
 
-    // Preview (non-resend) — use POJO to preserve any unknown keys
+    // Preview (non-resend)
     if (preview && !isResend) {
       const tmp = { ...base, status: "draft" };
       const tz = tzOr(tmp);
@@ -1201,8 +1219,8 @@ exports.initiate = async (req, res) => {
       const html = renderContractHTML({ contract: tmp, templateText: text });
       const headerTitle =
         "COLLABGLAM MASTER BRAND–INFLUENCER AGREEMENT (TRI-PARTY)";
-      const headerDate =
-        tokens["Agreement.EffectiveDateLong"] || formatDateTZ(new Date(), tz, "Do MMMM YYYY");
+      const headerDate = tokens["Agreement.EffectiveDateLong"] || "Pending";
+
       return await renderPDFWithPuppeteer({
         html,
         res,
@@ -1273,9 +1291,8 @@ exports.initiate = async (req, res) => {
         brandId: String(brandId),
         type: "contract.initiated.self",
         title: "Contract resent",
-        message: `You resent the contract to ${
-          influencerDoc?.name || "Influencer"
-        } for “${campaign?.productOrServiceName || "Campaign"}”.`,
+        message: `You resent the contract to ${influencerDoc?.name || "Influencer"
+          } for “${campaign?.productOrServiceName || "Campaign"}”.`,
         entityType: "contract",
         entityId: String(child.contractId),
         actionPath: `/brand/created-campaign/applied-inf?id=${campaignId}`,
@@ -1322,9 +1339,8 @@ exports.initiate = async (req, res) => {
       brandId: String(brandId),
       type: "contract.initiated.self",
       title: "Contract sent",
-      message: `You sent a contract to ${
-        influencerDoc.name || "Influencer"
-      } for “${campaign.productOrServiceName}”.`,
+      message: `You sent a contract to ${influencerDoc.name || "Influencer"
+        } for “${campaign.productOrServiceName}”.`,
       entityType: "contract",
       entityId: String(contract.contractId),
       actionPath: `/brand/created-campaign/applied-inf?id=${campaignId}`,
@@ -1333,7 +1349,7 @@ exports.initiate = async (req, res) => {
 
     return respondOK(res, { message: "Contract initialized successfully", contract }, 201);
   } catch (err) {
-    return respondError(res, "initiate error", err.status || 500, err);
+    return respondError(res, err.message || "initiate error", err.status || 500, err);
   }
 };
 
@@ -1362,10 +1378,11 @@ exports.influencerConfirm = async (req, res) => {
     if (["finalize", "signing", "locked"].includes(contract.status))
       return respondError(res, "Contract is finalized; no further edits allowed", 400);
 
+    // Only the influencer can accept first; brand confirm is blocked until this happens
     const safeInfluencer = { dataAccess: {}, ...influencerData, dataAccess: influencerData?.dataAccess || {} };
 
     if (preview) {
-      const tmp = contract.toObject?.() || contract; // POJO to preserve unknown keys
+      const tmp = contract.toObject?.() || contract;
       tmp.influencer = { ...(tmp.influencer || {}), ...safeInfluencer };
       const tz = tzOr(tmp);
       const tokens = buildTokenMap(tmp);
@@ -1373,8 +1390,8 @@ exports.influencerConfirm = async (req, res) => {
       const html = renderContractHTML({ contract: tmp, templateText: text });
       const headerTitle =
         "COLLABGLAM MASTER BRAND–INFLUENCER AGREEMENT (TRI-PARTY)";
-      const headerDate =
-        tokens["Agreement.EffectiveDateLong"] || formatDateTZ(new Date(), tz, "Do MMMM YYYY");
+      const headerDate = tokens["Agreement.EffectiveDateLong"] || "Pending";
+
       return await renderPDFWithPuppeteer({
         html,
         res,
@@ -1399,6 +1416,10 @@ exports.influencerConfirm = async (req, res) => {
     markEdit(contract, "influencer", editedFields);
 
     contract.isAccepted = 1;
+    // status after influencer acceptance
+    if (!["finalize", "signing", "locked"].includes(contract.status)) {
+      contract.status = "negotiation"; // explicitly mark accepted
+    }
     await contract.save();
     await emitEvent(contract, "INFLUENCER_CONFIRMED", { editedFields });
     await Campaign.updateOne(
@@ -1424,9 +1445,8 @@ exports.influencerConfirm = async (req, res) => {
       influencerId: String(contract.influencerId),
       type: "contract.confirm.influencer.self",
       title: "You accepted the contract",
-      message: `You accepted “${
-        contract.brand?.campaignTitle || contract.brandName || "Contract"
-      }”.`,
+      message: `You accepted “${contract.brand?.campaignTitle || contract.brandName || "Contract"
+        }”.`,
       entityType: "contract",
       entityId: String(contract.contractId),
       actionPath: `/influencer/my-campaign`,
@@ -1435,7 +1455,7 @@ exports.influencerConfirm = async (req, res) => {
 
     return respondOK(res, { message: "Influencer confirmation saved", contract });
   } catch (err) {
-    return respondError(res, "influencerConfirm error", err.status || 500, err);
+    return respondError(res, err.message || "influencerConfirm error", err.status || 500, err);
   }
 };
 
@@ -1446,13 +1466,19 @@ exports.brandConfirm = async (req, res) => {
     const contract = await Contract.findOne({ contractId });
     if (!contract) return respondError(res, "Contract not found", 404);
     if (contract.status === "locked") return respondError(res, "Contract is locked", 400);
+
+    // Enforce: brand cannot accept unless influencer has accepted
+    requireInfluencerConfirmed(contract);
+
     contract.confirmations = contract.confirmations || {};
     contract.confirmations.brand = {
       confirmed: true,
       byUserId: req.user?.id,
       at: new Date(),
     };
-    if (contract.status === "sent") contract.status = "viewed";
+
+    // After brand acceptance the contract is ready for signing.
+    contract.status = "finalize";
     await contract.save();
     await emitEvent(contract, "BRAND_CONFIRMED");
 
@@ -1462,7 +1488,7 @@ exports.brandConfirm = async (req, res) => {
       influencerId: String(contract.influencerId),
       type: "contract.confirm.brand",
       title: `Brand confirmed`,
-      message: `${contract.brandName || "Brand"} confirmed the contract.`,
+      message: `${contract.brandName || "Brand"} confirmed the contract. Both parties can sign now.`,
       entityType: "contract",
       entityId: String(contract.contractId),
       actionPath: `/influencer/my-campaign`,
@@ -1474,9 +1500,8 @@ exports.brandConfirm = async (req, res) => {
       brandId: String(contract.brandId),
       type: "contract.confirm.brand.self",
       title: "You confirmed the contract",
-      message: `You confirmed the contract for “${
-        contract.brand?.campaignTitle || "Campaign"
-      }”.`,
+      message: `You confirmed the contract for “${contract.brand?.campaignTitle || "Campaign"
+        }”. Both parties can proceed to sign.`,
       entityType: "contract",
       entityId: String(contract.contractId),
       actionPath: `/brand/created-campaign/applied-inf?id=${contract.campaignId}`,
@@ -1485,7 +1510,7 @@ exports.brandConfirm = async (req, res) => {
 
     return respondOK(res, { message: "Brand confirmation saved", contract });
   } catch (err) {
-    return respondError(res, "brandConfirm error", 500, err);
+    return respondError(res, err.message || "brandConfirm error", err.status || 500, err);
   }
 };
 
@@ -1527,7 +1552,7 @@ exports.adminUpdate = async (req, res) => {
     });
     return respondOK(res, { message: "Admin settings updated", contract });
   } catch (err) {
-    return respondError(res, "adminUpdate error", err.status || 500, err);
+    return respondError(res, err.message || "adminUpdate error", err.status || 500, err);
   }
 };
 
@@ -1537,14 +1562,20 @@ exports.finalize = async (req, res) => {
     assertRequired(req.body, ["contractId"]);
     const contract = await Contract.findOne({ contractId });
     if (!contract) return respondError(res, "Contract not found", 404);
+
+    // Align finalize with the new gate: both must have accepted to move to finalize
+    requireInfluencerConfirmed(contract);
+    requireBrandConfirmed(contract);
+
     if (["finalize", "signing", "locked"].includes(contract.status))
       return respondOK(res, { message: "Already finalized or beyond", contract });
+
     contract.status = "finalize";
     await contract.save();
     await emitEvent(contract, "FINALIZED");
     return respondOK(res, { message: "Contract finalized for signatures", contract });
   } catch (err) {
-    return respondError(res, "finalize error", 500, err);
+    return respondError(res, err.message || "finalize error", err.status || 500, err);
   }
 };
 
@@ -1559,14 +1590,13 @@ exports.preview = async (req, res) => {
     const text = contract.lockedAt
       ? contract.renderedTextSnapshot
       : renderTemplate(
-          contract.admin?.legalTemplateText || MASTER_TEMPLATE,
-          buildTokenMap(contract)
-        );
+        contract.admin?.legalTemplateText || MASTER_TEMPLATE,
+        buildTokenMap(contract)
+      );
 
     const html = renderContractHTML({ contract, templateText: text });
     const tokens = buildTokenMap(contract);
-    const headerDate =
-      tokens["Agreement.EffectiveDateLong"] || formatDateTZ(new Date(), tz, "Do MMMM YYYY");
+    const headerDate = tokens["Agreement.EffectiveDateLong"] || "Pending";
 
     return await renderPDFWithPuppeteer({
       html,
@@ -1577,7 +1607,7 @@ exports.preview = async (req, res) => {
       headerDate,
     });
   } catch (err) {
-    return respondError(res, "preview error", 500, err);
+    return respondError(res, err.message || "preview error", err.status || 500, err);
   }
 };
 
@@ -1593,14 +1623,13 @@ exports.viewContractPdf = async (req, res) => {
     const text = contract.lockedAt
       ? contract.renderedTextSnapshot
       : renderTemplate(
-          contract.admin?.legalTemplateText || MASTER_TEMPLATE,
-          buildTokenMap(contract)
-        );
+        contract.admin?.legalTemplateText || MASTER_TEMPLATE,
+        buildTokenMap(contract)
+      );
     const html = renderContractHTML({ contract, templateText: text });
 
     const tokens = buildTokenMap(contract);
-    const headerDate =
-      tokens["Agreement.EffectiveDateLong"] || formatDateTZ(new Date(), tz, "Do MMMM YYYY");
+    const headerDate = tokens["Agreement.EffectiveDateLong"] || "Pending";
 
     return await renderPDFWithPuppeteer({
       html,
@@ -1657,9 +1686,10 @@ exports.sign = async (req, res) => {
     if (!contract) return respondError(res, "Contract not found", 404);
     if (contract.status === "locked") return respondError(res, "Contract is locked", 400);
 
-    if (role === "brand") requireBrandConfirmed(contract);
-    if (role === "influencer") requireInfluencerConfirmed(contract);
+    // NEW GATES: both must be confirmed before *either* can sign
+    requireBothConfirmed(contract);
 
+    // Signature image checks
     let sigImageDataUrl = null;
     if (signatureImageDataUrl || signatureImageBase64) {
       let mime = "image/png";
@@ -1689,7 +1719,7 @@ exports.sign = async (req, res) => {
           return respondError(res, "Invalid base64 payload for signature image.", 400);
       }
       const bytes = Buffer.from(base64, "base64").length;
-      if (bytes > 50 * 1024) return respondError(res, "Signature image must be <= 50 KB.", 400);
+      if (bytes > 50 * 1024) return respondError(res, "Signature image must be ≤ 50 KB.", 400);
       sigImageDataUrl = `data:${mime};base64,${base64}`;
     }
 
@@ -1704,9 +1734,9 @@ exports.sign = async (req, res) => {
       at: now,
       ...(sigImageDataUrl
         ? {
-            sigImageDataUrl,
-            sigImageBytes: Buffer.from(sigImageDataUrl.split(",")[1], "base64").length,
-          }
+          sigImageDataUrl,
+          sigImageBytes: Buffer.from(sigImageDataUrl.split(",")[1], "base64").length,
+        }
         : {}),
     };
 
@@ -1730,19 +1760,19 @@ exports.sign = async (req, res) => {
     const opp =
       role === "brand"
         ? {
-            recipientType: "influencer",
-            influencerId: String(contract.influencerId),
-            type: "contract.signed.brand",
-            path: `/influencer/my-campaign`,
-          }
+          recipientType: "influencer",
+          influencerId: String(contract.influencerId),
+          type: "contract.signed.brand",
+          path: `/influencer/my-campaign`,
+        }
         : role === "influencer"
-        ? {
+          ? {
             recipientType: "brand",
             brandId: String(contract.brandId),
             type: "contract.signed.influencer",
             path: `/brand/created-campaign/applied-inf?id=${contract.campaignId}`,
           }
-        : null;
+          : null;
 
     if (opp) {
       await createAndEmit({
@@ -1751,9 +1781,8 @@ exports.sign = async (req, res) => {
         influencerId: opp.influencerId,
         type: opp.type,
         title: `${role === "brand" ? "Brand" : "Influencer"} signed`,
-        message: `${
-          role === "brand" ? contract.brandName || "Brand" : contract.influencerName || "Influencer"
-        } added a signature.`,
+        message: `${role === "brand" ? contract.brandName || "Brand" : contract.influencerName || "Influencer"
+          } added a signature.`,
         entityType: "contract",
         entityId: String(contract.contractId),
         actionPath: opp.path,
@@ -1860,7 +1889,9 @@ exports.brandUpdateFields = async (req, res) => {
 
     requireNotLocked(contract);
     requireNoEditsAfterBothSigned(contract);
-    requireNoPartyConfirmations(contract);
+
+    // NEW RULE: Only allow edits after influencer has accepted
+    requireInfluencerConfirmed(contract);
 
     const before = { brand: contract.brand?.toObject?.() || contract.brand };
 
@@ -1879,6 +1910,7 @@ exports.brandUpdateFields = async (req, res) => {
         contract.requestedEffectiveDate = new Date(brandUpdates[k]);
       else if (k === "requestedEffectiveDateTimezone")
         contract.requestedEffectiveDateTimezone = brandUpdates[k];
+
       else contract.brand[k] = brandUpdates[k];
     }
 
@@ -1907,6 +1939,7 @@ exports.brandUpdateFields = async (req, res) => {
     const editedFields = computeEditedFields(before, after, ["brand"]);
     markEdit(contract, "brand", editedFields);
 
+    // During edit window (post influencer acceptance, pre-fully-signed)
     if (!["finalize", "signing", "locked"].includes(contract.status))
       contract.status = "negotiation";
     contract.lastSentAt = new Date();
@@ -1959,6 +1992,7 @@ exports.influencerUpdateFields = async (req, res) => {
     if (!contract) return respondError(res, "Contract not found", 404);
     requireNotLocked(contract);
     requireNoEditsAfterBothSigned(contract);
+    // NEW RULE stays: influencer can edit only after influencer has accepted
     requireInfluencerConfirmed(contract);
 
     const before = { influencer: contract.influencer?.toObject?.() || contract.influencer };
@@ -2005,7 +2039,7 @@ exports.influencerUpdateFields = async (req, res) => {
 
     return respondOK(res, { message: "Influencer fields updated", contract });
   } catch (err) {
-    return respondError(res, "influencerUpdateFields error", 500, err);
+    return respondError(res, err.message || "influencerUpdateFields error", err.status || 500, err);
   }
 };
 
@@ -2062,7 +2096,7 @@ exports.reject = async (req, res) => {
 
     return respondOK(res, { message: "Contract rejected", contract });
   } catch (err) {
-    return respondError(res, "reject error", 500, err);
+    return respondError(res, err.message || "reject error", err.status || 500, err);
   }
 };
 
@@ -2131,7 +2165,7 @@ exports.resend = async (req, res) => {
         requestedEffectiveDate,
         requestedEffectiveDateTimezone,
         userEmail: req.user?.email,
-        asPlain: true, // POJO to preserve unknown keys
+        asPlain: true,
       });
       const tz = tzOr(tmp);
       const tokens = buildTokenMap(tmp);
@@ -2139,8 +2173,8 @@ exports.resend = async (req, res) => {
       const html = renderContractHTML({ contract: tmp, templateText: text });
       const headerTitle =
         "COLLABGLAM MASTER BRAND–INFLUENCER AGREEMENT (TRI-PARTY)";
-      const headerDate =
-        tokens["Agreement.EffectiveDateLong"] || formatDateTZ(new Date(), tz, "Do MMMM YYYY");
+      const headerDate = tokens["Agreement.EffectiveDateLong"] || "Pending";
+
       return await renderPDFWithPuppeteer({
         html,
         res,
@@ -2211,6 +2245,6 @@ exports.resend = async (req, res) => {
 
     return respondOK(res, { message: "Resent contract created", contract: child }, 201);
   } catch (err) {
-    return respondError(res, "resend error", 500, err);
+    return respondError(res, err.message || "resend error", err.status || 500, err);
   }
 };
