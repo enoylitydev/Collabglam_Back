@@ -38,17 +38,18 @@ const notificationsRoutes = require('./routes/notificationsRoutes');
 // jobs
 const unseenMessageNotifier = require('./jobs/unseenMessageNotifier');
 
-// sockets (Socket.IO)
+// sockets (Socket.IO + native WS)
 const sockets = require('./sockets');
 
 const app    = express();
 const server = http.createServer(app);
 
-// ====== Socket.IO setup (replaces old ws) ======
-const io = sockets.init(server);
+// ====== Realtime setup (Socket.IO + native WS on /ws) ======
+const io = sockets.init(server); // sets up socket.io AND ws://.../ws
 app.set('io', io);
 app.set('emitToBrand', sockets.emitToBrand);
 app.set('emitToInfluencer', sockets.emitToInfluencer);
+// This is what controllers call; it now broadcasts to BOTH transports.
 app.set('broadcastToRoom', sockets.legacyBroadcastToRoom);
 
 // ====== Express middleware ======
@@ -127,7 +128,6 @@ mongoose.connect(process.env.MONGODB_URI)
         res.set('Content-Type', contentType);
         res.set('Cache-Control', 'public, max-age=31536000, immutable');
 
-        // Inline for images; download for others
         if (!/^image\//.test(contentType)) {
           const safe = encodeURIComponent(doc.metadata?.originalName || doc.filename);
           res.set('Content-Disposition', `attachment; filename*=UTF-8''${safe}`);
