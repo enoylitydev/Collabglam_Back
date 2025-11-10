@@ -35,15 +35,6 @@ const disputeSchema = new mongoose.Schema({
 
   priority: { type: String, enum: ['low', 'medium', 'high'], default: 'medium' },
 
-  related: {
-    type: {
-      type: String,
-      enum: ['contract', 'milestone', 'payment', 'other'],
-      default: 'other'
-    },
-    id: { type: String, default: null }
-  },
-
   status: {
     type: String,
     enum: ['open', 'in_review', 'awaiting_user', 'resolved', 'rejected'],

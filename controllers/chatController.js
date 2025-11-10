@@ -1,26 +1,56 @@
 // controllers/chatController.js
 const { v4: uuidv4 } = require('uuid');
-const path = require('path');
 const fs = require('fs');
-const mime = require('mime-types');
-const sizeOf = require('image-size');
 const multer = require('multer');
+const mongoose = require('mongoose');
+const mime = require('mime-types');
+const { uploadToGridFS, deleteGridFsFiles } = require('../utils/gridfs');
 
-const ChatRoom       = require('../models/chat');
-const Brand          = require('../models/brand');
-const Influencer     = require('../models/influencer');
+const ChatRoom = require('../models/chat');
+const Brand = require('../models/brand');
+const Influencer = require('../models/influencer');
+const { createAndEmit } = require('../utils/notifier');
 
-/* -----------------------------------------------------------
-   Helpers
------------------------------------------------------------ */
-function sortParticipants(a, b) {
-  return a.userId.localeCompare(b.userId);
+/* ---------------- Config / GridFS helpers ---------------- */
+const GRIDFS_BUCKET = process.env.GRIDFS_BUCKET || 'uploads';
+
+function getBucket() {
+  const db = mongoose.connection.db;
+  if (!db) throw new Error('MongoDB connection not ready');
+  return new mongoose.mongo.GridFSBucket(db, { bucketName: GRIDFS_BUCKET });
 }
 
+async function findGridFileByFilename(filename) {
+  const db = mongoose.connection.db;
+  return db.collection(`${GRIDFS_BUCKET}.files`).findOne({ filename });
+}
+
+function contentDispositionInline(filename, asAttachment) {
+  const safe = encodeURIComponent(filename || 'file');
+  return `${asAttachment ? 'attachment' : 'inline'}; filename*=UTF-8''${safe}`;
+}
+
+function isInlineType(ct) {
+  if (!ct) return false;
+  const t = ct.toLowerCase();
+  return t.startsWith('image/') || t === 'application/pdf';
+}
+
+function guessType(name, fallback = 'application/octet-stream') {
+  return mime.lookup(name) || fallback;
+}
+
+function buildPublicFileUrl(filename) {
+  return `/file/${encodeURIComponent(filename)}`;
+}
+
+/* ---------------- Generic helpers ---------------- */
+function sortParticipants(a, b) { return a.userId.localeCompare(b.userId); }
+
 function broadcast(app, roomId, payloadObj) {
-  const broadcastToRoom = app.get('broadcastToRoom'); // set in app.js
+  const broadcastToRoom = app.get('broadcastToRoom');
   if (typeof broadcastToRoom === 'function') {
-    broadcastToRoom(roomId, JSON.stringify(payloadObj));
+    broadcastToRoom(roomId, payloadObj);
   }
 }
 
@@ -45,72 +75,56 @@ function makeReplySnapshot(room, replyTo) {
   };
 }
 
-/* -----------------------------------------------------------
-   Multer setup for /chat/send-file
------------------------------------------------------------ */
-const uploadsRoot = path.join(__dirname, '..', 'uploads', 'chat');
+function resolveChatRoles(room, senderId) {
+  const sender = room.participants.find(p => p.userId === senderId) || {};
+  const other = room.participants.find(p => p.userId !== senderId) || {};
+  return {
+    senderId,
+    senderName: sender.name || 'Someone',
+    otherId: other.userId,
+    otherRole: other.role,
+    otherName: other.name || 'Participant'
+  };
+}
 
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    const { roomId } = req.body;
-    const dir = path.join(uploadsRoot, roomId || 'misc');
-    fs.mkdirSync(dir, { recursive: true });
-    cb(null, dir);
-  },
-  filename: function (req, file, cb) {
-    const ext = path.extname(file.originalname) || `.${mime.extension(file.mimetype) || 'bin'}`;
-    cb(null, `${Date.now()}-${uuidv4()}${ext}`);
-  }
-});
+function chatPathForRole(role, roomId) {
+  const safeRole = role === 'brand' ? 'brand' : 'influencer';
+  return `/${safeRole}/messages/${encodeURIComponent(roomId)}`;
+}
 
-const upload = multer({
-  storage,
-  limits: {
-    fileSize: 1024 * 1024 * 100 // 100 MB per file (adjust as you like)
-  }
-});
+/* ---------------- Multer for /chat/send-file ---------------- */
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } });
 
-/* -----------------------------------------------------------
-   1) Create (or return) a one-to-one room
-   POST /chat/create-room
-   body: { brandId, influencerId }
------------------------------------------------------------ */
+async function saveFilesToGridFS(files = [], req) {
+  if (!Array.isArray(files) || files.length === 0) return [];
+  return uploadToGridFS(files, { prefix: 'chat', metadata: { kind: 'chat_attachment' }, req });
+}
+
+/* ---------------- 1) Create room ---------------- */
 exports.createRoom = async (req, res) => {
   try {
     const { brandId, influencerId } = req.body;
-    if (!brandId || !influencerId) {
-      return res.status(400).json({ message: 'brandId and influencerId are required' });
-    }
+    if (!brandId || !influencerId) return res.status(400).json({ message: 'brandId and influencerId are required' });
 
     const [brand, infl] = await Promise.all([
       Brand.findOne({ brandId }, 'name'),
       Influencer.findOne({ influencerId }, 'name')
     ]);
-    if (!brand || !infl) {
-      return res.status(404).json({ message: 'Brand or Influencer not found' });
-    }
+    if (!brand || !infl) return res.status(404).json({ message: 'Brand or Influencer not found' });
 
     const participants = [
       { userId: brandId, name: brand.name, role: 'brand' },
       { userId: influencerId, name: infl.name, role: 'influencer' }
     ].sort(sortParticipants);
 
-    // Check if the chat room already exists
     let room = await ChatRoom.findOne({
       'participants.userId': { $all: [brandId, influencerId] },
-      'participants.2': { $exists: false } // ensure it's a 1-1 room
+      'participants.2': { $exists: false }
     });
 
     let message;
-    if (!room) {
-      // Create a new room
-      room = new ChatRoom({ participants });
-
-      await room.save();
-      message = 'Chat room created';
-    } else {
-      message = 'Chat room already exists';
-    }
+    if (!room) { room = new ChatRoom({ participants }); await room.save(); message = 'Chat room created'; }
+    else { message = 'Chat room already exists'; }
 
     return res.json({ message, roomId: room.roomId });
   } catch (err) {
@@ -119,12 +133,7 @@ exports.createRoom = async (req, res) => {
   }
 };
 
-
-/* -----------------------------------------------------------
-   2) List all rooms for a user
-   POST /chat/rooms
-   body: { userId }
------------------------------------------------------------ */
+/* ---------------- 2) Rooms ---------------- */
 exports.getRooms = async (req, res) => {
   try {
     const { userId } = req.body;
@@ -136,18 +145,10 @@ exports.getRooms = async (req, res) => {
 
     const summary = rooms.map(room => {
       const last = room.messages[room.messages.length - 1] || null;
-      
-      // Calculate unseen message count for this user
       const unseenCount = room.messages.filter(
-        msg => msg.senderId !== userId && !msg.seenBy.includes(userId)
+        msg => msg.senderId !== userId && !(msg.seenBy || []).includes(userId)
       ).length;
-      
-      return {
-        roomId: room.roomId,
-        participants: room.participants,
-        lastMessage: last,
-        unseenCount
-      };
+      return { roomId: room.roomId, participants: room.participants, lastMessage: last, unseenCount };
     });
 
     return res.json({ message: 'Rooms retrieved', rooms: summary });
@@ -157,11 +158,7 @@ exports.getRooms = async (req, res) => {
   }
 };
 
-/* -----------------------------------------------------------
-   3) Fetch last N messages for a room (with optional pagination)
-   POST /chat/messages
-   body: { roomId, limit = 50, before? }
------------------------------------------------------------ */
+/* ---------------- 3) Messages ---------------- */
 exports.getMessages = async (req, res) => {
   try {
     const { roomId, limit = 50, before } = req.body;
@@ -171,10 +168,7 @@ exports.getMessages = async (req, res) => {
     if (!room) return res.status(404).json({ message: 'Chat room not found' });
 
     let msgs = room.messages;
-    if (before) {
-      const cut = new Date(before);
-      msgs = msgs.filter(m => m.timestamp < cut);
-    }
+    if (before) { const cut = new Date(before); msgs = msgs.filter(m => m.timestamp < cut); }
     msgs = msgs.slice(-Math.max(1, parseInt(limit, 10)));
 
     return res.json({ message: 'Messages fetched', messages: msgs });
@@ -184,12 +178,7 @@ exports.getMessages = async (req, res) => {
   }
 };
 
-/* -----------------------------------------------------------
-   4) Send a new message (JSON) — supports replyTo + attachments (URLs)
-   POST /chat/send
-   body: { roomId, senderId, text?, replyTo?, attachments? }
-   - attachments?: [{ url, originalName, mimeType, size, width?, height?, duration?, thumbnailUrl?, storage? }]
------------------------------------------------------------ */
+/* ---------------- 4) Send text ---------------- */
 exports.postMessage = async (req, res) => {
   try {
     const { roomId, senderId, text = '', replyTo, attachments = [] } = req.body;
@@ -217,25 +206,25 @@ exports.postMessage = async (req, res) => {
       storage: a.storage || 'remote'
     })) : [];
 
-    const msg = {
-      messageId: uuidv4(),
-      senderId,
-      text,
-      timestamp: new Date(),
-      replyTo: replyTo || null,
-      reply: reply || null,
-      attachments: normalized
-    };
+    const msg = { messageId: uuidv4(), senderId, text, timestamp: new Date(), replyTo: replyTo || null, reply, attachments: normalized };
 
     room.messages.push(msg);
     await room.save();
 
-    // Broadcast over WebSocket (ws)
-    broadcast(req.app, roomId, {
-      type: 'chatMessage',
-      roomId,
-      message: msg
-    });
+    broadcast(req.app, roomId, { type: 'chatMessage', roomId, message: msg });
+
+    const { senderName, otherId, otherRole } = resolveChatRoles(room, senderId);
+    const preview = (text || '').trim() ? (text || '').slice(0, 120) : (normalized.length ? `${normalized.length} attachment(s)` : 'New message');
+    createAndEmit({
+      brandId: otherRole === 'brand' ? String(otherId) : null,
+      influencerId: otherRole === 'influencer' ? String(otherId) : null,
+      type: 'chat.message',
+      title: `New message from ${senderName}`,
+      message: preview,
+      entityType: 'chat',
+      entityId: room.roomId,
+      actionPath: chatPathForRole(otherRole, room.roomId),
+    }).catch(e => console.error('notify chat.message failed:', e));
 
     return res.status(201).json({ message: 'Message sent', messageData: msg });
   } catch (err) {
@@ -244,81 +233,57 @@ exports.postMessage = async (req, res) => {
   }
 };
 
-/* -----------------------------------------------------------
-   4b) Send file(s) with multipart/form-data
-   POST /chat/send-file
-   form fields: roomId, senderId, text?, replyTo?
-   files field: files (multiple)
------------------------------------------------------------ */
+/* ---------------- 4b) Send files ---------------- */
 exports.postFileMessage = [
-  upload.array('files', 10), // up to 10 files per message; adjust as needed
+  upload.array('files', 10),
   async (req, res) => {
     try {
       const { roomId, senderId, text = '', replyTo } = req.body;
-      if (!roomId || !senderId) {
-        return res.status(400).json({ message: 'roomId and senderId are required' });
-      }
+      if (!roomId || !senderId) return res.status(400).json({ message: 'roomId and senderId are required' });
 
       const room = await ChatRoom.findOne({ roomId });
       if (!room) return res.status(404).json({ message: 'Chat room not found' });
       if (!isUserInRoom(room, senderId)) return res.status(403).json({ message: 'Sender is not a participant of this room' });
 
-      const files = req.files || [];
-      if (files.length === 0 && !text) {
-        return res.status(400).json({ message: 'Provide at least one file or text' });
-      }
+      const files = Array.isArray(req.files) ? req.files : [];
+      if (files.length === 0 && !text) return res.status(400).json({ message: 'Provide at least one file or text' });
 
-      // Build public URLs for served static files
-      const host = req.get('host');
-      const protocol = (req.headers['x-forwarded-proto'] || req.protocol || 'http');
-      const baseUrl = `${protocol}://${host}`;
+      const saved = await saveFilesToGridFS(files, req);
 
-      const attachments = files.map(f => {
-        let width = null, height = null;
-        try {
-          if (f.mimetype && f.mimetype.startsWith('image/')) {
-            const dim = sizeOf(f.path);
-            width = dim?.width || null;
-            height = dim?.height || null;
-          }
-        } catch { /* ignore dimension errors */ }
-
-        const rel = path.relative(path.join(__dirname, '..'), f.path).split(path.sep).join('/'); // relative to project root
-        const url = `${baseUrl}/${rel.replace(/^public\//, '')}`; // if you mount static on '/'
-
-        return {
-          attachmentId: uuidv4(),
-          url,
-          path: f.path,
-          originalName: f.originalname,
-          mimeType: f.mimetype || 'application/octet-stream',
-          size: f.size || 0,
-          width,
-          height,
-          storage: 'local'
-        };
-      });
+      const attachments = saved.map(s => ({
+        attachmentId: uuidv4(),
+        url: buildPublicFileUrl(s.filename),
+        originalName: s.originalName || 'file',
+        mimeType: s.mimeType || guessType(s.filename),
+        size: s.size || 0,
+        width: null,
+        height: null,
+        storage: 'gridfs',
+        gridfsFilename: s.filename,
+        gridfsId: s.id
+      }));
 
       const reply = makeReplySnapshot(room, replyTo);
 
-      const msg = {
-        messageId: uuidv4(),
-        senderId,
-        text,
-        timestamp: new Date(),
-        replyTo: replyTo || null,
-        reply: reply || null,
-        attachments
-      };
+      const msg = { messageId: uuidv4(), senderId, text, timestamp: new Date(), replyTo: replyTo || null, reply, attachments };
 
       room.messages.push(msg);
       await room.save();
 
-      broadcast(req.app, roomId, {
-        type: 'chatMessage',
-        roomId,
-        message: msg
-      });
+      broadcast(req.app, roomId, { type: 'chatMessage', roomId, message: msg });
+
+      const { senderName, otherId, otherRole } = resolveChatRoles(room, senderId);
+      const preview = attachments.length ? `${attachments.length} attachment(s)` : (text || '').slice(0, 120) || 'New message';
+      createAndEmit({
+        brandId: otherRole === 'brand' ? String(otherId) : null,
+        influencerId: otherRole === 'influencer' ? String(otherId) : null,
+        type: 'chat.message',
+        title: `New message from ${senderName}`,
+        message: preview,
+        entityType: 'chat',
+        entityId: room.roomId,
+        actionPath: chatPathForRole(otherRole, room.roomId),
+      }).catch(e => console.error('notify chat.message (file) failed:', e));
 
       return res.status(201).json({ message: 'File message sent', messageData: msg });
     } catch (err) {
@@ -328,56 +293,48 @@ exports.postFileMessage = [
   }
 ];
 
-/* -----------------------------------------------------------
-   5) Edit a message (text-only edit keeps attachments intact)
-   PATCH /chat/edit
-   body: { roomId, messageId, senderId, newText }
------------------------------------------------------------ */
+/* ---------------- 5) Edit ---------------- */
 exports.editMessage = async (req, res) => {
   try {
     const { roomId, messageId, senderId, newText } = req.body;
-    if (!roomId || !messageId || !senderId || typeof newText !== 'string') {
-      return res.status(400).json({ message: 'roomId, messageId, senderId, newText required' });
-    }
+    if (!roomId || !messageId || !senderId || typeof newText !== 'string') return res.status(400).json({ message: 'roomId, messageId, senderId, newText required' });
 
     const room = await ChatRoom.findOne({ roomId });
     if (!room) return res.status(404).json({ message: 'Chat room not found' });
 
     const msg = room.messages.find(m => m.messageId === messageId);
     if (!msg) return res.status(404).json({ message: 'Message not found' });
-    if (msg.senderId !== senderId) {
-      return res.status(403).json({ message: 'You can edit only your own messages' });
-    }
+    if (msg.senderId !== senderId) return res.status(403).json({ message: 'You can edit only your own messages' });
 
-    msg.text = newText;
-    msg.editedAt = new Date();
+    msg.text = newText; msg.editedAt = new Date();
     await room.save();
 
-    broadcast(req.app, roomId, {
-      type: 'chatMessageEdited',
-      roomId,
-      message: msg
-    });
+    broadcast(req.app, roomId, { type: 'chatMessageEdited', roomId, message: msg });
 
-    return res.json({ message: 'Message edited', message: msg });
+    const { senderName, otherId, otherRole } = resolveChatRoles(room, senderId);
+    createAndEmit({
+      brandId: otherRole === 'brand' ? String(otherId) : null,
+      influencerId: otherRole === 'influencer' ? String(otherId) : null,
+      type: 'chat.message.edited',
+      title: `Message edited by ${senderName}`,
+      message: (newText || '').slice(0, 120),
+      entityType: 'chat',
+      entityId: room.roomId,
+      actionPath: chatPathForRole(otherRole, room.roomId),
+    }).catch(e => console.error('notify chat.message.edited failed:', e));
+
+    return res.json({ message: 'Message edited', messageData: msg });
   } catch (err) {
     console.error('editMessage error:', err);
     return res.status(500).json({ message: 'Internal server error' });
   }
 };
 
-
-/* -----------------------------------------------------------
-   6) Delete a message (hard delete + remove local files)
-   DELETE /chat/message
-   body: { roomId, messageId, senderId }
------------------------------------------------------------ */
+/* ---------------- 6) Delete ---------------- */
 exports.deleteMessage = async (req, res) => {
   try {
     const { roomId, messageId, senderId } = req.body;
-    if (!roomId || !messageId || !senderId) {
-      return res.status(400).json({ message: 'roomId, messageId, senderId required' });
-    }
+    if (!roomId || !messageId || !senderId) return res.status(400).json({ message: 'roomId, messageId, senderId required' });
 
     const room = await ChatRoom.findOne({ roomId });
     if (!room) return res.status(404).json({ message: 'Chat room not found' });
@@ -386,25 +343,28 @@ exports.deleteMessage = async (req, res) => {
     if (idx === -1) return res.status(404).json({ message: 'Message not found' });
 
     const msg = room.messages[idx];
-    if (msg.senderId !== senderId) {
-      return res.status(403).json({ message: 'You can delete only your own messages' });
-    }
+    if (msg.senderId !== senderId) return res.status(403).json({ message: 'You can delete only your own messages' });
 
-    // Try to unlink local attachments
-    for (const att of (msg.attachments || [])) {
-      if (att.storage === 'local' && att.path) {
-        fs.promises.unlink(att.path).catch(() => { }); // ignore errors
+    try {
+      for (const att of (msg.attachments || [])) {
+        if (att.storage === 'local' && att.path) { fs.promises.unlink(att.path).catch(() => { }); }
       }
-    }
+      const gridIds = (msg.attachments || []).filter(a => a.storage === 'gridfs' && a.gridfsId).map(a => a.gridfsId);
+      if (gridIds.length) await deleteGridFsFiles(gridIds);
+    } catch { }
 
     room.messages.splice(idx, 1);
     await room.save();
 
-    broadcast(req.app, roomId, {
-      type: 'chatMessageDeleted',
-      roomId,
-      messageId
-    });
+    broadcast(req.app, roomId, { type: 'chatMessageDeleted', roomId, messageId });
+
+    const { senderName, otherId, otherRole } = resolveChatRoles(room, senderId);
+    createAndEmit({
+      brandId: otherRole === 'brand' ? String(otherId) : null,
+      influencerId: otherRole === 'influencer' ? String(otherId) : null,
+      type: 'chat.message.deleted', title: `Message deleted by ${senderName}`, message: '',
+      entityType: 'chat', entityId: room.roomId, actionPath: chatPathForRole(otherRole, room.roomId),
+    }).catch(e => console.error('notify chat.message.deleted failed:', e));
 
     return res.json({ message: 'Message deleted', messageId });
   } catch (err) {
@@ -413,186 +373,192 @@ exports.deleteMessage = async (req, res) => {
   }
 };
 
-
-/* -----------------------------------------------------------
-   7) Mark message(s) as seen
-   POST /chat/mark-seen
-   body: { roomId, userId, messageIds? }
-   - If messageIds is provided: mark those specific messages as seen
-   - If messageIds is omitted/empty: mark ALL messages in the room as seen
------------------------------------------------------------ */
+/* ---------------- 7) Seen ---------------- */
 exports.markAsSeen = async (req, res) => {
   try {
     const { roomId, userId, messageIds } = req.body;
-    if (!roomId || !userId) {
-      return res.status(400).json({ message: 'roomId and userId are required' });
-    }
+    if (!roomId || !userId) return res.status(400).json({ message: 'roomId and userId are required' });
 
-    const room = await ChatRoom.findOne({ roomId });
-    if (!room) return res.status(404).json({ message: 'Chat room not found' });
+    const before = await ChatRoom.findOne(
+      { roomId },
+      'roomId participants messages.messageId messages.senderId messages.seenBy'
+    ).lean();
+    if (!before) return res.status(404).json({ message: 'Chat room not found' });
 
-    // Verify user is a participant
-    if (!isUserInRoom(room, userId)) {
-      return res.status(403).json({ message: 'You are not a participant of this room' });
-    }
+    const isParticipant = (before.participants || []).some(p => p.userId === userId);
+    if (!isParticipant) return res.status(403).json({ message: 'You are not a participant of this room' });
 
-    let query = { roomId };
-    let update = {};
+    const alreadySeen = new Set(
+      (before.messages || [])
+        .filter(m => m.senderId !== userId && Array.isArray(m.seenBy) && m.seenBy.includes(userId))
+        .map(m => m.messageId)
+    );
 
-    if (messageIds && Array.isArray(messageIds) && messageIds.length > 0) {
-      // Mark specific messages as seen
-      query['messages.messageId'] = { $in: messageIds };
-      update = {
-        $addToSet: {
-          'messages.$[elem].seenBy': userId
-        }
-      };
-    } else {
-      // Mark all unseen messages as seen for this user
-      update = {
-        $addToSet: {
-          'messages.$[elem].seenBy': userId
-        }
-      };
-    }
+    const elemFilter = { 'elem.senderId': { $ne: userId }, 'elem.seenBy': { $ne: userId } };
+    if (Array.isArray(messageIds) && messageIds.length > 0) { elemFilter['elem.messageId'] = { $in: messageIds }; }
 
-    const arrayFilters = [{
-      "elem.senderId": { $ne: userId },
-      "elem.seenBy": { $ne: userId }
-    }];
+    await ChatRoom.updateOne(
+      { roomId },
+      { $addToSet: { 'messages.$[elem].seenBy': userId } },
+      { arrayFilters: [elemFilter] }
+    );
 
-    const updatedRoom = await ChatRoom.findOneAndUpdate(
-      query,
-      update,
-      { new: true, arrayFilters, select: 'roomId messages.messageId messages.seenBy' }
+    const after = await ChatRoom.findOne(
+      { roomId },
+      'roomId participants messages.messageId messages.senderId messages.seenBy'
     ).lean();
 
-    if (!updatedRoom) {
-      return res.status(404).json({ message: 'Chat room not found or no messages updated' });
-    }
+    if (!after) return res.status(404).json({ message: 'Chat room not found or no messages updated' });
 
-    const updatedMessages = updatedRoom.messages
-      .filter(msg => messageIds ? messageIds.includes(msg.messageId) : !msg.seenBy.includes(userId))
-      .map(msg => ({
-        messageId: msg.messageId,
-        seenBy: msg.seenBy
-      }));
-
-    if (updatedMessages.length > 0) {
-      // Broadcast seen status update
-      broadcast(req.app, roomId, {
-        type: 'messagesSeen',
-        roomId,
-        userId,
-        messages: updatedMessages
-      });
-    }
-
-    return res.json({
-      message: 'Messages marked as seen',
-      markedCount: updatedMessages.length,
-      updatedMessages
+    const newlySeen = (after.messages || []).filter(m => {
+      if (m.senderId === userId) return false;
+      const nowSeen = Array.isArray(m.seenBy) && m.seenBy.includes(userId);
+      const wasSeen = alreadySeen.has(m.messageId);
+      const inFilter = Array.isArray(messageIds) && messageIds.length > 0 ? messageIds.includes(m.messageId) : true;
+      return nowSeen && !wasSeen && inFilter;
     });
 
-    return res.json({
-      message: 'Messages marked as seen',
-      markedCount,
-      updatedMessages
-    });
+    if (newlySeen.length === 0) {
+      return res.json({ message: 'Messages marked as seen', markedCount: 0, updatedMessages: [] });
+    }
+
+    const updatedMessages = newlySeen.map(m => ({ messageId: m.messageId, seenBy: m.seenBy || [] }));
+
+    broadcast(req.app, roomId, { type: 'messagesSeen', roomId, userId, messages: updatedMessages });
+
+    const self = (after.participants || []).find(p => p.userId === userId) || {};
+    const other = (after.participants || []).find(p => p.userId !== userId) || {};
+    if (other && other.userId) {
+      createAndEmit({
+        brandId: other.role === 'brand' ? String(other.userId) : null,
+        influencerId: other.role === 'influencer' ? String(other.userId) : null,
+        type: 'chat.seen',
+        title: `${self.name || 'Participant'} viewed your messages`,
+        message: `${newlySeen.length} message${newlySeen.length > 1 ? 's' : ''} viewed.`,
+        entityType: 'chat',
+        entityId: after.roomId,
+        actionPath: chatPathForRole(other.role, after.roomId),
+      }).catch(e => console.error('notify chat.seen failed:', e));
+    }
+
+    return res.json({ message: 'Messages marked as seen', markedCount: updatedMessages.length, updatedMessages });
   } catch (err) {
     console.error('markAsSeen error:', err);
     return res.status(500).json({ message: 'Internal server error' });
   }
 };
 
-/* -----------------------------------------------------------
-   8) Get unseen message count for a user in a room
-   POST /chat/unseen-count
-   body: { roomId, userId }
------------------------------------------------------------ */
+/* ---------------- 8) Unseen count ---------------- */
 exports.getUnseenCount = async (req, res) => {
   try {
     const { roomId, userId } = req.body;
-    if (!roomId || !userId) {
-      return res.status(400).json({ message: 'roomId and userId are required' });
-    }
+    if (!roomId || !userId) return res.status(400).json({ message: 'roomId and userId are required' });
 
     const room = await ChatRoom.findOne({ roomId });
     if (!room) return res.status(404).json({ message: 'Chat room not found' });
 
-    if (!isUserInRoom(room, userId)) {
-      return res.status(403).json({ message: 'You are not a participant of this room' });
-    }
+    if (!isUserInRoom(room, userId)) return res.status(403).json({ message: 'You are not a participant of this room' });
 
-    // Count messages not sent by this user and not seen by this user
     const unseenCount = room.messages.filter(
-      msg => msg.senderId !== userId && !msg.seenBy.includes(userId)
+      msg => msg.senderId !== userId && !(msg.seenBy || []).includes(userId)
     ).length;
 
-    return res.json({
-      message: 'Unseen count retrieved',
-      roomId,
-      userId,
-      unseenCount
-    });
+    return res.json({ message: 'Unseen count retrieved', roomId, userId, unseenCount });
   } catch (err) {
     console.error('getUnseenCount error:', err);
     return res.status(500).json({ message: 'Internal server error' });
   }
 };
 
-// controllers/chatController.js
+/* ---------------- 9) Secure stream attachment ---------------- */
+exports.streamAttachment = async (req, res) => {
+  try {
+    const { roomId, attachmentId } = req.params;
+    const asAttachment = req.query.download === '1';
 
+    const userId = String(req.query.userId || req.body.userId || req.headers['x-user-id'] || '');
+    if (!roomId || !attachmentId) return res.status(400).json({ message: 'roomId and attachmentId are required' });
+    if (!userId) return res.status(400).json({ message: 'userId is required (query, header or body)' });
+
+    const room = await ChatRoom.findOne({ roomId }).lean();
+    if (!room) return res.status(404).json({ message: 'Chat room not found' });
+
+    if (!isUserInRoom(room, userId)) return res.status(403).json({ message: 'You are not a participant of this room' });
+
+    let targetAttachment = null;
+    for (const m of (room.messages || [])) {
+      const found = (m.attachments || []).find(a => a.attachmentId === attachmentId);
+      if (found) { targetAttachment = found; break; }
+    }
+    if (!targetAttachment) return res.status(404).json({ message: 'Attachment not found' });
+
+    if (targetAttachment.storage === 'gridfs' && targetAttachment.gridfsFilename) {
+      return streamGridFsByFilename(req, res, targetAttachment.gridfsFilename, {
+        asAttachment,
+        preferType: targetAttachment.mimeType || guessType(targetAttachment.gridfsFilename),
+        downloadName: targetAttachment.originalName || targetAttachment.gridfsFilename
+      });
+    }
+
+    if (targetAttachment.storage === 'local' && targetAttachment.path) {
+      if (!fs.existsSync(targetAttachment.path)) return res.status(404).json({ message: 'File not found on disk' });
+      const type = targetAttachment.mimeType || guessType(targetAttachment.originalName || targetAttachment.path);
+      res.setHeader('Content-Type', type);
+      res.setHeader('Content-Disposition', contentDispositionInline(targetAttachment.originalName || 'file', asAttachment));
+      return fs.createReadStream(targetAttachment.path).pipe(res);
+    }
+
+    if (targetAttachment.url) return res.redirect(302, targetAttachment.url);
+
+    return res.status(500).json({ message: 'Attachment is not streamable' });
+  } catch (err) {
+    console.error('streamAttachment error:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+/* ---------------- 10) Public GridFS streamer ---------------- */
+exports.streamGridFsFile = async (req, res) => {
+  const filename = req.params.filename;
+  const asAttachment = req.query.download === '1';
+  if (!filename) return res.status(400).json({ message: 'filename is required' });
+  try { return streamGridFsByFilename(req, res, filename, { asAttachment }); }
+  catch (err) { console.error('streamGridFsFile error:', err); return res.status(500).json({ message: 'Internal server error' }); }
+};
+
+/* ---------------- 11) Legacy POST download ---------------- */
 exports.downloadAttachmentPost = async (req, res) => {
   try {
     const { roomId, attachmentId, userId } = req.body;
-
-    if (!roomId || !attachmentId) {
-      return res.status(400).json({ message: 'roomId and attachmentId are required' });
-    }
-    if (!userId) {
-      return res.status(400).json({ message: 'userId is required' });
-    }
+    if (!roomId || !attachmentId) return res.status(400).json({ message: 'roomId and attachmentId are required' });
+    if (!userId) return res.status(400).json({ message: 'userId is required' });
 
     const room = await ChatRoom.findOne({ roomId });
     if (!room) return res.status(404).json({ message: 'Chat room not found' });
 
-    // Only participants can download
-    if (!isUserInRoom(room, userId)) {
-      return res.status(403).json({ message: 'You are not a participant of this room' });
-    }
+    if (!isUserInRoom(room, userId)) return res.status(403).json({ message: 'You are not a participant of this room' });
 
-    // Find the attachment inside any message
     let targetAttachment = null;
     for (const m of room.messages) {
       const found = (m.attachments || []).find(a => a.attachmentId === attachmentId);
       if (found) { targetAttachment = found; break; }
     }
-    if (!targetAttachment) {
-      return res.status(404).json({ message: 'Attachment not found' });
-    }
+    if (!targetAttachment) return res.status(404).json({ message: 'Attachment not found' });
 
     const filename = targetAttachment.originalName || 'file';
     res.setHeader('X-Content-Type-Options', 'nosniff');
 
-    // Local storage: stream file back with download headers
     if (targetAttachment.storage === 'local' && targetAttachment.path) {
-      if (!fs.existsSync(targetAttachment.path)) {
-        return res.status(404).json({ message: 'File not found on disk' });
-      }
-
-      // Optional: expose filename for fetch->blob flows on FE
+      if (!fs.existsSync(targetAttachment.path)) return res.status(404).json({ message: 'File not found on disk' });
       res.setHeader('X-Filename', encodeURIComponent(filename));
-
-      // Let Express handle headers + stream
       return res.download(targetAttachment.path, filename);
     }
 
-    // Remote storage: pass through to the public URL (or upgrade later to signed URL)
-    if (targetAttachment.url) {
-      // Note: 302 after POST will switch to GET on most clients/browsers.
-      return res.redirect(302, targetAttachment.url);
+    if (targetAttachment.storage === 'gridfs' && targetAttachment.gridfsFilename) {
+      return res.redirect(302, `/file/${encodeURIComponent(targetAttachment.gridfsFilename)}?download=1`);
     }
+
+    if (targetAttachment.url) return res.redirect(302, targetAttachment.url);
 
     return res.status(500).json({ message: 'Attachment is not downloadable' });
   } catch (err) {
@@ -600,3 +566,49 @@ exports.downloadAttachmentPost = async (req, res) => {
     return res.status(500).json({ message: 'Internal server error' });
   }
 };
+
+/* ===== Internal: GridFS streaming with Range + headers ===== */
+async function streamGridFsByFilename(req, res, filename, opts = {}) {
+  const bucket = getBucket();
+  const fileDoc = await findGridFileByFilename(filename);
+  if (!fileDoc) { res.status(404).json({ message: 'File not found' }); return; }
+
+  const total = fileDoc.length;
+  const type = opts.preferType || fileDoc.contentType || (fileDoc.metadata && fileDoc.metadata.mimetype) || guessType(fileDoc.filename);
+
+  const forceAttachment = opts.asAttachment === true;
+  const isInlineDefault = isInlineType(type); // images & PDFs
+  const sendAsAttachment = forceAttachment ? true : !isInlineDefault;
+
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('Content-Type', type);
+  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+  res.setHeader(
+    'Content-Disposition',
+    contentDispositionInline(opts.downloadName || fileDoc.filename, sendAsAttachment)
+  );
+
+  const range = req.headers.range;
+  if (range) {
+    const m = String(range).match(/bytes=(\d*)-(\d*)/);
+    if (m) {
+      let start = m[1] ? parseInt(m[1], 10) : 0;
+      let end = m[2] ? parseInt(m[2], 10) : total - 1;
+      if (isNaN(start) || isNaN(end) || start > end || start >= total) {
+        res.status(416).setHeader('Content-Range', `bytes */${total}`).end();
+        return;
+      }
+      res.status(206);
+      res.setHeader('Content-Range', `bytes ${start}-${end}/${total}`);
+      res.setHeader('Content-Length', String(end - start + 1));
+      const stream = bucket.openDownloadStreamByName(fileDoc.filename, { start, end: end + 1 });
+      stream.on('error', () => res.end());
+      stream.pipe(res);
+      return;
+    }
+  }
+  res.setHeader('Content-Length', String(total));
+  const stream = bucket.openDownloadStreamByName(fileDoc.filename);
+  stream.on('error', () => res.end());
+  stream.pipe(res);
+}

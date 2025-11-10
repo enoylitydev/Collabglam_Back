@@ -3,6 +3,8 @@ require('dotenv').config();
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
+const multer = require('multer');
+const { uploadToGridFS } = require('../utils/gridfs');
 
 const Brand = require('../models/brand');
 const Influencer = require('../models/influencer'); // needed by requestOtp
@@ -39,12 +41,116 @@ const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASS = process.env.SMTP_PASS;
 const JWT_SECRET = process.env.JWT_SECRET;
 
+const MAIL_FROM_NAME = process.env.MAIL_FROM_NAME || 'CollabGlam';
+const PRODUCT_NAME = process.env.PRODUCT_NAME || 'CollabGlam';
+
 const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
   port: SMTP_PORT,
   secure: SMTP_PORT === 465,
   auth: { user: SMTP_USER, pass: SMTP_PASS },
 });
+
+// ---------- Pretty HTML OTP templates (orange/yellow accents) ----------
+
+const esc = (s = '') => String(s).replace(/[&<>"]/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+const PREHEADER = (t) => `<div style="display:none;opacity:0;visibility:hidden;overflow:hidden;height:0;width:0;mso-hide:all;">${esc(t)}</div>`;
+
+// Email-safe design tokens (inline CSS)
+const WRAP  = 'max-width:640px;margin:0 auto;padding:0;background:#f7fafc;color:#0f172a;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;';
+const SHELL = 'padding:24px;';
+const CARD  = 'border-radius:16px;background:#ffffff;border:1px solid #e5e7eb;overflow:hidden;box-shadow:0 8px 20px rgba(17,24,39,0.06);';
+const BRAND_BAR  = 'padding:18px 20px;background:#ffffff;color:#111827;border-bottom:1px solid #FFE8B7;';
+const BRAND_NAME = 'font-weight:900;font-size:15px;letter-spacing:.2px;';
+const ACCENT_BAR = 'height:4px;background:linear-gradient(90deg,#FF6A00 0%, #FF8A00 30%, #FF9A00 60%, #FFBF00 100%);';
+const HDR   = 'padding:20px 24px 6px 24px;font-weight:800;font-size:20px;color:#111827;';
+const SUBHDR= 'padding:0 24px 10px 24px;color:#374151;font-size:13px;';
+const BODY  = 'padding:0 24px 24px 24px;';
+const FOOT  = 'padding:14px 24px;color:#6b7280;font-size:12px;border-top:1px solid #f1f5f9;background:#fcfcfd;';
+const BTN   = 'display:inline-block;background:#111827;color:#ffffff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800;';
+const SMALL = 'color:#6b7280;font-size:12px;';
+
+const CODE_WRAPPER = 'margin-top:12px;margin-bottom:6px;';
+const CODE = [
+  'display:inline-block',
+  'font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace',
+  'font-weight:900',
+  'font-size:26px',
+  'letter-spacing:6px',
+  'color:#111827',
+  'background:#FFF7E6',
+  'border:1px solid #FFE2B3',
+  'border-radius:14px',
+  'padding:14px 18px',
+].join(';');
+
+function otpHtmlTemplate({
+  title = 'Your verification code',
+  subtitle = 'Use the one-time code below to continue.',
+  code,
+  minutes = 10,
+  ctaHref,
+  ctaLabel,
+  footerNote = 'If you didn’t request this, you can safely ignore this email.',
+  preheader = 'Your one-time verification code',
+}) {
+  const hasCta = Boolean(ctaHref && ctaLabel);
+  return `
+  ${PREHEADER(`${preheader}: ${code}`)}
+  <div style="${WRAP}">
+    <div style="${SHELL}">
+      <div style="${CARD}">
+        <div style="${BRAND_BAR}">
+          <div style="${BRAND_NAME}">${esc(PRODUCT_NAME)}</div>
+        </div>
+        <div style="${ACCENT_BAR}"></div>
+
+        <div style="${HDR}">${esc(title)}</div>
+        <div style="${SUBHDR}">${esc(subtitle)}</div>
+
+        <div style="${BODY}">
+          <div style="${CODE_WRAPPER}">
+            <span style="${CODE}">${esc(code)}</span>
+          </div>
+          <div style="${SMALL}">This code expires in ${minutes} minutes.</div>
+
+          ${hasCta ? `
+            <div style="margin-top:16px;">
+              <a href="${esc(ctaHref)}" style="${BTN}">${esc(ctaLabel)}</a>
+              <div style="${SMALL};margin-top:8px;">If the button doesn’t work, copy &amp; paste this link:<br><span style="word-break:break-all;color:#111827;">${esc(ctaHref)}</span></div>
+            </div>` : ''}
+
+        </div>
+
+        <div style="${FOOT}">
+          ${esc(footerNote)}
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function otpTextFallback({ code, minutes = 10, title = 'Your verification code' }) {
+  return `${title}\n\nCode: ${code}\nThis code expires in ${minutes} minutes.\n\nIf you didn’t request this, you can ignore this email.`;
+}
+
+async function sendMail({ to, subject, html, text }) {
+  if (!to || !SMTP_HOST || !SMTP_USER) {
+    console.warn('[mailer] Missing recipient or SMTP config; skipping email');
+    return;
+  }
+  try {
+    await transporter.sendMail({
+      from: `"${MAIL_FROM_NAME}" <${SMTP_USER}>`,
+      to,
+      subject,
+      html,
+      text,
+    });
+  } catch (e) {
+    console.error('[mailer] sendMail failed:', e?.message || e);
+  }
+}
 
 // ---- resolvers for DB-backed options ----
 const isObjectId = (v) => mongoose.Types.ObjectId.isValid(String(v));
@@ -64,6 +170,38 @@ async function resolveCategory(input) {
   // name (case-insensitive, exact)
   return Category.findOne({ name: new RegExp(`^${escapeRegExp(raw)}$`, 'i') });
 }
+
+// ---------------- File Upload (Brand Logo via GridFS) ----------------
+const logoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  fileFilter: (req, file, cb) => {
+    const ok = /^(image\/png|image\/jpeg|image\/jpg|image\/webp|image\/svg\+xml)$/i.test(file.mimetype);
+    if (ok) return cb(null, true);
+    cb(new Error('Unsupported logo type'));
+  }
+});
+
+exports.uploadLogoMiddleware = logoUpload.single('file');
+
+exports.uploadLogo = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: 'file is required' });
+    }
+
+    const [saved] = await uploadToGridFS(req.file, {
+      prefix: 'brand_logo',
+      metadata: { kind: 'brand_logo' },
+      req
+    });
+
+    return res.status(201).json({ message: 'Logo uploaded', url: saved.url, filename: saved.filename });
+  } catch (err) {
+    console.error('uploadLogo error:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
 
 async function resolveBusinessType(input) {
   if (!input && input !== 0) return null;
@@ -124,13 +262,18 @@ exports.requestOtp = async (req, res) => {
       { new: true, upsert: true, setDefaultsOnInsert: true }
     );
 
-    // Send OTP email
-    await transporter.sendMail({
-      from: `"No-Reply" <${SMTP_USER}>`,
-      to: normalizedEmail,
-      subject: 'Your verification code',
-      text: `Your OTP is ${code}. It expires in 10 minutes.`,
+    // ✉️ Send OTP email (HTML)
+    const subject = 'Verify your email';
+    const html = otpHtmlTemplate({
+      title: 'Verify your email',
+      subtitle: `Use this verification code to continue signing up as a ${normalizedRole}.`,
+      code,
+      minutes: 10,
+      preheader: 'Your CollabGlam verification code',
     });
+    const text = otpTextFallback({ code, minutes: 10, title: 'Verify your email' });
+
+    await sendMail({ to: normalizedEmail, subject, html, text });
 
     return res.json({ message: 'OTP sent to email' });
   } catch (err) {
@@ -491,11 +634,22 @@ exports.requestPasswordResetOtp = async (req, res) => {
   brand.passwordResetVerified = false;
   await brand.save();
 
-  await transporter.sendMail({
-    from: `"No-Reply" <${SMTP_USER}>`,
+  // ✉️ Send HTML email for password reset
+  const subject = 'Password reset code';
+  const html = otpHtmlTemplate({
+    title: 'Password reset code',
+    subtitle: 'Use this one-time code to reset your password.',
+    code,
+    minutes: 10,
+    preheader: 'Your password reset code',
+  });
+  const text = otpTextFallback({ code, minutes: 10, title: 'Password reset code' });
+
+  await sendMail({
     to: brand.email,
-    subject: 'Password reset code',
-    text: `Your password reset OTP is ${code}. It expires in 10 minutes.`,
+    subject,
+    html,
+    text,
   });
 
   return res
@@ -624,7 +778,7 @@ exports.searchBrands = async (req, res) => {
 // ---------- 12) Update profile ----------
 exports.updateProfile = async (req, res) => {
   try {
-    const { brandId, name, phone, countryId, callingId } = req.body || {};
+    const { brandId, name, phone, countryId, callingId, logoUrl } = req.body || {};
 
     if (!brandId) {
       return res.status(400).json({ message: 'brandId is required' });
@@ -636,7 +790,7 @@ exports.updateProfile = async (req, res) => {
     }
 
     // require at least one change
-    if (name == null && phone == null && countryId == null && callingId == null) {
+    if (name == null && phone == null && countryId == null && callingId == null && typeof logoUrl === 'undefined') {
       return res.status(400).json({ message: 'No changes provided' });
     }
 
@@ -658,6 +812,10 @@ exports.updateProfile = async (req, res) => {
       if (!callingDoc) return res.status(400).json({ message: 'Invalid callingId' });
       brand.callingId = callingId;
       brand.callingcode = callingDoc.callingCode;
+    }
+
+    if (typeof logoUrl !== 'undefined') {
+      brand.logoUrl = normalizeUrl(logoUrl);
     }
 
     await brand.save();
@@ -736,20 +894,31 @@ exports.requestEmailUpdate = async (req, res) => {
       { new: true, upsert: true, setDefaultsOnInsert: true }
     );
 
-    // Send both OTPs
-    await transporter.sendMail({
-      from: `"No-Reply" <${SMTP_USER}>`,
-      to: oldEmail,
-      subject: 'Confirm email change (old email verification)',
-      text: `Your OTP to confirm changing away from this email is ${oldOtp}. It expires in 10 minutes.`,
+    // ✉️ Send both OTPs (HTML)
+    const oldSubject = 'Confirm email change (old email verification)';
+    const oldHtml = otpHtmlTemplate({
+      title: 'Confirm email change',
+      subtitle: 'Use this code to confirm changing away from this email.',
+      code: oldOtp,
+      minutes: 10,
+      preheader: 'Confirm email change (old email)',
     });
+    const oldText = otpTextFallback({ code: oldOtp, minutes: 10, title: 'Confirm email change' });
 
-    await transporter.sendMail({
-      from: `"No-Reply" <${SMTP_USER}>`,
-      to: nextEmail,
-      subject: 'Confirm email change (new email verification)',
-      text: `Your OTP to confirm using this as your new email is ${newOtp}. It expires in 10 minutes.`,
+    const newSubject = 'Confirm email change (new email verification)';
+    const newHtml = otpHtmlTemplate({
+      title: 'Verify your new email',
+      subtitle: 'Use this code to confirm your new email address.',
+      code: newOtp,
+      minutes: 10,
+      preheader: 'Confirm email change (new email)',
     });
+    const newText = otpTextFallback({ code: newOtp, minutes: 10, title: 'Verify your new email' });
+
+    await Promise.all([
+      sendMail({ to: oldEmail, subject: oldSubject, html: oldHtml, text: oldText }),
+      sendMail({ to: nextEmail, subject: newSubject, html: newHtml, text: newText }),
+    ]);
 
     return res.status(200).json({ message: 'OTPs sent to old and new emails' });
   } catch (err) {

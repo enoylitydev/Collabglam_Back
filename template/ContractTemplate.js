@@ -1,4 +1,4 @@
-// ========================= template/ContractTemplate.js (rewritten) =========================
+// ========================= template/ContractTemplate.js (updated) =========================
 module.exports = `
 COLLABGLAM MASTER BRAND–INFLUENCER AGREEMENT (TRI-PARTY)
 
@@ -162,6 +162,13 @@ This Master Brand–Influencer Agreement (the “Agreement”) is made as of {{A
    e. Counterparts; E-Signatures. Counterparts and electronic signatures are valid and binding.
    f. Survival. The survival durations in Schedule N apply.
 
+
+Influencer Acceptance Details (Complete to Accept)
+
+The Influencer provides the following information for contracting, notices, and (where applicable) tax and payment administration. These fields populate the Agreement and are incorporated by reference.
+
+[[Influencer.AcceptanceDetailsTableHTML]]
+
 Signatures
 
 Brand: {{Brand.LegalName}}
@@ -184,10 +191,15 @@ Date: {{Agreement.EffectiveDate}}
 
 Schedule A – Statement of Work (SOW)
 
+— Reference Notes for Drafting —
+• Deliverable “Type” = content category (see Schedule E examples).
+• “Format” = HOW the content is delivered (technical/media specs: file type, aspect ratio, resolution, orientation).
+• Each Deliverable’s “Posting Window” functions as the Go-Live window for that Deliverable.
+
 1. Campaign Title: {{Campaign.Title}}
 2. Territory: {{Campaign.Territory}} (default Worldwide)
-3. Channels: {{Campaign.Channels}}
-4. Deliverables (table will render below):
+3. Platforms: {{Campaign.Channels}}
+4. Deliverables (rendered table includes Type, Quantity, Format/Duration, Posting Window, Draft Requirement (and Draft Due), Minimum Live, Tags/Handles, Captions/Links, Disclosures, and Whitelisting/Spark Ads toggles):
 [[SOW.DeliverablesTableHTML]]
 
 5. Approvals and Service Levels:
@@ -195,7 +207,7 @@ Schedule A – Statement of Work (SOW)
    b. Included revision rounds: {{Approval.RoundsIncluded}}.
    c. Additional revision fee: {{Approval.AdditionalRevisionFee}}.
 
-6. Usage Rights Matrix Reference: Schedule K selections.
+6. Usage Rights Matrix Reference: Schedule K selections (Bundle summary and table render in Schedule K).
 
 7. Compensation and Payments:
    a. Total Fee and currency: {{Comp.TotalFee}} {{Comp.Currency}}.
@@ -220,6 +232,7 @@ Schedule A – Statement of Work (SOW)
 
 12. Special Terms:
     a. Any specific provisions expressly agreed to override SOW defaults consistent with Section 2.
+    b. Whitelisting/Spark Ads access, read-only insights, and any platform permissions (if enabled) shall be granted via least-privilege access for the SOW term only and revoked upon completion.
 
 Schedule B – Advertising and Platform Compliance Addendum
 
@@ -233,7 +246,6 @@ Schedule B – Advertising and Platform Compliance Addendum
 8. Accessibility. Use captions and reasonable accessibility measures where practicable.
 9. AI and Synthetic Media. Label synthetic media where required; no impersonation without consent.
 
-
 Schedule C – Platform Terms and Dispute Process
 
 1. Fees. Platform and processing fees shall be as published in the CollabGlam dashboard at SOW acceptance.
@@ -241,7 +253,6 @@ Schedule C – Platform Terms and Dispute Process
 3. Dispute Process. Parties shall first use the platform’s evidence-based dispute flow before arbitration.
 4. Suspension. CollabGlam may suspend accounts or SOWs for repeated violations, fraud, or non-payment after notice.
 5. Records. Transaction logs, approvals, and milestones may be retained as evidence.
-
 
 Schedule D – Data Processing Addendum
 
@@ -253,17 +264,25 @@ Schedule D – Data Processing Addendum
 6. Cross-Border Transfers. Appropriate transfer mechanisms shall be used where required by law.
 7. Data Minimization and Retention. Collect only what is necessary and retain only as required by law or this Agreement.
 
-
-Schedule E – Definitions
+Schedule E – Definitions (with drafting guidance)
 
 1. Business Day has the meaning in Section 2.
-2. Channels means the social media channels selected in the SOW.
+2. Platforms means the social media channels selected in the SOW (e.g., Instagram, YouTube, TikTok).
 3. Deliverables means the content and outputs specified in Schedule A.
-4. Organic Use means unpaid reposting or sharing on Brand-controlled social channels and websites as selected in Schedule K.
-5. Paid Digital Use means paid promotion or use in Brand digital advertising and retailer sites as selected in Schedule K.
-6. Brand Assets means trademarks and materials furnished by Brand.
-7. Invalid Traffic has the meaning in Schedule L.
-
+4. Deliverable Type means the content category (examples: Video; Reel/Short/TikTok; Static Post (Image); Carousel Post; Story (Single); Story Set (Multiple frames); UGC Video; YouTube Integration (Mid-roll/Pre-roll); YouTube Dedicated Video; Live Stream; Blog Post (optional); Whitelisting Asset (if required); Custom Deliverable).
+5. Format means HOW the content is delivered (technical/media specification). Common examples include:
+   - File type: JPG/PNG (images); MP4/MOV (videos)
+   - Orientation/Layout: vertical / horizontal / square
+   - Resolution & Aspect: 1080×1920 (9:16); 1920×1080 (16:9); Square 1080×1080 (1:1)
+   - RAW/Codec: e.g., ProRes; 4K source
+6. Posting Window (Go-Live Window) means the start/end dates in which the Deliverable must be posted live.
+7. Draft Required means the Deliverable requires pre-publication review; Draft Due Date means the date by which the draft must be submitted.
+8. Revision Rounds Included means the number of included cycles of edits/notes (additional rounds may incur the Additional Revision Fee).
+9. Live Retention means the minimum period the Deliverable must remain published (measured in hours or months as specified in the SOW/table).
+10. Organic Use means unpaid reposting or sharing on Brand-owned social channels and websites as selected in Schedule K.
+11. Paid Digital Use means paid promotion or use in Brand digital advertising and retailer sites as selected in Schedule K.
+12. Brand Assets means trademarks and materials furnished by Brand.
+13. Invalid Traffic has the meaning in Schedule L.
 
 Schedule F – Jurisdiction Addendum: United States
 
@@ -271,13 +290,11 @@ Schedule F – Jurisdiction Addendum: United States
 2. COPPA. Where content is directed to children under 13, Parties shall comply with COPPA and platform rules.
 3. State Laws. Applicable state unfair competition and privacy laws apply.
 
-
 Schedule G – Jurisdiction Addendum: United Kingdom and European Union
 
 1. ASA/CAP. Comply with ASA and CAP Code in the UK.
 2. UCPD. Comply with the Unfair Commercial Practices Directive in the EU.
 3. Platform-Specific Labels. Use required ad labels where applicable.
-
 
 Schedule H – Promotions and Sweepstakes Annex
 
@@ -285,20 +302,17 @@ Schedule H – Promotions and Sweepstakes Annex
 2. Rules. Official rules shall be hosted by Brand; Influencer shall link or reference required elements.
 3. No Consideration. Where required, entry may not require consideration beyond minimal tasks permitted by law.
 
-
 Schedule I – Minors and Child-Directed Content Annex
 
 1. Parental Consent. Where minors appear, obtain appropriate parental consent and releases.
 2. Safety. Comply with platform minor safety policies and industry best practices.
 3. Advertising Restrictions. Follow stricter advertising rules for content directed to minors.
 
-
 Schedule J – Insurance Requirements
 
 1. When Required. If Schedule J is selected in the SOW, Influencer shall maintain insurance as stated.
 2. Certificate. Provide certificate upon request; where required, Brand shall be named as additional insured on a primary and non-contributory basis.
 3. Limits. Coverage limits and types as specified in the SOW.
-
 
 Schedule K – Usage Rights Matrix
 
@@ -322,18 +336,15 @@ Schedule L – Metrics Verification and Invalid Traffic
 3. Verification. Brand may request a third-party verification once per SOW; costs borne by Brand unless variance thresholds are exceeded.
 4. Remedies. Makegoods, additional distribution, or proportional adjustments as reasonably agreed.
 
-
 Schedule M – PR Crisis Protocol
 
 1. Coordination. Parties shall coordinate on public statements during material issues impacting Deliverables.
 2. Escalation. Use designated escalation contacts; time-bound approvals for statements.
 3. Mitigation. Temporary unlisting or takedown may be required pending corrections.
 
-
 Schedule N – Survival Schedule
 
 1. Surviving Sections. The following survive termination or expiration: Sections 6 (IP/Licenses) to the extent of ongoing licenses, 7–9, 10(d)–(i), 11, 12, 14, 18–19, 21, 23–27, and Schedule L obligations.
-
 
 Schedule O – Change Order Form
 
@@ -341,17 +352,14 @@ Schedule O – Change Order Form
 2. Contents. Include revised scope, timelines, fees, and any usage changes.
 3. Signatures. Executed via platform e-signature by all Parties.
 
-
 Schedule P – Raw Footage and Asset Delivery
 
 1. Scope. If required in the SOW, Influencer shall deliver raw footage, project files, and working files in stated formats within the delivery timeline.
 2. Security. Files shall be transmitted via a secure method and retained by Influencer for ninety days unless otherwise stated.
 3. Ownership. Ownership remains with Influencer unless the SOW expressly transfers ownership and fee.
 
-
 Schedule Q – Proof of License Deliverables
 
 1. Proofs. Where third-party materials are used, Influencer shall provide proof of license, including license terms, permitted uses, and durations.
 2. Music. Unless the SOW assigns responsibility to Influencer, Brand remains responsible for commercial music licensing.
 `;
-

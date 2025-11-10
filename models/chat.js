@@ -4,24 +4,24 @@ const { v4: uuidv4 } = require('uuid');
 
 const attachmentSchema = new mongoose.Schema({
   attachmentId: { type: String, required: true, default: uuidv4 },
-  url: { type: String, required: true }, // public URL your FE can load
-  path: { type: String, default: null },  // local fs path (if stored locally)
+  url: { type: String, required: true },
+  path: { type: String, default: null },
   originalName: { type: String, required: true },
   mimeType: { type: String, required: true },
   size: { type: Number, required: true },
-  // Optional metadata (filled when available)
   width: { type: Number, default: null },
   height: { type: Number, default: null },
-  duration: { type: Number, default: null }, // seconds for audio/video if you measure it
-  thumbnailUrl: { type: String, default: null }, // if you generate thumbs later
-  storage: { type: String, enum: ['local', 'remote'], default: 'local' }
+  duration: { type: Number, default: null },
+  thumbnailUrl: { type: String, default: null },
+  storage: { type: String, enum: ['local', 'remote', 'gridfs'], default: 'local' },
+  gridfsFilename: { type: String, default: null },
+  gridfsId: { type: String, default: null }
 }, { _id: false });
 
 const replySnapshotSchema = new mongoose.Schema({
   messageId: { type: String, required: true },
   senderId: { type: String, required: true },
   text: { type: String, default: '' },
-  // tiny peek at first attachment (if any)
   hasAttachment: { type: Boolean, default: false },
   attachment: {
     originalName: { type: String, default: null },
@@ -38,7 +38,11 @@ const messageSchema = new mongoose.Schema({
   replyTo: { type: String, default: null },
   reply: { type: replySnapshotSchema, default: null },
   attachments: { type: [attachmentSchema], default: [] },
-  seenBy: { type: [String], default: [] }  // ADD THIS LINE
+  seenBy: { type: [String], default: [] },
+
+  // ✅ NEW: track who we’ve already emailed for this specific message
+  emailNotified: { type: [String], default: [] },              // array of userIds
+  emailNotifiedAt: { type: Map, of: Date, default: {} }        // userId -> Date
 }, { _id: false });
 
 const participantSchema = new mongoose.Schema({
@@ -47,12 +51,13 @@ const participantSchema = new mongoose.Schema({
   role: { type: String, enum: ['brand', 'influencer', 'other'], default: 'other' }
 }, { _id: false });
 
-// Add to chat schema in models/chat.js
 const chatRoomSchema = new mongoose.Schema({
   roomId: { type: String, required: true, unique: true, default: uuidv4 },
   participants: { type: [participantSchema], required: true },
   messages: { type: [messageSchema], default: [] },
-  lastNotificationSent: { type: Map, of: Date, default: {} }  // ADD THIS
+
+  // kept for backwards compatibility (no longer required for throttling)
+  lastNotificationSent: { type: Map, of: Date, default: {} }
 }, { timestamps: true });
 
 module.exports = mongoose.model('ChatRoom', chatRoomSchema);

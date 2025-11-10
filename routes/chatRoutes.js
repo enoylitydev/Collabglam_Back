@@ -1,20 +1,27 @@
 // routes/chat.js
 const express = require('express');
 const router = express.Router();
-const ctrl = require('../controllers/chatController');
+const chat = require('../controllers/chatController');
 
-router.post('/room', ctrl.createRoom);
-router.post('/rooms', ctrl.getRooms);
-router.post('/history', ctrl.getMessages);
-router.post('/message', ctrl.postMessage);
-router.post('/edit', ctrl.editMessage);
-router.delete('/message', ctrl.deleteMessage);
-router.post('/send-file', ctrl.postFileMessage);
 
-router.post('/download', ctrl.downloadAttachmentPost);
+router.post('/create-room', chat.createRoom);
+router.post('/rooms', chat.getRooms);
+router.post('/messages', chat.getMessages);
+router.post('/send', chat.postMessage); // JSON message
+router.post('/send-file', chat.postFileMessage); // multipart
+router.patch('/edit', chat.editMessage);
+router.delete('/message', chat.deleteMessage);
+router.post('/mark-seen', chat.markAsSeen);
+router.post('/unseen-count', chat.getUnseenCount);
 
-// Seen/Unseen feature routes
-router.post('/mark-seen', ctrl.markAsSeen);
-router.post('/unseen-count', ctrl.getUnseenCount);
+// NEW secure streaming
+router.get('/attachment/:roomId/:attachmentId', chat.streamAttachment);
+
+// Public GridFS streamer used by frontend fileUrl()
+router.get('/file/:filename', chat.streamGridFsFile);
+
+// Legacy
+router.post('/download', chat.downloadAttachmentPost);
+
 
 module.exports = router;

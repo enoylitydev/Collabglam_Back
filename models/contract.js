@@ -1,19 +1,12 @@
-// models/contract.js
-// CollabGlam — Contract Model (rewritten + resend support)
-// - Adds persisted helper fields (lastSentAt, isAssigned, isAccepted, isRejected, feeAmount, currency)
-// - Adds resend lineage fields (resendIteration, resendOf, supersededBy, resentAt)
-// - Adds virtual flags + toJSON transform to expose booleans:
-//   isBrandInitiate, isInfluencerconfirm, isrejected, isResend, and a statusFlags group
-
 const mongoose = require('mongoose');
 const { v4: uuidv4 } = require('uuid');
 
-// Canonical status machine
+
+// ============================ Schema ============================
 const STATUS = [
   'draft', 'sent', 'viewed', 'negotiation', 'finalize', 'signing', 'locked', 'rejected'
 ];
 
-// Subschemas
 const SignatureSchema = new mongoose.Schema({
   signed: { type: Boolean, default: false },
   byUserId: { type: String },
@@ -36,12 +29,16 @@ const ExpandedDeliverableSchema = new mongoose.Schema({
   type: String,
   quantity: Number,
   format: String,
-  durationSec: Number,
+  durationSec: Number, // for videos
   postingWindow: { start: Date, end: Date },
   draftRequired: { type: Boolean, default: false },
   draftDueDate: Date,
   minLiveHours: Number,
-  tags: [String],
+  // NEW spec-aligned fields
+  liveRetentionMonths: Number,          // Deliverables[i].LiveRetentionMonths
+  revisionRoundsIncluded: Number,       // Deliverables[i].RevisionRoundsIncluded
+  additionalRevisionFee: Number,        // Deliverables[i].AdditionalRevisionFee
+  tags: [String],                       // Deliverables[i].TagsHandles <- combined at render
   handles: [String],
   captions: String,
   links: [String],
@@ -51,7 +48,8 @@ const ExpandedDeliverableSchema = new mongoose.Schema({
 }, { _id: false });
 
 const UsageBundleSchema = new mongoose.Schema({
-  type: { type: String, enum: ['Organic', 'Paid Digital', 'Custom'], default: 'Organic' },
+  // Accept any string to support values like OrganicUse, PaidDigitalUse, etc.
+  type: { type: String, default: 'Organic' },
   durationMonths: Number,
   geographies: [String],
   derivativeEditsAllowed: { type: Boolean, default: false },
@@ -72,7 +70,6 @@ const LastEditSchema = new mongoose.Schema({
   fields: [String]
 }, { _id: false });
 
-// Contract schema
 const contractSchema = new mongoose.Schema({
   contractId: { type: String, required: true, unique: true, default: uuidv4 },
   brandId: { type: String, required: true, ref: 'Brand' },
@@ -100,9 +97,24 @@ const contractSchema = new mongoose.Schema({
     deliverablesExpanded: [ExpandedDeliverableSchema]
   },
 
-  // Influencer data
+  // Influencer data (expanded to persist acceptance details)
   influencer: {
-    shippingAddress: { type: String },
+    // acceptance fields
+    legalName: { type: String, default: '' },
+    email: { type: String, default: '' },
+    phone: { type: String, default: '' },
+    taxId: { type: String, default: '' },
+
+    addressLine1: { type: String, default: '' },
+    addressLine2: { type: String, default: '' },
+    city: { type: String, default: '' },
+    state: { type: String, default: '' },
+    postalCode: { type: String, default: '' },
+    country: { type: String, default: '' },
+    notes: { type: String, default: '' },
+
+    // existing fields
+    shippingAddress: { type: String, default: '' },
     dataAccess: {
       insightsReadOnly: { type: Boolean, default: false },
       whitelisting: { type: Boolean, default: false },
@@ -110,6 +122,7 @@ const contractSchema = new mongoose.Schema({
     },
     taxFormType: { type: String, enum: ['W-9', 'W-8BEN', 'W-8BEN-E'], default: 'W-9' }
   },
+
 
   other: {
     brandProfile: { legalName: String, address: String, contactName: String, email: String, country: String },
@@ -167,14 +180,14 @@ const contractSchema = new mongoose.Schema({
   // Audit trail
   audit: [AuditEventSchema],
 
-  // Minimal denorm for headers/tokens (non-authoritative)
+  // Denorms
   brandName: { type: String },
   brandAddress: { type: String },
   influencerName: { type: String },
   influencerAddress: { type: String },
   influencerHandle: { type: String },
 
-  // --- Persisted convenience fields used in controllers ---
+  // Convenience fields
   lastSentAt: { type: Date },
   isAssigned: { type: Number, default: 0 },
   isAccepted: { type: Number, default: 0 },
@@ -182,11 +195,11 @@ const contractSchema = new mongoose.Schema({
   feeAmount: { type: Number, default: 0 },
   currency: { type: String, default: 'USD' },
 
-  // --- Resend lineage / meta ---
-  resendIteration: { type: Number, default: 0 }, // 0 = original, 1+ = nth resend
-  resendOf: { type: String },                    // parent contractId
-  supersededBy: { type: String },                // child contractId
-  resentAt: { type: Date },                      // when parent was resent
+  // Resend lineage
+  resendIteration: { type: Number, default: 0 },
+  resendOf: { type: String },
+  supersededBy: { type: String },
+  resentAt: { type: Date },
 
   createdAt: { type: Date, default: Date.now }
 });
@@ -201,7 +214,6 @@ contractSchema.index({ 'audit.at': -1 });
 contractSchema.index({ resendOf: 1 });
 contractSchema.index({ supersededBy: 1 });
 
-// -------- Convenience Flags --------
 function computeStatusFlags(doc) {
   const s = doc?.status || 'draft';
 
@@ -213,7 +225,7 @@ function computeStatusFlags(doc) {
   const brandConfirmed = !!doc?.confirmations?.brand?.confirmed;
   const influencerConfirmed = !!doc?.confirmations?.influencer?.confirmed;
 
-  const bothSigned = !!(
+  const both = !!(
     doc?.signatures?.brand?.signed &&
     doc?.signatures?.influencer?.signed &&
     doc?.signatures?.collabglam?.signed
@@ -236,12 +248,12 @@ function computeStatusFlags(doc) {
     isBrandInitiate: s !== 'draft',
     isBrandConfirmed: brandConfirmed,
     isInfluencerConfirm: influencerConfirmed,
-    isBothSigned: bothSigned,
+    isBothSigned: both,
 
-    canEditBrandFields: !locked && !bothSigned && influencerConfirmed,
-    canEditInfluencerFields: !locked && !bothSigned && influencerConfirmed,
-    canSignBrand: !locked && brandConfirmed,
-    canSignInfluencer: !locked && influencerConfirmed,
+    canEditBrandFields: !locked && !both && !brandConfirmed && !influencerConfirmed && !finalizeOrBeyond,
+    canEditInfluencerFields: !locked && !both && influencerConfirmed && !finalizeOrBeyond,
+    canSignBrand: !locked && brandConfirmed && influencerConfirmed,
+    canSignInfluencer: !locked && influencerConfirmed && brandConfirmed,
 
     isResendChild
   };
@@ -256,19 +268,15 @@ contractSchema.set('toJSON', {
     delete ret._id;
     const f = computeStatusFlags(doc);
 
-    // grouped
     ret.statusFlags = f;
 
-    // Aliases requested
     ret.isBrandInitiate = f.isBrandInitiate;
     ret.isInfluencerconfirm = f.isInfluencerConfirm; // exact casing requested
-    ret.isrejected = f.isRejected;          // exact casing requested
+    ret.isrejected = f.isRejected;                    // exact casing requested
 
-    // Friendly camelCase too
     ret.isInfluencerConfirm = f.isInfluencerConfirm;
     ret.isRejected = f.isRejected;
 
-    // Edit/signing flags
     ret.isDraft = f.isDraft;
     ret.isSent = f.isSent;
     ret.isViewed = f.isViewed;
@@ -283,7 +291,6 @@ contractSchema.set('toJSON', {
     ret.canSignBrand = f.canSignBrand;
     ret.canSignInfluencer = f.canSignInfluencer;
 
-    // Resend flags
     ret.isResend = f.isResendChild;
     ret.isresend = f.isResendChild;
 
@@ -291,7 +298,6 @@ contractSchema.set('toJSON', {
   }
 });
 
-// -------- Statics (unchanged behavior) --------
 contractSchema.statics.getSupportedCurrencies = function () {
   try { const data = require('../data/currencies.json'); return Object.keys(data || {}); } catch (e) { return []; }
 };
@@ -309,14 +315,13 @@ contractSchema.statics.findTimezone = function (key) {
   return list.find(t =>
     (t.value && t.value.toLowerCase() === q) ||
     (t.abbr && t.abbr.toLowerCase() === q) ||
-    (Array.isArray(t.utc) && t.utc.some(u => u.toLowerCase() === q)) ||
+    (Array.isArray(t.utc) && t.utc.some(u => (u || '').toLowerCase() === q)) ||
     (t.text && t.text.toLowerCase().includes(q))
   ) || null;
 };
 contractSchema.statics.isTimezoneSupported = function (key) { return Boolean(this.findTimezone(key)); };
 
-// Export
 const Contract = mongoose.model('Contract', contractSchema);
-Contract.STATUS = STATUS; // attached for convenience
+Contract.STATUS = STATUS;
 module.exports = Contract;
 module.exports.STATUS = STATUS;
