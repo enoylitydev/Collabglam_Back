@@ -440,12 +440,15 @@ exports.register = async (req, res) => {
     // Free plan
     const freePlan = await subscriptionHelper.getFreePlan('Brand');
     if (freePlan) {
+      const start = new Date();
+      const expire = subscriptionHelper.computeExpiry(freePlan, start);
+
       brand.subscription = {
         planId: freePlan.planId,
         planName: freePlan.name,
         role: 'Brand',
-        startedAt: new Date(),
-        expiresAt: subscriptionHelper.computeExpiry(freePlan),
+        startedAt: start,
+        expiresAt: expire,
         features: (freePlan.features || []).map((f) => ({
           key: f.key,
           limit: typeof f.value === 'number' ? f.value : 0,

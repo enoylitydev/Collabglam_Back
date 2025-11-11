@@ -289,7 +289,7 @@ const influencerSchema = new mongoose.Schema(
 
     subscription: {
       planName: { type: String, required: true, default: 'free' },
-      planId: { type: String, required: true, default: 'a58683f0-8d6e-41b0-addd-a718c2622142' },
+      planId: { type: String, required: true, default: 'ad4eda43-e024-4faf-8096-a908f9f9b65a' },
       startedAt: { type: Date, default: Date.now },
       expiresAt: { type: Date },
       features: {
