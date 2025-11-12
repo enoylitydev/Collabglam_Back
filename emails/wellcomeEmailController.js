@@ -45,7 +45,7 @@ const BRAND_EMAIL_CONTENT = {
 
         <!-- Call to Action Button -->
         <div style="text-align: center; margin: 30px 0;">
-            <a href="http://localhost:3000/brand/add-edit-campaign" 
+            <a href="https://collabglam.com/brand/add-edit-campaign" 
                style="background-color: #FF6A00; color: white; padding: 12px 25px; 
                       text-decoration: none; border-radius: 5px; font-weight: bold; font-size: 16px; display: inline-block;">
                 Create Your First Campaign
