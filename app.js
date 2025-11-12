@@ -34,6 +34,7 @@ const businessRoutes      = require('./routes/businessRoutes');
 const unsubscribeRoutes   = require('./routes/unsubscribeRoutes');
 const disputeRoutes       = require('./routes/disputeRoutes');
 const notificationsRoutes = require('./routes/notificationsRoutes');
+const emailRoutes = require('./routes/emailRoutes');
 
 // jobs
 const unseenMessageNotifier = require('./jobs/unseenMessageNotifier');
@@ -94,6 +95,7 @@ app.use('/business', businessRoutes);
 app.use('/unsubscribe', unsubscribeRoutes);
 app.use('/dispute', disputeRoutes);
 app.use('/notifications', notificationsRoutes);
+app.use('/emails', emailRoutes);
 
 // Friendly 413 response (must be after body parsers)
 app.use((err, req, res, next) => {
