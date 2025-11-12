@@ -1,11 +1,9 @@
 // scripts/seedSubscriptionPlans.js
 require('dotenv').config();
 const mongoose = require('mongoose');
-const SubscriptionPlan = require('../models/subscription'); // adjust path if needed
+const SubscriptionPlan = require('../models/subscription');
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Shared add-ons
-// ─────────────────────────────────────────────────────────────────────────────
+// Optional shared add-on (kept for future use; not attached by default)
 const DISCOVERY_PACK = {
   key: 'discovery_pack_50',
   name: 'Discovery Pack (+50 credits)',
@@ -15,180 +13,218 @@ const DISCOVERY_PACK = {
   payload: { credits: 50 }
 };
 
+const BRAND_CURRENCY = 'USD';
+const INFLUENCER_CURRENCY = 'USD';
+
 // ─────────────────────────────────────────────────────────────────────────────
-//  Subscription plans (V1) – from “CollabGlam — V1 Subscription Report”
-//  Notes:
-//   • brand.free: cached-only search, preview-only profiles, 0 credits
-//   • brand.growth: 3 credits/mo (≈3 profiles or ~20 fresh searches)
-//   • brand.pro (Best Value): 8 credits/mo
-//   • brand.premium: credits not specified in V1 doc → set to 0 for now; adjust in ops
-//   • influencer quotas & media-kit capacities per V1
+// BRAND PLANS (INR)
+// Keep points exactly as provided. Enterprise last, custom pricing.
 // ─────────────────────────────────────────────────────────────────────────────
-const plans = [
-  // ── BRAND PLANS ───────────────────────────────────────────────────────────
+const brandPlans = [
   {
     role: 'Brand',
     name: 'free',
+    displayName: 'FREE',
     monthlyCost: 0,
-    autoRenew: true,                   // renew forever (useful for testing)
-    durationMins: 5,
-    label: undefined,
+    currency: BRAND_CURRENCY,
+    overview: undefined,
+    sortOrder: 1,
+    autoRenew: true,
+    durationMins: 5, // handy for local testing; remove in prod if unwanted
     features: [
-      { key: 'live_campaigns_limit', value: 1 },
+      { key: 'searches_per_month', value: 20 },
+      { key: 'profile_views_per_month', value: 3 },
       { key: 'invites_per_month', value: 10 },
-      { key: 'monthly_credits', value: 0, note: 'No fresh pulls; cached-only' },
-      { key: 'search_cached_only', value: 1 },
-      { key: 'profile_preview_only', value: 1 },
-      { key: 'view_full_profiles_uses_credits', value: 1 },
-      { key: 'in_app_messaging', value: 1 },
-      { key: 'contracts_access', value: 0 },
-      { key: 'milestones_access', value: 0 },
-      { key: 'dispute_support', value: 0 }
+      { key: 'active_campaigns_limit', value: 5 },
+      { key: 'message_templates_basic_limit', value: 1 },
+      { key: 'support_channels', value: ['chat'] }
     ],
-    addons: [DISCOVERY_PACK]
+    addons: []
   },
   {
     role: 'Brand',
     name: 'growth',
+    displayName: 'GROWTH',
     monthlyCost: 99,
-    label: undefined,
+    currency: BRAND_CURRENCY,
+    sortOrder: 2,
     features: [
-      { key: 'live_campaigns_limit', value: 3 },
-      { key: 'invites_per_month', value: 50 },
-      { key: 'monthly_credits', value: 3, note: '~3 profiles or ~20 fresh searches' },
-      { key: 'search_fresh_uses_credits', value: 1 },
-      { key: 'view_full_profiles_uses_credits', value: 1 },
-      { key: 'milestones_access', value: 1 },
-      { key: 'in_app_messaging', value: 1 },
-      { key: 'contracts_access', value: 1 },
-      { key: 'dispute_support', value: 1 }
+      { key: 'searches_per_month', value: 150 },
+      { key: 'profile_views_per_month', value: 50 },
+      { key: 'invites_per_month', value: 100 },
+      { key: 'active_campaigns_limit', value: 10 },
+      { key: 'custom_messaging', value: 1 },
+      { key: 'advanced_filters', value: 1, note: 'MVP limited' },
+      { key: 'support_channels', value: ['chat'] },
+      { key: 'dispute_assistance', value: 1 }
     ],
-    addons: [DISCOVERY_PACK]
+    addons: []
   },
   {
     role: 'Brand',
     name: 'pro',
+    displayName: 'PRO',
     monthlyCost: 199,
-    label: 'Best Value',
+    currency: BRAND_CURRENCY,
+    sortOrder: 3,
     features: [
-      { key: 'live_campaigns_limit', value: 10 },
+      { key: 'searches_per_month', value: 500 },
+      { key: 'profile_views_per_month', value: 150 },
       { key: 'invites_per_month', value: 200 },
-      { key: 'monthly_credits', value: 8, note: '~8 profiles or ~53 fresh searches' },
-      { key: 'search_fresh_uses_credits', value: 1 },
-      { key: 'view_full_profiles_uses_credits', value: 1 },
-      { key: 'milestones_access', value: 1 },
-      { key: 'in_app_messaging', value: 1 },
-      { key: 'contracts_access', value: 1 },
-      { key: 'dispute_support', value: 1 }
+      { key: 'active_campaigns_limit', value: 10 }, // "10 campaigns"
+      { key: 'custom_messaging', value: 1 },
+      { key: 'advanced_filters', value: 1 },
+      { key: 'dedicated_account_manager', value: 1 },
+      { key: 'support_channels', value: ['chat'] },
+      { key: 'dispute_assistance', value: 1 }
     ],
-    addons: [DISCOVERY_PACK]
+    addons: []
   },
   {
     role: 'Brand',
     name: 'premium',
+    displayName: 'PREMIUM',
     monthlyCost: 299,
-    label: undefined,
+    currency: BRAND_CURRENCY,
+    sortOrder: 4,
     features: [
-      { key: 'live_campaigns_limit', value: 25 },
+      { key: 'searches_per_month', value: 1000 },
+      { key: 'profile_views_per_month', value: 300 },
       { key: 'invites_per_month', value: 1000 },
-      // V1 doc doesn’t specify credits for Premium; defaulting to 0 so ops can adjust safely.
-      { key: 'monthly_credits', value: 0, note: 'TBD per ops; not in V1 doc' },
-      { key: 'search_fresh_uses_credits', value: 1 },
-      { key: 'view_full_profiles_uses_credits', value: 1 },
-      { key: 'milestones_access', value: 1 },
-      { key: 'in_app_messaging', value: 1 },
-      { key: 'contracts_access', value: 1 },
-      { key: 'dispute_support', value: 1 }
+      { key: 'active_campaigns_limit', value: 30 },
+      { key: 'advanced_filters', value: 1, note: 'MVP limited' },
+      { key: 'dedicated_manager', value: 1 },
+      { key: 'support_channels', value: ['chat'] },
+      { key: 'dispute_assistance', value: 1 }
     ],
-    addons: [DISCOVERY_PACK]
-  },
-
-  // ── INFLUENCER PLANS ───────────────────────────────────────────────────────
-  {
-    role: 'Influencer',
-    name: 'free',
-    monthlyCost: 0,
-    autoRenew: true,                   // renew forever (useful for testing)
-    durationMins: 5,
-    features: [
-      { key: 'connect_instagram', value: 1 },
-      { key: 'connect_youtube', value: 1 },
-      { key: 'connect_tiktok', value: 1 },
-      { key: 'media_kit_builder', value: 1 },
-      { key: 'apply_to_campaigns_quota', value: 10 },
-      { key: 'in_app_messaging', value: 1 },
-      { key: 'contract_esign_basic', value: 1 },     // standard template
-      { key: 'contract_esign_download_pdf', value: 0 },
-      { key: 'dispute_channel', value: 1 }
-      // Media kit item cap not specified in V1 for Free
-    ]
+    addons: []
   },
   {
-    role: 'Influencer',
-    name: 'basic',
-    monthlyCost: 10,
+    role: 'Brand',
+    name: 'enterprise',
+    displayName: 'ENTERPRISE',
+    monthlyCost: 0,                 // custom pricing
+    currency: BRAND_CURRENCY,
+    isCustomPricing: true,
+    sortOrder: 999,                 // keep LAST
     features: [
-      { key: 'apply_to_campaigns_quota', value: 50 },
-      { key: 'media_kit_items_limit', value: 24 },
-      { key: 'saved_searches', value: 1 },
-      { key: 'connect_instagram', value: 1 },
-      { key: 'connect_youtube', value: 1 },
-      { key: 'connect_tiktok', value: 1 },
-      { key: 'in_app_messaging', value: 1 },
-      { key: 'contract_esign_basic', value: 1 },
-      { key: 'contract_esign_download_pdf', value: 0 },
-      { key: 'dispute_channel', value: 1 }
-    ]
-  },
-  {
-    role: 'Influencer',
-    name: 'creator',
-    monthlyCost: 29,
-    features: [
-      { key: 'apply_to_campaigns_quota', value: 200 },
-      { key: 'media_kit_items_limit', value: 60 },
-      { key: 'saved_searches', value: 1 },
-      { key: 'connect_instagram', value: 1 },
-      { key: 'connect_youtube', value: 1 },
-      { key: 'connect_tiktok', value: 1 },
-      { key: 'in_app_messaging', value: 1 },
-      { key: 'contract_esign_basic', value: 1 },
-      { key: 'contract_esign_download_pdf', value: 1 }, // can download signed PDF
-      { key: 'dispute_channel', value: 1 },
-      { key: 'media_kit_sections', value: ['bio', 'links', 'past_collabs', 'basic_rates'] }
-    ]
-  },
-  {
-    role: 'Influencer',
-    name: 'elite',
-    monthlyCost: 49,
-    features: [
-      { key: 'apply_to_campaigns_quota', value: 0 },  // 0 ⇒ unlimited
-      { key: 'media_kit_items_limit', value: 120 },
-      { key: 'saved_searches', value: 1 },
-      { key: 'connect_instagram', value: 1 },
-      { key: 'connect_youtube', value: 1 },
-      { key: 'connect_tiktok', value: 1 },
-      { key: 'in_app_messaging', value: 1 },
-      { key: 'contract_esign_basic', value: 1 },
-      { key: 'contract_esign_download_pdf', value: 1 },
-      { key: 'dispute_channel', value: 1 },
-      { key: 'media_kit_sections', value: ['bio', 'links', 'past_collabs', 'basic_rates'] }
-    ]
+      { key: 'public_quotas_visible', value: 1, note: 'What brands see (Public Quotas)' },
+      { key: 'searches_per_month', value: 'custom' },
+      { key: 'profile_views_per_month', value: 'unlimited', note: 'within allocation' },
+      { key: 'invites_per_month', value: 'unlimited' },
+      { key: 'active_campaigns_limit', value: 'unlimited' },
+      { key: 'custom_messaging', value: 1 },
+      { key: 'dedicated_manager', value: 1 },
+      { key: 'setup_assistance', value: 1 },
+      { key: 'priority_verification_queue', value: 1 },
+      { key: 'strategy_calls', value: 1 },
+      { key: 'sla_support', value: 1 },
+      { key: 'flexible_billing', value: 1 },
+      { key: 'support_channels', value: ['chat'] },
+      { key: 'contact_admin_flow', value: 1, note: 'Route to Contact Us → admin configures custom plan' }
+    ],
+    addons: []
   }
 ];
 
+// ─────────────────────────────────────────────────────────────────────────────
+// INFLUENCER PLANS (USD)
+// Keep points exactly as provided, with overviews preserved.
+// ─────────────────────────────────────────────────────────────────────────────
+const influencerPlans = [
+  {
+    role: 'Influencer',
+    name: 'free',
+    displayName: 'FREE',
+    monthlyCost: 0,
+    currency: INFLUENCER_CURRENCY,
+    overview:
+      'Entry plan for new creators starting their influencer journey and exploring brand collaborations.',
+    sortOrder: 1,
+    autoRenew: true,
+    durationMins: 5,
+    features: [
+      { key: 'apply_to_campaigns_quota', value: 10, note: 'per month' },
+      { key: 'active_collaborations_limit', value: 1 },
+      { key: 'media_kit', value: 'included_standard' },
+      { key: 'support_channels', value: ['chat'] },
+      { key: 'team_manager_tools', value: 'not_available' },
+      { key: 'dashboard_access', value: 'basic' }
+    ],
+    addons: []
+  },
+  {
+    role: 'Influencer',
+    name: 'creator_plus',
+    displayName: 'CREATOR PLUS',
+    monthlyCost: 19,
+    currency: INFLUENCER_CURRENCY,
+    overview:
+      'Best for creators growing steadily and applying to more brand opportunities.',
+    sortOrder: 2,
+    features: [
+      { key: 'apply_to_campaigns_quota', value: 50, note: 'per month' },
+      { key: 'active_collaborations_limit', value: 5 },
+      { key: 'media_kit', value: 'included' },
+      { key: 'support_channels', value: ['chat'] },
+      { key: 'team_manager_tools', value: 'not_available' },
+      { key: 'dashboard_access', value: 'standard' }
+    ],
+    addons: []
+  },
+  {
+    role: 'Influencer',
+    name: 'creator_pro',
+    displayName: 'CREATOR PRO',
+    monthlyCost: 29,
+    currency: INFLUENCER_CURRENCY,
+    overview:
+      'Built for creators scaling their profile with brands and managing higher collaboration volume.',
+    sortOrder: 3,
+    features: [
+      { key: 'apply_to_campaigns_quota', value: 100, note: 'per month' },
+      { key: 'active_collaborations_limit', value: 15 },
+      { key: 'media_kit', value: 'included' },
+      { key: 'support_channels', value: ['email', 'chat'] },
+      { key: 'team_manager_tools', value: 'not_available' },
+      { key: 'dashboard_access', value: 'advanced' }
+    ],
+    addons: []
+  },
+  {
+    role: 'Influencer',
+    name: 'agency',
+    displayName: 'AGENCY',
+    monthlyCost: 99,
+    currency: INFLUENCER_CURRENCY,
+    overview:
+      'Ideal for talent managers and influencer agencies handling multiple creators.',
+    sortOrder: 4,
+    features: [
+      { key: 'apply_to_campaigns_quota', value: 0, note: '0 ⇒ Unlimited' },
+      { key: 'active_collaborations_limit', value: 'team_managed' },
+      { key: 'media_kit', value: 'shared_team_kit' },
+      { key: 'support_channels', value: ['email', 'phone'] },
+      { key: 'team_manager_tools_managed_creators', value: { min: 5, max: 200 } },
+      { key: 'dashboard_access', value: 'team_workspace' }
+    ],
+    addons: []
+  }
+];
+
+const plans = [...brandPlans, ...influencerPlans];
+
 async function seed() {
   try {
-    // 1️⃣ Connect
-    await mongoose.connect(process.env.MONGODB_URI);
+    const { MONGODB_URI } = process.env;
+    if (!MONGODB_URI) throw new Error('Set MONGODB_URI in .env');
+
+    await mongoose.connect(MONGODB_URI);
     console.log('✅ MongoDB connected');
 
-    // 2️⃣ Clear existing plans
     await SubscriptionPlan.deleteMany({});
     console.log('🗑️  Cleared existing subscription plans');
 
-    // 3️⃣ Insert new ones
     const inserted = await SubscriptionPlan.insertMany(plans);
     console.log(`✅ Inserted ${inserted.length} subscription plans`);
 
@@ -196,7 +232,6 @@ async function seed() {
     console.error('❌ Error seeding plans:', err);
     process.exit(1);
   } finally {
-    // 4️⃣ Cleanup
     await mongoose.disconnect();
     console.log('🔌 MongoDB disconnected');
     process.exit(0);

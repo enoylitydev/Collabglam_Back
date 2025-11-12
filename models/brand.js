@@ -16,7 +16,7 @@ function normalizeUrl(u) {
   return /^https?:\/\//i.test(s) ? s : `https://${s}`;
 }
 
-const DEFAULT_FREE_PLAN_ID = 'ca41f2c1-7fbd-4e22-b27c-d537ecbaf02a';
+const DEFAULT_FREE_PLAN_ID = 'f77e686c-362d-453e-9963-46e0711a5cb5';
 
 // ---------------- Subscription Subschemas ----------------
 const subscriptionFeatureSchema = new mongoose.Schema(
