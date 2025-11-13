@@ -15,6 +15,11 @@ const VerifyEmail = require('../models/verifyEmail');
 const Category = require('../models/categories');        // DB-backed categories
 const BusinessType = require('../models/businessType');  // DB-backed business types
 const { escapeRegExp } = require('../utils/searchTokens'); // for exact match, case-insensitive
+const {
+  consumeWithCredits,
+  requireBrandFeature,
+  readAdvancedFiltersLevel,
+} = require('../utils/brandFeatures');
 
 // ---- helpers ----
 const emailRegex = /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i;
@@ -575,10 +580,23 @@ exports.login = async (req, res) => {
       { expiresIn: '100d' }
     );
 
+    // 6) Return subscription info (PLAN NAME)
+    const subscription = brand.subscription || {};
+    const subscriptionPlanName = subscription.planName || 'free';
+
     return res.status(200).json({
       message: 'Login successful',
       brandId: brand.brandId,
       token,
+      subscriptionPlanName,          // <- 👈 simple string
+      // Or, if you want more:
+      subscription: {
+        planId: subscription.planId,
+        planName: subscription.planName,
+        role: subscription.role,
+        status: subscription.status,
+        expiresAt: subscription.expiresAt,
+      },
     });
   } catch (error) {
     console.error('Error in brand.login:', error);
@@ -1061,4 +1079,144 @@ exports.getMetaOptions = async (_req, res) => {
     console.error('Error in getMetaOptions:', err);
     return res.status(500).json({ message: 'Failed to fetch options' });
   }
+};
+
+exports.searchInfluencersForBrand = async (req, res) => {
+  try {
+    const { brandId, query, filters = {} } = req.body || {};
+    if (!brandId || !query) {
+      return res.status(400).json({ message: 'brandId and query are required' });
+    }
+
+    // 1) Advanced filters gate (level-aware)
+    const level = await readAdvancedFiltersLevel(brandId); // 'none' | 'mvp' | 'full'
+    if (Object.keys(filters).length) {
+      if (level === 'none') {
+        return res.status(403).json({ message: 'Advanced filters not available on your plan.' });
+      }
+      if (level === 'mvp') {
+        // Optionally sanitize filters to allowed MVP subset
+        // e.g., delete filters.demographics; delete filters.lookalikes; keep basics, etc.
+      }
+    }
+
+    // 2) Consume search quota & charge internal credits
+    const take = await consumeWithCredits(brandId, 'search_quota', 1);
+    if (!take.ok) {
+      return res.status(403).json({
+        message: `Search limit reached. Remaining: ${take.remaining}`,
+        code: take.code || 'LIMIT'
+      });
+    }
+
+    // 3) ...perform your search here...
+    // const results = await Modash.search(query, filters); // pseudo
+    const results = []; // TODO: hook your provider
+
+    return res.status(200).json({
+      results,
+      quotas: { searchRemaining: take.remaining }
+    });
+  } catch (err) {
+    console.error('searchInfluencersForBrand error:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// GET /brand/influencer/:id/view?brandId=...
+exports.viewInfluencerProfile = async (req, res) => {
+  try {
+    const { brandId } = req.query;
+    const influencerId = req.params.id;
+    if (!brandId || !influencerId) {
+      return res.status(400).json({ message: 'brandId and influencerId are required' });
+    }
+
+    const take = await consumeWithCredits(brandId, 'profile_view_quota', 1);
+    if (!take.ok) {
+      return res.status(403).json({ message: `Profile view limit reached. Remaining: ${take.remaining}` });
+    }
+
+    // fetch and return influencer profile (+ any masking logic if needed)
+    // const profile = await Influencer.findOne({ influencerId }).lean();
+    const profile = { influencerId }; // placeholder
+
+    return res.status(200).json({ profile, quotas: { profileViewRemaining: take.remaining } });
+  } catch (err) {
+    console.error('viewInfluencerProfile error:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+exports.sendInvite = async (req, res) => {
+  try {
+    const { brandId, influencerId, messageTemplateId, customMessage } = req.body || {};
+    if (!brandId || !influencerId) return res.status(400).json({ message: 'brandId and influencerId are required' });
+
+    // Message gates
+    if (customMessage && customMessage.trim()) {
+      const ok = await requireBrandFeature(brandId, 'custom_messaging', 'Custom messaging is not available on your plan.');
+      if (!ok.ok) return res.status(403).json({ message: ok.message });
+    }
+
+    if (messageTemplateId) {
+      // FREE plan allows only 1 basic template; higher plans unlimited (limit:0)
+      const takeTpl = await consumeBrandUnits(brandId, 'message_templates_limit', 0); // just check availability
+      if (!takeTpl.ok && takeTpl.code === 'NO_FEATURE') {
+        return res.status(403).json({ message: 'Message templates not available on your plan.' });
+      }
+      // Note: We don’t decrement here; templates_limit is a cap on count, not usage.
+      // Enforce template count in template management endpoints.
+    }
+
+    // Quota for sending invites
+    const take = await consumeBrandUnits(brandId, 'invites_quota', 1);
+    if (!take.ok) {
+      return res.status(403).json({ message: `Invite limit reached. Remaining: ${take.remaining}` });
+    }
+
+    // TODO: create Invite record, notify influencer, etc.
+    return res.status(200).json({ message: 'Invite sent.', invitesRemaining: take.remaining });
+  } catch (err) {
+    console.error('sendInvite error:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+exports.openDispute = async (req, res) => {
+  const { brandId, contractId, reason } = req.body || {};
+  if (!brandId || !contractId || !reason) {
+    return res.status(400).json({ message: 'brandId, contractId, reason required' });
+  }
+  const ok = await requireBrandFeature(brandId, 'support_dispute', 'Dispute assistance is not available on your plan.');
+  if (!ok.ok) return res.status(403).json({ message: ok.message });
+
+  // ...create dispute ticket
+  return res.status(201).json({ message: 'Dispute opened' });
+};
+
+exports.getBrandQuotas = async (req, res) => {
+  const { brandId } = req.query;
+  if (!brandId) return res.status(400).json({ message: 'brandId is required' });
+
+  const brand = await Brand.findOne({ brandId }, 'subscription').lean();
+  if (!brand?.subscription) return res.status(404).json({ message: 'Subscription not found' });
+
+  const byKey = new Map((brand.subscription.features || []).map(f => [f.key, f]));
+  const v = k => byKey.get(k) || {};
+  const publicCreditsShown = toNum(v('search_quota').value) + toNum(v('profile_view_quota').value);
+
+  return res.status(200).json({
+    public: {
+      searches: { limit: v('search_quota').limit ?? 0, used: v('search_quota').used ?? 0 },
+      profileViews: { limit: v('profile_view_quota').limit ?? 0, used: v('profile_view_quota').used ?? 0 },
+      invites: { limit: v('invites_quota').limit ?? 0, used: v('invites_quota').used ?? 0 },
+      liveCampaigns: { limit: v('live_campaigns_limit').limit ?? 0, used: v('live_campaigns_limit').used ?? 0 },
+      publicCreditsShown, // per your doc
+    },
+    internal: {
+      modashCreditsUsed: brand.subscription.internalCredits?.used ?? 0,
+      resetsAt: brand.subscription.internalCredits?.resetsAt ?? null,
+    }
+  });
 };

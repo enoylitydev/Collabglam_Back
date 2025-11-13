@@ -20,8 +20,8 @@ const { createAndEmit } = require('../utils/notifier');
 //  Multer setup (memory) + MIME filters
 // ===============================
 const storage = multer.memoryStorage();
-const IMAGE_MIMES = new Set(['image/png','image/jpeg','image/jpg','image/webp','image/gif','image/svg+xml']);
-const DOC_MIMES   = new Set([
+const IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif', 'image/svg+xml']);
+const DOC_MIMES = new Set([
   'application/pdf',
   'application/msword',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -457,7 +457,7 @@ exports.updateCampaign = (req, res) => {
         const { startDate, endDate } = parsedTL;
         const timelineData = {};
         if (startDate) { const sd = new Date(startDate); if (!isNaN(sd)) timelineData.startDate = sd; }
-        if (endDate)   { const ed = new Date(endDate);   if (!isNaN(ed)) timelineData.endDate = ed; }
+        if (endDate) { const ed = new Date(endDate); if (!isNaN(ed)) timelineData.endDate = ed; }
         updates.timeline = timelineData;
         updates.isActive = computeIsActive(timelineData);
       }
@@ -684,8 +684,22 @@ exports.getCampaignsByInfluencer = async (req, res) => {
       Campaign.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limNum).lean()
     ]);
 
+    let canApply = true;
+    const applyF = (inf.subscription?.features || []).find(f => f.key === 'apply_to_campaigns_quota');
+    if (applyF) {
+      const fReset = await ensureMonthlyWindow(influencerId, 'apply_to_campaigns_quota', applyF);
+      const lim = readLimit(fReset);
+      if (lim > 0 && Number(fReset.used || 0) >= lim) canApply = false;
+    }
+    const capF = (inf.subscription?.features || []).find(f => f.key === 'active_collaborations_limit');
+    const cap = readLimit(capF);
+    if (cap > 0) {
+      const activeNow = await countActiveCollaborationsForInfluencer(influencerId);
+      if (activeNow >= cap) canApply = false;
+    }
+
     const totalPages = Math.ceil(total / limNum);
-    const annotated = campaigns.map((c) => ({ ...c, hasApplied: 0, hasApproved: 0, isContracted: 0, contractId: null, isAccepted: 0 }));
+    const annotated = campaigns.map((c) => ({ ...c, hasApplied: 0, hasApproved: 0, isContracted: 0, contractId: null, isAccepted: 0, canApply }));
 
     return res.json({ meta: { total, page: pageNum, limit: limNum, totalPages }, campaigns: annotated });
   } catch (err) {
@@ -1091,7 +1105,7 @@ exports.getRejectedCampaignsByInfluencer = async (req, res) => {
     const candFilter = {
       influencerId: String(influencerId),
       $or: [{ status: 'rejected' }, { isRejected: 1 }],
-      $and: [{ $or: [ { supersededBy: { $exists: false } }, { supersededBy: null }, { supersededBy: '' } ] }]
+      $and: [{ $or: [{ supersededBy: { $exists: false } }, { supersededBy: null }, { supersededBy: '' }] }]
     };
 
     const candidates = await Contract.find(candFilter, 'contractId campaignId feeAmount createdAt audit supersededBy').lean();
