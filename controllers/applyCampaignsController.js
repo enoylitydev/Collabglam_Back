@@ -7,9 +7,25 @@ const Contract = require('../models/contract');
 const Category = require('../models/categories');
 const { createAndEmit } = require('../utils/notifier');
 
+const ACTIVE_CONTRACT_STATUSES = [
+  'draft', 'sent', 'viewed', 'negotiation', 'finalize', 'signing', 'locked', 'rejected'
+];
+
 // Optional socket.io emitters if app has them set
 function getEmitter(req, key) {
-  try { return req.app?.get?.(key) || (() => {}); } catch { return () => {}; }
+  try { return req.app?.get?.(key) || (() => { }); } catch { return () => { }; }
+}
+
+async function countActiveCollaborationsForInfluencer(influencerId) {
+  return Contract.countDocuments({
+    influencerId: String(influencerId),
+    isRejected: { $ne: 1 },
+    $or: [
+      { isAssigned: 1 },
+      { isAccepted: 1 },
+      { status: { $in: ACTIVE_CONTRACT_STATUSES } }
+    ]
+  });
 }
 
 async function buildSubToParentNameMap() {
@@ -21,6 +37,39 @@ async function buildSubToParentNameMap() {
     }
   }
   return map;
+}
+
+async function ensureMonthlyWindow(influencerId, featureKey, featureObj) {
+  const isMonthly = /per\s*month/i.test(String(featureObj?.note || '')) || featureObj?.resetsEvery === 'monthly';
+  if (!isMonthly) return featureObj;
+
+  const now = new Date();
+  const resetsAt = featureObj?.resetsAt ? new Date(featureObj.resetsAt) : null;
+
+  // If never set, or already past, roll a new monthly window and zero usage
+  if (!resetsAt || now > resetsAt) {
+    const next = new Date(now);
+    next.setUTCMonth(next.getUTCMonth() + 1);
+
+    await Influencer.updateOne(
+      { influencerId, 'subscription.features.key': featureKey },
+      {
+        $set: {
+          'subscription.features.$.used': 0,
+          'subscription.features.$.resetsAt': next
+        }
+      }
+    );
+
+    return { ...featureObj, used: 0, resetsAt: next };
+  }
+  return featureObj;
+}
+
+function readLimit(f) {
+  const raw = f?.limit ?? f?.value ?? 0;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : 0;
 }
 
 /**
@@ -44,16 +93,30 @@ exports.applyToCampaign = async (req, res) => {
     const inf = await Influencer.findOne({ influencerId }).lean();
     if (!inf) return res.status(404).json({ message: 'Influencer not found' });
 
-    const applyFeature = (inf.subscription?.features || []).find(f => f.key === 'apply_to_campaigns_quota');
+    let applyFeature = (inf.subscription?.features || []).find(f => f.key === 'apply_to_campaigns_quota');
     if (!applyFeature) {
       return res.status(403).json({
         message: 'Your subscription plan does not permit campaign applications. Please upgrade.'
       });
     }
-    if (applyFeature.limit > 0 && applyFeature.used >= applyFeature.limit) {
+    applyFeature = await ensureMonthlyWindow(influencerId, 'apply_to_campaigns_quota', applyFeature);
+    const applyLimit = readLimit(applyFeature); // 0 => unlimited
+    if (applyLimit > 0 && Number(applyFeature.used || 0) >= applyLimit) {
       return res.status(403).json({
-        message: `Application limit reached (${applyFeature.limit}). Please upgrade your plan to apply more.`
+        message: `Application limit reached (${applyLimit}). Please upgrade your plan to apply more.`
       });
+    }
+
+    // (Suggested) Also gate on active collaborations cap before letting them apply
+    const activeCapFeature = (inf.subscription?.features || []).find(f => f.key === 'active_collaborations_limit');
+    const activeCap = readLimit(activeCapFeature);
+    if (activeCap > 0) {
+      const activeNow = await countActiveCollaborationsForInfluencer(influencerId);
+      if (activeNow >= activeCap) {
+        return res.status(403).json({
+          message: `You’ve reached your active collaborations limit (${activeCap}). Finish/close one or upgrade your plan.`
+        });
+      }
     }
 
     // 1) Create/update application (dedupe)
@@ -154,14 +217,14 @@ exports.applyToCampaign = async (req, res) => {
       console.warn('createAndEmit failed (influencer apply.submitted.self):', e?.message || e);
     }
 
+    const newUsed = Number(applyFeature.used || 0) + 1;
     return res.status(200).json({
       message: 'Application recorded',
       campaignId,
       applicantCount,
-      applicationsRemaining:
-        (applyFeature.limit > 0)
-          ? Math.max(0, applyFeature.limit - (Number(applyFeature.used || 0) + 1))
-          : applyFeature.limit,
+      applicationsRemaining: (applyLimit > 0)
+        ? Math.max(0, applyLimit - newUsed)
+        : 0,
       hasApplied: 1
     });
   } catch (err) {
@@ -252,10 +315,10 @@ exports.getListByCampaign = async (req, res) => {
       if (handle && !handle.startsWith('@')) handle = '@' + handle;
 
       const c = contractByInf.get(String(inf.influencerId));
-      const isAssigned   = approvedId === inf.influencerId ? 1 : 0;
+      const isAssigned = approvedId === inf.influencerId ? 1 : 0;
       const isContracted = c ? 1 : 0;
-      const isAccepted   = c?.isAccepted === 1 ? 1 : 0;
-      const isRejected   = c?.isRejected === 1 ? 1 : 0;
+      const isAccepted = c?.isAccepted === 1 ? 1 : 0;
+      const isRejected = c?.isRejected === 1 ? 1 : 0;
 
       return {
         influencerId: inf.influencerId,
@@ -297,9 +360,9 @@ exports.getListByCampaign = async (req, res) => {
     }
 
     const pageNum = Math.max(1, parseInt(page, 10));
-    const limNum  = Math.max(1, parseInt(limit, 10));
-    const start   = (pageNum - 1) * limNum;
-    const end     = start + limNum;
+    const limNum = Math.max(1, parseInt(limit, 10));
+    const start = (pageNum - 1) * limNum;
+    const end = start + limNum;
 
     const total = condensed.length;
     const paged = condensed.slice(start, end);
@@ -331,6 +394,19 @@ exports.approveInfluencer = async (req, res) => {
   }
 
   try {
+    const inf = await Influencer.findOne({ influencerId }).lean();
+    if (!inf) return res.status(404).json({ message: 'Influencer not found' });
+    const activeCapFeature = (inf.subscription?.features || []).find(f => f.key === 'active_collaborations_limit');
+    const activeCap = readLimit(activeCapFeature);
+    if (activeCap > 0) {
+      const activeNow = await countActiveCollaborationsForInfluencer(influencerId);
+      if (activeNow >= activeCap) {
+        return res.status(403).json({
+          message: `Cannot approve — influencer already has ${activeNow}/${activeCap} active collaborations.`
+        });
+      }
+    }
+
     const record = await ApplyCampaign.findOne({ campaignId });
     if (!record) {
       return res.status(404).json({ message: 'No applications found for this campaign' });

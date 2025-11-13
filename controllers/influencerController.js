@@ -810,11 +810,20 @@ exports.login = async (req, res) => {
       { expiresIn: '100d' }
     );
 
+    // 🔹 NEW: prepare subscription info for response
+    const subscription = influencer.subscription || {};
+
     return res.status(200).json({
       message: 'Login successful',
       influencerId: influencer.influencerId,
-      categoryId: influencer.categoryId,
-      token
+      categoryId: influencer.categoryId, // keep whatever you already use
+      token,
+      // convenience top-level field
+      subscriptionPlanName: subscription.planName,
+      // full subscription object (planId, planName, startedAt, expiresAt, features, etc.)
+      subscription,
+      // if you want explicit flag in response too:
+      subscriptionExpired: influencer.subscriptionExpired
     });
   } catch (error) {
     console.error('Error in influencer.login:', error);
