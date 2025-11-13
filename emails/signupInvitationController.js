@@ -12,7 +12,7 @@ const transporter = nodemailer.createTransport({
 });
 
 /**
- * POST /invitation/invitation
+ * POST /emails/invitation
  * body: { 
  *   email: string, 
  *   influencerName?: string, 
