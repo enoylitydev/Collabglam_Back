@@ -20,6 +20,7 @@ const Campaign = require('../models/campaign');
 // These two are referenced later in updateProfile; include them if you use them
 const Audience = require('../models/audience');            // ensure this path exists
 const AudienceRange = require('../models/audienceRange');  // ensure this path exists
+const Modash = require('../models/modash');
 
 // Utils
 const subscriptionHelper = require('../utils/subscriptionHelper');
@@ -566,21 +567,30 @@ exports.registerInfluencer = async (req, res) => {
 
     const normalizedEmail = String(email || '').trim().toLowerCase();
     if (!normalizedEmail) return res.status(400).json({ message: 'Email is required' });
-    if (!password || String(password).length < 8) return res.status(400).json({ message: 'Password must be at least 8 characters' });
+    if (!password || String(password).length < 8) {
+      return res.status(400).json({ message: 'Password must be at least 8 characters' });
+    }
     if (!name || !countryId ) {
       return res.status(400).json({ message: 'Missing required fields (name, countryId)' });
     }
 
-    const verifiedRec = await VerifyEmail.findOne({ email: normalizedEmail, role: 'Influencer', verified: true });
+    const verifiedRec = await VerifyEmail.findOne({
+      email: normalizedEmail,
+      role: 'Influencer',
+      verified: true
+    });
     if (!verifiedRec) return res.status(400).json({ message: 'Email not verified' });
 
     const emailRegexCI = new RegExp(`^${escapeRegExp(normalizedEmail)}$`, 'i');
     const already = await Influencer.findOne({ email: emailRegexCI }, '_id');
     if (already) return res.status(400).json({ message: 'Already registered' });
 
-    const [countryDoc] = await Promise.all([ Country.findById(countryId)]);
+    const [countryDoc] = await Promise.all([
+      Country.findById(countryId)
+    ]);
     if (!countryDoc) return res.status(400).json({ message: 'Invalid countryId' });
 
+    // 🔹 1) Build Modash profile payloads from incoming data
     const profiles = [];
     if (Array.isArray(platforms)) {
       for (const item of platforms) {
@@ -596,36 +606,52 @@ exports.registerInfluencer = async (req, res) => {
       if (tt) profiles.push(tt);
       if (ig) profiles.push(ig);
     }
-    if (!profiles.length) return res.status(400).json({ message: 'No valid platform payloads provided' });
 
+    if (!profiles.length) {
+      return res.status(400).json({ message: 'No valid platform payloads provided' });
+    }
+
+    // 🔹 2) Normalize categories for each profile (based on Modash providerRaw)
     const idx = await buildCategoryIndex();
     for (const prof of profiles) {
       const rawCats = extractRawCategoriesFromProviderRaw(prof.providerRaw);
       prof.categories = normalizeCategories(rawCats, idx);
     }
 
+    // 🔹 3) Resolve languages into embedded refs
     let languageDocs = [];
     if (Array.isArray(selectedLanguages) && selectedLanguages.length) {
-      const langs = await Language.find({ _id: { $in: selectedLanguages } }, 'code name').lean();
+      const langs = await Language.find(
+        { _id: { $in: selectedLanguages } },
+        'code name'
+      ).lean();
+
       const byId = new Map(langs.map(l => [String(l._id), l]));
       languageDocs = selectedLanguages
         .map(id => byId.get(String(id)))
         .filter(Boolean)
-        .map(l => ({ languageId: l._id, code: l.code, name: l.name }));
+        .map(l => ({
+          languageId: l._id,
+          code: l.code,
+          name: l.name
+        }));
     }
 
+    // 🔹 4) Determine primaryPlatform based on available Modash profiles
     const validProviders = new Set(profiles.map(p => p.provider));
     let primaryPlatform = profiles[0]?.provider || null;
-    if (preferredProvider && validProviders.has(preferredProvider)) primaryPlatform = preferredProvider;
+    if (preferredProvider && validProviders.has(preferredProvider)) {
+      primaryPlatform = preferredProvider;
+    }
 
+    // 🔹 5) Create core Influencer document (NO socialProfiles HERE anymore)
     const inf = new Influencer({
       name,
       email: normalizedEmail,
       password,
-      phone:phone || '',
+      phone: phone || '',
 
       primaryPlatform,
-      socialProfiles: profiles,
 
       countryId,
       country: countryDoc.countryName,
@@ -638,6 +664,7 @@ exports.registerInfluencer = async (req, res) => {
       otpVerified: true
     });
 
+    // 🔹 6) Attach free subscription plan if available
     const freePlan = await subscriptionHelper.getFreePlan('Influencer');
     if (freePlan) {
       inf.subscription = {
@@ -645,19 +672,51 @@ exports.registerInfluencer = async (req, res) => {
         planName: freePlan.name,
         startedAt: new Date(),
         expiresAt: subscriptionHelper.computeExpiry(freePlan),
-        features: freePlan.features.map(f => ({ key: f.key, limit: typeof f.value === 'number' ? f.value : 0, used: 0 }))
+        features: freePlan.features.map(f => ({
+          key: f.key,
+          limit: typeof f.value === 'number' ? f.value : 0,
+          used: 0
+        }))
       };
       inf.subscriptionExpired = false;
     }
 
+    // Save influencer first
     await inf.save();
+
+    // 🔹 7) Persist Modash profile data in separate Modash collection
+    try {
+      await Promise.all(
+        profiles.map(prof =>
+          Modash.findOneAndUpdate(
+            { influencer: inf._id, provider: prof.provider },
+            {
+              influencer: inf._id,
+              influencerId: inf.influencerId,
+              ...prof
+            },
+            {
+              upsert: true,
+              new: true,
+              setDefaultsOnInsert: true
+            }
+          )
+        )
+      );
+    } catch (modashErr) {
+      // Don't block registration if Modash sync fails
+      console.error('Error saving Modash profiles for influencer:', modashErr);
+    }
+
+    // Clean up verification record
     await VerifyEmail.deleteOne({ email: normalizedEmail, role: 'Influencer' });
 
+    // 🔹 8) Response: keep `socialProfilesCount` for backward compatibility
     return res.status(201).json({
       message: 'Influencer registered successfully',
       influencerId: inf.influencerId,
       primaryPlatform: inf.primaryPlatform,
-      socialProfilesCount: inf.socialProfiles.length,
+      socialProfilesCount: profiles.length,
       subscription: inf.subscription
     });
   } catch (err) {
