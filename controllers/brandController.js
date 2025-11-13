@@ -39,6 +39,9 @@ const normalizeInsta = (h) => {
   return s || undefined;
 };
 
+const BASE_API_URL = process.env.INTERNAL_API_URL || 'http://localhost:5000';
+const WELCOME_EMAIL_API_URL = `${BASE_API_URL}/emails/send-welcome`;
+
 // ---- env / mailer ----
 const SMTP_HOST = process.env.SMTP_HOST;
 const SMTP_PORT = parseInt(process.env.SMTP_PORT || '587', 10);
@@ -467,6 +470,31 @@ exports.register = async (req, res) => {
 
     // Clean up verification record
     await VerifyEmail.deleteOne({ email: normalizedEmail, role: 'Brand' });
+
+    // --- NEW: Trigger Welcome Email API Call (Non-blocking) ---
+    const emailPayload = {
+      email: normalizedEmail,
+      name: name,
+      userType: 'brand',
+    };
+
+    // IMPORTANT: Ensure 'fetch' is available and WELCOME_EMAIL_API_URL is the correct, full URL
+    fetch(WELCOME_EMAIL_API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(emailPayload),
+    })
+      .then(response => {
+        // Log a warning if the email API request failed (status != 2xx)
+        if (!response.ok) {
+          console.warn(`Welcome email API responded with non-2xx status: ${response.status} for ${normalizedEmail}`);
+        }
+      })
+      .catch(error => {
+        // Log the error but do not throw, as registration is already complete.
+        console.error(`Failed to trigger welcome email API for ${normalizedEmail}:`, error.message);
+      });
+    // ------------------------------------------------------------
 
     return res.status(201).json({
       message: 'Brand registered successfully',
