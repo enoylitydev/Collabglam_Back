@@ -61,21 +61,21 @@ const transporter = nodemailer.createTransport({
 
 // ---------- Pretty HTML OTP templates (orange/yellow accents) ----------
 
-const esc = (s = '') => String(s).replace(/[&<>"]/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+const esc = (s = '') => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const PREHEADER = (t) => `<div style="display:none;opacity:0;visibility:hidden;overflow:hidden;height:0;width:0;mso-hide:all;">${esc(t)}</div>`;
 
 // Email-safe design tokens (inline CSS)
-const WRAP  = 'max-width:640px;margin:0 auto;padding:0;background:#f7fafc;color:#0f172a;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;';
+const WRAP = 'max-width:640px;margin:0 auto;padding:0;background:#f7fafc;color:#0f172a;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;';
 const SHELL = 'padding:24px;';
-const CARD  = 'border-radius:16px;background:#ffffff;border:1px solid #e5e7eb;overflow:hidden;box-shadow:0 8px 20px rgba(17,24,39,0.06);';
-const BRAND_BAR  = 'padding:18px 20px;background:#ffffff;color:#111827;border-bottom:1px solid #FFE8B7;';
+const CARD = 'border-radius:16px;background:#ffffff;border:1px solid #e5e7eb;overflow:hidden;box-shadow:0 8px 20px rgba(17,24,39,0.06);';
+const BRAND_BAR = 'padding:18px 20px;background:#ffffff;color:#111827;border-bottom:1px solid #FFE8B7;';
 const BRAND_NAME = 'font-weight:900;font-size:15px;letter-spacing:.2px;';
 const ACCENT_BAR = 'height:4px;background:linear-gradient(90deg,#FF6A00 0%, #FF8A00 30%, #FF9A00 60%, #FFBF00 100%);';
-const HDR   = 'padding:20px 24px 6px 24px;font-weight:800;font-size:20px;color:#111827;';
-const SUBHDR= 'padding:0 24px 10px 24px;color:#374151;font-size:13px;';
-const BODY  = 'padding:0 24px 24px 24px;';
-const FOOT  = 'padding:14px 24px;color:#6b7280;font-size:12px;border-top:1px solid #f1f5f9;background:#fcfcfd;';
-const BTN   = 'display:inline-block;background:#111827;color:#ffffff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800;';
+const HDR = 'padding:20px 24px 6px 24px;font-weight:800;font-size:20px;color:#111827;';
+const SUBHDR = 'padding:0 24px 10px 24px;color:#374151;font-size:13px;';
+const BODY = 'padding:0 24px 24px 24px;';
+const FOOT = 'padding:14px 24px;color:#6b7280;font-size:12px;border-top:1px solid #f1f5f9;background:#fcfcfd;';
+const BTN = 'display:inline-block;background:#111827;color:#ffffff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800;';
 const SMALL = 'color:#6b7280;font-size:12px;';
 
 const CODE_WRAPPER = 'margin-top:12px;margin-bottom:6px;';
@@ -104,7 +104,7 @@ function otpHtmlTemplate({
 }) {
   const hasCta = Boolean(ctaHref && ctaLabel);
   return `
-  ${PREHEADER(`${preheader}: ${code}`)}
+ ${PREHEADER(preheader)}
   <div style="${WRAP}">
     <div style="${SHELL}">
       <div style="${CARD}">
@@ -459,12 +459,23 @@ exports.register = async (req, res) => {
         expiresAt: expire,
         features: (freePlan.features || []).map((f) => ({
           key: f.key,
-          limit: typeof f.value === 'number' ? f.value : 0,
+          value: f.value,
+          limit: typeof f.value === 'number' ? Number(f.value) : 0,
           used: 0,
+          note: f.note,
+          resetsEvery: f.resetsEvery,
+          resetsAt: null,
         })),
+        internalCredits: {
+          used: 0,
+          resetsAt: null,
+        },
       };
+
       brand.subscriptionExpired = false;
     }
+
+
 
     await brand.save();
 
@@ -916,70 +927,46 @@ exports.requestEmailUpdate = async (req, res) => {
     });
     if (taken) return res.status(409).json({ message: 'Email already in use' });
 
-    // Generate OTPs and expiry
-    const oldOtp = Math.floor(100000 + Math.random() * 900000).toString();
-    const newOtp = Math.floor(100000 + Math.random() * 900000).toString();
+    // 🔐 Generate ONE OTP and expiry (for NEW email only)
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
-
-    // OLD email → upsert VerifyEmail for role 'Brand'
-    await VerifyEmail.findOneAndUpdate(
-      { email: oldEmail, role: 'Brand' },
-      {
-        $setOnInsert: { email: oldEmail, role: 'Brand', verified: true, verifiedAt: new Date() },
-        $set: { otpCode: oldOtp, otpExpiresAt: expiresAt },
-        $inc: { attempts: 1 },
-      },
-      { new: true, upsert: true, setDefaultsOnInsert: true }
-    );
 
     // NEW email → upsert VerifyEmail for role 'Brand'
     await VerifyEmail.findOneAndUpdate(
       { email: nextEmail, role: 'Brand' },
       {
         $setOnInsert: { email: nextEmail, role: 'Brand' },
-        $set: { verified: false, verifiedAt: null, otpCode: newOtp, otpExpiresAt: expiresAt },
+        $set: { verified: false, verifiedAt: null, otpCode: otp, otpExpiresAt: expiresAt },
         $inc: { attempts: 1 },
       },
       { new: true, upsert: true, setDefaultsOnInsert: true }
     );
 
-    // ✉️ Send both OTPs (HTML)
-    const oldSubject = 'Confirm email change (old email verification)';
-    const oldHtml = otpHtmlTemplate({
-      title: 'Confirm email change',
-      subtitle: 'Use this code to confirm changing away from this email.',
-      code: oldOtp,
-      minutes: 10,
-      preheader: 'Confirm email change (old email)',
-    });
-    const oldText = otpTextFallback({ code: oldOtp, minutes: 10, title: 'Confirm email change' });
-
-    const newSubject = 'Confirm email change (new email verification)';
-    const newHtml = otpHtmlTemplate({
+    // ✉️ Send OTP only to NEW email
+    const subject = 'Confirm email change';
+    const html = otpHtmlTemplate({
       title: 'Verify your new email',
       subtitle: 'Use this code to confirm your new email address.',
-      code: newOtp,
+      code: otp,
       minutes: 10,
       preheader: 'Confirm email change (new email)',
     });
-    const newText = otpTextFallback({ code: newOtp, minutes: 10, title: 'Verify your new email' });
+    const text = otpTextFallback({ code: otp, minutes: 10, title: 'Verify your new email' });
 
-    await Promise.all([
-      sendMail({ to: oldEmail, subject: oldSubject, html: oldHtml, text: oldText }),
-      sendMail({ to: nextEmail, subject: newSubject, html: newHtml, text: newText }),
-    ]);
+    await sendMail({ to: nextEmail, subject, html, text });
 
-    return res.status(200).json({ message: 'OTPs sent to old and new emails' });
+    return res.status(200).json({ message: 'OTP sent to new email' });
   } catch (err) {
     console.error('Error in requestEmailUpdate:', err);
     return res.status(500).json({ message: 'Internal server error' });
   }
 };
 
+
 // ---------- 14) Verify Email Update (Brand) ----------
 exports.verifyEmailUpdate = async (req, res) => {
   try {
-    const { brandId, newEmail, oldOtp, newOtp, role = 'Brand' } = req.body || {};
+    const { brandId, newEmail, otp, role = 'Brand' } = req.body || {};
 
     if (!brandId) {
       return res.status(400).json({ message: 'brandId is required' });
@@ -994,8 +981,8 @@ exports.verifyEmailUpdate = async (req, res) => {
     if (!newEmail || !emailRegex.test(String(newEmail).trim())) {
       return res.status(400).json({ message: 'Valid newEmail is required' });
     }
-    if (!oldOtp || !newOtp) {
-      return res.status(400).json({ message: 'Both oldOtp and newOtp are required' });
+    if (!otp) {
+      return res.status(400).json({ message: 'otp is required' });
     }
 
     const brand = await Brand.findOne({ brandId });
@@ -1004,53 +991,39 @@ exports.verifyEmailUpdate = async (req, res) => {
     const oldEmail = toNormEmail(brand.email);
     const nextEmail = toNormEmail(newEmail);
 
-    // 1) Check OTP for old email (role = Brand)
-    const oldDoc = await VerifyEmail.findOne({
-      email: oldEmail,
-      role: 'Brand',
-      otpCode: String(oldOtp).trim(),
-      otpExpiresAt: { $gt: new Date() },
-    });
-    if (!oldDoc) {
-      return res.status(400).json({ message: 'Invalid or expired OTP for old email' });
-    }
-
-    // 2) Check OTP for new email (role = Brand)
-    const newDoc = await VerifyEmail.findOne({
+    // Check OTP for new email (role = Brand)
+    const doc = await VerifyEmail.findOne({
       email: nextEmail,
       role: 'Brand',
-      otpCode: String(newOtp).trim(),
+      otpCode: String(otp).trim(),
       otpExpiresAt: { $gt: new Date() },
     });
-    if (!newDoc) {
+    if (!doc) {
       return res.status(400).json({ message: 'Invalid or expired OTP for new email' });
     }
 
-    // 3) Make sure no other brand owns that new email
+    // Make sure no other brand owns that new email
     const taken = await Brand.findOne({
       email: exactEmailRegex(nextEmail),
       brandId: { $ne: brandId },
     });
     if (taken) return res.status(409).json({ message: 'Email already in use' });
 
-    // 4) Update Brand email
+    // Update Brand email
     brand.email = nextEmail;
     await brand.save();
 
-    // 5) Flip verification flags and clear OTPs (scoped to role='Brand')
-    oldDoc.verified = false;
-    oldDoc.verifiedAt = null;
-    oldDoc.otpCode = undefined;
-    oldDoc.otpExpiresAt = undefined;
-    await oldDoc.save();
+    // Mark new email as verified & clear OTP
+    doc.verified = true;
+    doc.verifiedAt = new Date();
+    doc.otpCode = undefined;
+    doc.otpExpiresAt = undefined;
+    await doc.save();
 
-    newDoc.verified = true;
-    newDoc.verifiedAt = new Date();
-    newDoc.otpCode = undefined;
-    newDoc.otpExpiresAt = undefined;
-    await newDoc.save();
+    // Optional: clean up old email VerifyEmail record
+    await VerifyEmail.deleteOne({ email: oldEmail, role: 'Brand' }).catch(() => { });
 
-    // 6) Fresh JWT reflecting new email
+    // Fresh JWT reflecting new email
     const token = jwt.sign(
       { brandId: brand.brandId, email: brand.email },
       JWT_SECRET,
@@ -1203,8 +1176,15 @@ exports.getBrandQuotas = async (req, res) => {
   if (!brand?.subscription) return res.status(404).json({ message: 'Subscription not found' });
 
   const byKey = new Map((brand.subscription.features || []).map(f => [f.key, f]));
-  const v = k => byKey.get(k) || {};
-  const publicCreditsShown = toNum(v('search_quota').value) + toNum(v('profile_view_quota').value);
+  const v = (k) => byKey.get(k) || {};
+  const toNum = (x) => {
+    const n = Number(x);
+    return Number.isFinite(n) ? n : 0;
+  };
+
+  const publicCreditsShown =
+    toNum(v('search_quota').limit ?? v('search_quota').value) +
+    toNum(v('profile_view_quota').limit ?? v('profile_view_quota').value);
 
   return res.status(200).json({
     public: {

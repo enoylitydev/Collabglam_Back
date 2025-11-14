@@ -8,22 +8,6 @@ const emailRegex = /^[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,6}$/;
 const phoneRegex = /^[0-9]{10}$/;
 const UUIDv4Regex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-/* ----------------------- Category link sub-schema ------------------------ */
-/* Kept full for socialProfiles.categories */
-const categoryLinkSchema = new mongoose.Schema(
-  {
-    categoryId: { type: Number, required: true },
-    categoryName: { type: String, required: true, trim: true },
-    subcategoryId: {
-      type: String,
-      required: true,
-      match: [UUIDv4Regex, 'Invalid subcategoryId (must be UUID v4)']
-    },
-    subcategoryName: { type: String, required: true, trim: true }
-  },
-  { _id: false }
-);
-
 /* -------- NEW: Minimal sub-schema for onboarding.subcategories ---------- */
 const onboardingSubcategorySchema = new mongoose.Schema(
   {
@@ -118,8 +102,6 @@ const influencerSchema = new mongoose.Schema(
       enum: ['youtube', 'tiktok', 'instagram', 'other', null],
       default: null
     },
-
-    // ⛔️ REMOVED: socialProfiles (now stored in models/modash.js)
 
     countryId: {
       type: mongoose.Schema.Types.ObjectId,

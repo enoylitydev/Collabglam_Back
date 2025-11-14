@@ -72,7 +72,6 @@ function mapReportToModashDoc(normalized, platform, influencerDoc) {
 
     bio: normalized.bio,
 
-    // You don't currently normalize categories; you can derive them later from providerRaw if needed
     categories: normalized.categories || [],
 
     hashtags: normalized.hashtags || [],
@@ -96,7 +95,7 @@ function mapReportToModashDoc(normalized, platform, influencerDoc) {
   };
 }
 
-async function upsertModashProfileFromReport({ platform, reportJSON, influencerId }) {
+async function upsertModashProfileFromReport({ platform, reportJSON, influencerId, fetchedAt }) {
   if (!reportJSON) return null;
 
   const normalized = normalizeReportLegacy(reportJSON);
@@ -116,8 +115,17 @@ async function upsertModashProfileFromReport({ platform, reportJSON, influencerI
     }
   }
 
+  const now = fetchedAt || new Date();
+
   // Build base doc data from normalized report
-  const docData = mapReportToModashDoc(normalized, platform, influencerDoc);
+  const docData = Object.assign(
+    {},
+    mapReportToModashDoc(normalized, platform, influencerDoc),
+    {
+      providerRaw: reportJSON,
+      lastFetchedAt: now,
+    }
+  );
 
   // Build an upsert query:
   // - If we have a linked Influencer → key by influencer+provider
@@ -143,10 +151,8 @@ async function findCachedReport({ platform, userId, influencerId }) {
   const q = { provider: platform };
 
   if (influencerId) {
-    // Preferred: match by internal influencerId if we have it
     q.influencerId = influencerId;
   } else if (userId) {
-    // Fallback: match by Modash userId
     q.userId = userId;
   } else {
     return null;
@@ -155,7 +161,10 @@ async function findCachedReport({ platform, userId, influencerId }) {
   const doc = await ModashProfile.findOne(q).lean();
   if (!doc || !doc.providerRaw) return null;
 
-  return doc.providerRaw;
+  return {
+    providerRaw: doc.providerRaw,
+    lastFetchedAt: doc.lastFetchedAt || doc.updatedAt || doc.createdAt || null,
+  };
 }
 
 // Build one header style
@@ -225,7 +234,10 @@ async function modashRequest({ method, path, query, body }) {
       }
 
       if (!res.ok) {
-        const err = new Error(json && (json.message || json.error) || `Modash ${res.status} ${res.statusText}`);
+        const err = new Error(
+          (json && (json.message || json.error)) ||
+            `Modash ${res.status} ${res.statusText}`
+        );
         err.status = res.status;
         err.response = json || undefined;
 
@@ -312,34 +324,41 @@ function normalizeSearchItem(item, platform) {
 
   const userId = String(
     (item && item.userId) ||
-    (src && src.userId) ||
-    (src && src.id) ||
-    (src && src.channelId) ||
-    (src && src.profileId) ||
-    ''
-  ).trim() || undefined;
+      (src && src.userId) ||
+      (src && src.id) ||
+      (src && src.channelId) ||
+      (src && src.profileId) ||
+      ''
+  )
+    .trim() || undefined;
 
   return {
     userId,
     username,
     fullname:
       (src && (src.fullName || src.fullname || src.display_name || src.title || src.name)) || '',
-    followers: toNum(src && (src.followers || src.followerCount || (src.stats && src.stats.followers))) || 0,
+    followers:
+      toNum(src && (src.followers || src.followerCount || (src.stats && src.stats.followers))) || 0,
     engagementRate:
       toNum(src && (src.engagementRate || (src.stats && src.stats.engagementRate))) || 0,
     engagements: toNum(
       src &&
-      (src.engagements ||
-        (src.stats && (src.stats.avgEngagements || src.stats.avgLikes)))
+        (src.engagements ||
+          (src.stats && (src.stats.avgEngagements || src.stats.avgLikes)))
     ),
     averageViews: toNum(
       src &&
-      (src.averageViews ||
-        (src.stats && src.stats.avgViews) ||
-        src.avgViews)
+        (src.averageViews ||
+          (src.stats && src.stats.avgViews) ||
+          src.avgViews)
     ),
     picture:
-      (src && (src.picture || src.avatar || src.profilePicUrl || src.thumbnail || src.channelThumbnailUrl)) ||
+      (src &&
+        (src.picture ||
+          src.avatar ||
+          src.profilePicUrl ||
+          src.thumbnail ||
+          src.channelThumbnailUrl)) ||
       undefined,
     url,
     isVerified: Boolean(src && (src.isVerified || src.verified)),
@@ -352,8 +371,7 @@ function normalizeSearchItem(item, platform) {
 function betterSearchResult(a, b) {
   if (a.isVerified !== b.isVerified) return a.isVerified ? a : b;
   if (!!a.username !== !!b.username) return a.username ? a : b; // prefer item with a username
-  if ((a.followers || 0) !== (b.followers || 0))
-    return (a.followers || 0) > (b.followers || 0) ? a : b;
+  if ((a.followers || 0) !== (b.followers || 0)) return (a.followers || 0) > (b.followers || 0) ? a : b;
   if ((a.engagementRate || 0) !== (b.engagementRate || 0))
     return (a.engagementRate || 0) > (b.engagementRate || 0) ? a : b;
   if ((a.engagements || 0) !== (b.engagements || 0))
@@ -390,17 +408,11 @@ function deepClone(x) {
 
 /**
  * Sanitize YouTube body so the API won't silently return empty results.
- * - ensure sort.field
- * - clamp/strip lastposted (<30 → 30)
- * - drop filterOperations (can conflict with sorting)
- * - drop audience.ageRange if audience.age also present
- * - coerce influencer.age min/max to allowed set (else remove)
  */
 function sanitizeYouTubeBody(original, opts) {
   const b = deepClone(original || {});
   b.page = b.page != null ? b.page : 0;
 
-  // Ensure sort
   if (!b.sort || !b.sort.field) {
     b.sort = Object.assign({}, b.sort || {}, DEFAULT_YT_SORT);
   }
@@ -436,14 +448,13 @@ function sanitizeYouTubeBody(original, opts) {
     delete infl.filterOperations;
   }
 
-  // Optional fallback relaxation: remove the toughest filters if first call returns 0
   if (opts && opts.relax) {
-    delete b.filter.audience; // drop audience entirely
+    delete b.filter.audience;
     delete infl.followersGrowthRate;
     delete infl.views;
     delete infl.engagements;
     if (typeof infl.lastposted === 'number') delete infl.lastposted;
-    b.sort = { field: 'followers', direction: 'desc' }; // stable default
+    b.sort = { field: 'followers', direction: 'desc' };
   }
 
   return b;
@@ -451,7 +462,6 @@ function sanitizeYouTubeBody(original, opts) {
 
 function buildPlatformBody(platform, body, opts) {
   if (platform !== 'youtube') {
-    // Non-YT: just add page default without mutation
     const copy = deepClone(body || {});
     copy.page = copy.page != null ? copy.page : 0;
     return copy;
@@ -468,11 +478,9 @@ function scoreForQuery(u, qLower) {
   const full = String(u.fullname || '').toLowerCase();
   const url = String(u.url || '').toLowerCase();
 
-  // Strict handle comparisons first
   if (uname === qLower) return 100;
   if (url.indexOf(`/@${qLower}`) !== -1) return 95;
 
-  // Name / handle quality tiers
   if (full === qLower) return 90;
   if (uname.startsWith(qLower)) return 70;
   if (full.startsWith(qLower)) return 60;
@@ -498,9 +506,7 @@ function dedupeByBest(items) {
 
 /**
  * FRONTEND USERS CONTROLLER
- * Mirrors Next `/api/modash/users` route:
- *  - GET
- *  - query params: q (comma-separated handles), platforms, strict, match
+ * Mirrors Next `/api/modash/users` route.
  */
 async function frontendUsers(req, res) {
   try {
@@ -550,8 +556,8 @@ async function frontendUsers(req, res) {
               p === 'instagram'
                 ? `https://instagram.com/${username}`
                 : p === 'tiktok'
-                  ? `https://www.tiktok.com/@${username}`
-                  : `https://www.youtube.com/@${username}`,
+                ? `https://www.tiktok.com/@${username}`
+                : `https://www.youtube.com/@${username}`,
           };
 
           const s = scoreForQuery(u, q);
@@ -599,7 +605,6 @@ async function frontendUsers(req, res) {
       });
     }
 
-    // Strip internal __score before sending to client
     const safeResults = results.map((r) => {
       const clone = Object.assign({}, r);
       delete clone.__score;
@@ -613,7 +618,7 @@ async function frontendUsers(req, res) {
       String(raw)
     );
     const safe = isSensitive ? 'Lookup failed' : raw || 'Lookup failed';
-    const status = err && err.status ? err.status : 400;
+    const status = (err && err.status) || 400;
     return res.status(status).json({ error: safe });
   }
 }
@@ -626,7 +631,6 @@ async function frontendUsers(req, res) {
  * FRONTEND SEARCH CONTROLLER
  * Mirrors Next `/api/modash` route:
  *  - POST { platforms: Platform[], body: any }
- *  - Aggregates results from all platforms, normalizes & de-dupes.
  */
 async function frontendSearch(req, res) {
   try {
@@ -646,17 +650,16 @@ async function frontendSearch(req, res) {
         return res.status(400).json({ error: `Unsupported platform: ${platform}` });
       }
 
-      // Initial call
       const firstBody = buildPlatformBody(platform, body);
       let data = await modashPOST(`/${platform}/search`, firstBody);
 
       // If YouTube came back empty, try ONE relaxed retry (optional)
       const enableFallback = (process.env.MODASH_YT_FALLBACK || '1') !== '0';
-      if (platform === 'youtube' && enableFallback && Number(data && data.total || 0) === 0) {
+      if (platform === 'youtube' && enableFallback && Number((data && data.total) || 0) === 0) {
         const retryBody = buildPlatformBody(platform, body, { relax: true });
         try {
           const retryData = await modashPOST(`/${platform}/search`, retryBody);
-          if (retryData && Number(retryData.total || 0) > 0) {
+          if (retryData && Number((retryData && retryData.total) || 0) > 0) {
             data = retryData;
           }
         } catch {
@@ -697,7 +700,7 @@ async function frontendSearch(req, res) {
       String(raw)
     );
     const safe = isSensitive ? 'Search failed' : raw || 'Search failed';
-    const status = err && err.status ? err.status : 400;
+    const status = (err && err.status) || 400;
     return res.status(status).json({ error: safe });
   }
 }
@@ -713,9 +716,10 @@ function toCalcMethod(input) {
 
 /**
  * FRONTEND REPORT CONTROLLER
- * Mirrors Next `/api/modash/report` route logically:
- *  - GET ?platform=instagram|tiktok|youtube&userId=...&calculationMethod=median|average
- *  - Returns Modash report JSON (frontend normalizes via normalizeReport()).
+ * GET ?platform=instagram|tiktok|youtube&userId=...&calculationMethod=...
+ * Optional:
+ *  - influencerId
+ *  - force=1 / refresh=1 → bypass cache
  */
 async function frontendReport(req, res) {
   try {
@@ -723,11 +727,16 @@ async function frontendReport(req, res) {
     const userId = (req.query.userId || '').toString();
     const calculationMethod = toCalcMethod(req.query.calculationMethod);
 
-    // NEW: optional internal influencerId to link/cache
     const influencerId =
       (req.query.influencerId || req.query.influencer_id || '')
         .toString()
         .trim() || null;
+
+    const forceFresh =
+      req.query.force === '1' ||
+      req.query.force === 'true' ||
+      req.query.refresh === '1' ||
+      req.query.refresh === 'true';
 
     if (!platform || !ALLOWED_PLATFORMS.has(platform)) {
       return res
@@ -739,37 +748,51 @@ async function frontendReport(req, res) {
     }
 
     /* -------------------- 1) Try DB cache first -------------------- */
-    try {
-      const cached = await findCachedReport({ platform, userId, influencerId });
-      if (cached) {
-        // Return exactly what Modash would have returned
-        return res.json(cached);
+    if (!forceFresh) {
+      try {
+        const cached = await findCachedReport({ platform, userId, influencerId });
+        if (cached) {
+          const out = Object.assign({}, cached.providerRaw);
+          if (cached.lastFetchedAt) {
+            const d = new Date(cached.lastFetchedAt);
+            if (!isNaN(d.getTime())) {
+              out._lastFetchedAt = d.toISOString();
+            }
+          }
+          return res.json(out);
+        }
+      } catch (cacheErr) {
+        console.error('[modash] Cache lookup failed:', cacheErr);
+        // continue to live Modash call
       }
-    } catch (cacheErr) {
-      console.error('[modash] Cache lookup failed:', cacheErr);
-      // continue to live Modash call
     }
 
     /* ---------------- 2) Fallback: call Modash API ----------------- */
     try {
+      const fetchedAt = new Date();
+
       const data = await modashGET(
         `/${platform}/profile/${encodeURIComponent(userId)}/report`,
         { calculationMethod }
       );
 
-      // Persist into Modash collection (best-effort, non-blocking for UI)
+      // Persist into Modash collection (best-effort)
       try {
         await upsertModashProfileFromReport({
           platform,
           reportJSON: data,
-          influencerId, // may be null – then upsert no-ops
+          influencerId,
+          fetchedAt,
         });
       } catch (saveErr) {
         console.error('[modash] Failed to upsert Modash profile:', saveErr);
-        // Don’t fail the UI – report is still returned
       }
 
-      return res.json(data);
+      const out = Object.assign({}, data, {
+        _lastFetchedAt: fetchedAt.toISOString(),
+      });
+
+      return res.json(out);
     } catch (e) {
       const raw = (e && e.message) || '';
       let safeMsg = 'Report unavailable';
@@ -798,7 +821,6 @@ async function frontendReport(req, res) {
 
 /* -------------------------------------------------------------------------- */
 /*                       Existing resolveProfile + search                     */
-/*           (kept for backwards compatibility with older backend)           */
 /* -------------------------------------------------------------------------- */
 
 /* --- Legacy helpers for resolveProfile --- */
@@ -925,7 +947,6 @@ function normalizeReportLegacy(reportJSON) {
 
 /**
  * Legacy: resolveProfile
- * Uses handle → (try report directly) → fall back to searchForUsername → report by userId.
  */
 async function resolveProfile(req, res) {
   try {
@@ -1024,7 +1045,6 @@ async function resolveProfile(req, res) {
 
 /**
  * Legacy simple passthrough search
- * POST { platform, ...body } → /{platform}/search
  */
 async function legacySearch(req, res) {
   try {
@@ -1060,12 +1080,12 @@ async function legacySearch(req, res) {
 /* -------------------------------------------------------------------------- */
 
 module.exports = {
-  // New frontend APIs (map these to /api/modash/* from your frontend)
+  // New frontend APIs
   frontendUsers,    // GET /modash/users
   frontendSearch,   // POST /modash/search
   frontendReport,   // GET /modash/report
 
-  // Legacy endpoints kept for compatibility
+  // Legacy endpoints
   resolveProfile,   // POST /modash/resolveProfile
-  search: legacySearch, // POST /modash/search-legacy (or /modash/search if already wired)
+  search: legacySearch, // POST /modash/search-legacy
 };

@@ -19,11 +19,11 @@ function sortParticipants(a, b) {
 }
 
 exports.sendInvitation = async (req, res) => {
-  const { 
+  const {
     email,
     brandId,          // ✅ only brandId + email from body
   } = req.body;
-  
+
   if (!email) {
     return res.status(400).json({ message: 'Email required' });
   }

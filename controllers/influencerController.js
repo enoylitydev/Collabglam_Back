@@ -39,7 +39,7 @@ const SMTP_PASS = process.env.SMTP_PASS;
 const JWT_SECRET = process.env.JWT_SECRET;
 
 const MAIL_FROM_NAME = process.env.MAIL_FROM_NAME || 'CollabGlam';
-const PRODUCT_NAME   = process.env.PRODUCT_NAME   || 'CollabGlam';
+const PRODUCT_NAME = process.env.PRODUCT_NAME || 'CollabGlam';
 
 const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
@@ -49,20 +49,20 @@ const transporter = nodemailer.createTransport({
 });
 
 /* ===== Shared professional HTML OTP template (orange/yellow accents) ===== */
-const esc = (s = '') => String(s).replace(/[&<>"]/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+const esc = (s = '') => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const PREHEADER = (t) => `<div style="display:none;opacity:0;visibility:hidden;overflow:hidden;height:0;width:0;mso-hide:all;">${esc(t)}</div>`;
 
-const WRAP  = 'max-width:640px;margin:0 auto;padding:0;background:#f7fafc;color:#0f172a;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;';
+const WRAP = 'max-width:640px;margin:0 auto;padding:0;background:#f7fafc;color:#0f172a;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;';
 const SHELL = 'padding:24px;';
-const CARD  = 'border-radius:16px;background:#ffffff;border:1px solid #e5e7eb;overflow:hidden;box-shadow:0 8px 20px rgba(17,24,39,0.06);';
-const BRAND_BAR  = 'padding:18px 20px;background:#ffffff;color:#111827;border-bottom:1px solid #FFE8B7;';
+const CARD = 'border-radius:16px;background:#ffffff;border:1px solid #e5e7eb;overflow:hidden;box-shadow:0 8px 20px rgba(17,24,39,0.06);';
+const BRAND_BAR = 'padding:18px 20px;background:#ffffff;color:#111827;border-bottom:1px solid #FFE8B7;';
 const BRAND_NAME = 'font-weight:900;font-size:15px;letter-spacing:.2px;';
 const ACCENT_BAR = 'height:4px;background:linear-gradient(90deg,#FF6A00 0%, #FF8A00 30%, #FF9A00 60%, #FFBF00 100%);';
-const HDR   = 'padding:20px 24px 6px 24px;font-weight:800;font-size:20px;color:#111827;';
-const SUBHDR= 'padding:0 24px 10px 24px;color:#374151;font-size:13px;';
-const BODY  = 'padding:0 24px 24px 24px;';
-const FOOT  = 'padding:14px 24px;color:#6b7280;font-size:12px;border-top:1px solid #f1f5f9;background:#fcfcfd;';
-const BTN   = 'display:inline-block;background:#111827;color:#ffffff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800;';
+const HDR = 'padding:20px 24px 6px 24px;font-weight:800;font-size:20px;color:#111827;';
+const SUBHDR = 'padding:0 24px 10px 24px;color:#374151;font-size:13px;';
+const BODY = 'padding:0 24px 24px 24px;';
+const FOOT = 'padding:14px 24px;color:#6b7280;font-size:12px;border-top:1px solid #f1f5f9;background:#fcfcfd;';
+const BTN = 'display:inline-block;background:#111827;color:#ffffff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800;';
 const SMALL = 'color:#6b7280;font-size:12px;';
 
 const CODE_WRAPPER = 'margin-top:12px;margin-bottom:6px;';
@@ -91,7 +91,7 @@ function otpHtmlTemplate({
 }) {
   const hasCta = Boolean(ctaHref && ctaLabel);
   return `
-  ${PREHEADER(`${preheader}: ${code}`)}
+ ${PREHEADER(preheader)}
   <div style="${WRAP}">
     <div style="${SHELL}">
       <div style="${CARD}">
@@ -573,7 +573,7 @@ exports.registerInfluencer = async (req, res) => {
     if (!password || String(password).length < 8) {
       return res.status(400).json({ message: 'Password must be at least 8 characters' });
     }
-    if (!name || !countryId ) {
+    if (!name || !countryId) {
       return res.status(400).json({ message: 'Missing required fields (name, countryId)' });
     }
 
@@ -595,31 +595,73 @@ exports.registerInfluencer = async (req, res) => {
 
     // 🔹 1) Build Modash profile payloads from incoming data
     const profiles = [];
+
     if (Array.isArray(platforms)) {
+      // New structured payload: [{ provider, data, categories }]
       for (const item of platforms) {
         if (!item || !item.provider) continue;
+
         const mapped = mapPayload(String(item.provider).toLowerCase(), item.data);
-        if (mapped) profiles.push(mapped);
+        if (!mapped) continue;
+
+        // ⬇️ If frontend sent categories, attach them
+        if (Array.isArray(item.categories) && item.categories.length) {
+          mapped.categories = item.categories;
+        }
+
+        profiles.push(mapped);
       }
     } else {
+      // Legacy separate fields: youtube / tiktok / instagram
       const y = mapPayload('youtube', youtube);
       const tt = mapPayload('tiktok', tiktok);
       const ig = mapPayload('instagram', instagram);
-      if (y) profiles.push(y);
-      if (tt) profiles.push(tt);
-      if (ig) profiles.push(ig);
+
+      if (y) {
+        if (Array.isArray(youtube?.categories) && youtube.categories.length) {
+          y.categories = youtube.categories;
+        }
+        profiles.push(y);
+      }
+
+      if (tt) {
+        if (Array.isArray(tiktok?.categories) && tiktok.categories.length) {
+          tt.categories = tiktok.categories;
+        }
+        profiles.push(tt);
+      }
+
+      if (ig) {
+        if (Array.isArray(instagram?.categories) && instagram.categories.length) {
+          ig.categories = instagram.categories;
+        }
+        profiles.push(ig);
+      }
     }
+
 
     if (!profiles.length) {
       return res.status(400).json({ message: 'No valid platform payloads provided' });
     }
 
-    // 🔹 2) Normalize categories for each profile (based on Modash providerRaw)
+    // 🔹 2) Normalize categories for each profile
     const idx = await buildCategoryIndex();
+
     for (const prof of profiles) {
-      const rawCats = extractRawCategoriesFromProviderRaw(prof.providerRaw);
+      let rawCats = [];
+
+      // 1️⃣ Prefer categories explicitly sent from frontend (platforms[i].categories / youtube.categories etc.)
+      if (Array.isArray(prof.categories) && prof.categories.length) {
+        rawCats = prof.categories;
+      } else {
+        // 2️⃣ Fallback: derive from Modash providerRaw (categories / interests)
+        rawCats = extractRawCategoriesFromProviderRaw(prof.providerRaw);
+      }
+
+      // Convert whatever we have -> [{ categoryId, categoryName, subcategoryId, subcategoryName }]
       prof.categories = normalizeCategories(rawCats, idx);
     }
+
 
     // 🔹 3) Resolve languages into embedded refs
     let languageDocs = [];
@@ -1490,7 +1532,7 @@ exports.suggestInfluencers = async (req, res) => {
     if (!q) return res.json({ success: true, suggestions: [] });
 
     const candidates = await Influencer.find(
-      { },
+      {},
       'name categoryName platformName country socialMedia'
     ).limit(100).lean();
 
@@ -1636,96 +1678,14 @@ exports.updateProfile = async (req, res) => {
   }
 };
 
-/* ================= Email Update (two-OTP flow, same template) ================= */
+/* ================= Email Update (single-OTP to NEW email) ================= */
 exports.requestEmailUpdate = async (req, res) => {
   try {
     const { influencerId, newEmail, role = 'Influencer' } = req.body || {};
     if (!influencerId || !newEmail || !role) {
       return res.status(400).json({ message: 'influencerId, newEmail and role are required' });
     }
-    if (!['Influencer', 'Brand'].includes(String(role))) {
-      return res.status(400).json({ message: 'role must be "Influencer" or "Brand"' });
-    }
-    if (role !== 'Influencer') {
-      return res.status(400).json({ message: 'This endpoint is for Influencer role only' });
-    }
-
-    const inf = await Influencer.findOne({ influencerId });
-    if (!inf) return res.status(404).json({ message: 'Influencer not found' });
-
-    const oldEmail = String(inf.email || '').trim().toLowerCase();
-    const nextEmail = String(newEmail).trim().toLowerCase();
-    if (!nextEmail) return res.status(400).json({ message: 'newEmail is required' });
-    if (nextEmail === oldEmail) return res.status(400).json({ message: 'New email must be different from current email' });
-
-    const emailRegexCI = new RegExp(`^${escapeRegExp(nextEmail)}$`, 'i');
-    const exists = await Influencer.findOne({ email: emailRegexCI }, '_id influencerId');
-    if (exists && String(exists.influencerId) !== String(influencerId)) {
-      return res.status(409).json({ message: 'New email already in use' });
-    }
-
-    const codeOld = Math.floor(100000 + Math.random() * 900000).toString();
-    const codeNew = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
-    await VerifyEmail.findOneAndUpdate(
-      { email: oldEmail, role: 'Influencer' },
-      {
-        $set: { otpCode: codeOld, otpExpiresAt: expiresAt },
-        $inc: { attempts: 1 }
-      },
-      { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true }
-    );
-
-    await VerifyEmail.findOneAndUpdate(
-      { email: nextEmail, role: 'Influencer' },
-      {
-        $set: { otpCode: codeNew, otpExpiresAt: expiresAt, verified: false },
-        $inc: { attempts: 1 }
-      },
-      { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true }
-    );
-
-    // HTML emails (brand-style)
-    const oldSubject = 'Confirm email change (old email verification)';
-    const oldHtml = otpHtmlTemplate({
-      title: 'Confirm email change',
-      subtitle: 'Use this code to confirm changing away from this email.',
-      code: codeOld,
-      minutes: 10,
-      preheader: 'Confirm email change (old email)',
-    });
-    const oldText = otpTextFallback({ code: codeOld, minutes: 10, title: 'Confirm email change' });
-
-    const newSubject = 'Confirm email change (new email verification)';
-    const newHtml = otpHtmlTemplate({
-      title: 'Verify your new email',
-      subtitle: 'Use this code to confirm your new email address.',
-      code: codeNew,
-      minutes: 10,
-      preheader: 'Confirm email change (new email)',
-    });
-    const newText = otpTextFallback({ code: codeNew, minutes: 10, title: 'Verify your new email' });
-
-    await Promise.all([
-      sendMail({ to: oldEmail, subject: oldSubject, html: oldHtml, text: oldText }),
-      sendMail({ to: nextEmail, subject: newSubject, html: newHtml, text: newText }),
-    ]);
-
-    return res.status(200).json({ message: 'OTPs sent to old and new emails' });
-  } catch (err) {
-    console.error('Error in requestEmailUpdate:', err);
-    return res.status(500).json({ message: 'Internal server error' });
-  }
-};
-
-exports.verifyotp = async (req, res) => {
-  try {
-    const { influencerId, role = 'Influencer', oldEmailOtp, newEmailOtp, newEmail } = req.body || {};
-    if (!influencerId || !role || !oldEmailOtp || !newEmailOtp || !newEmail) {
-      return res.status(400).json({ message: 'influencerId, role, oldEmailOtp, newEmailOtp, and newEmail are required' });
-    }
-    if (String(role) !== 'Influencer') {
+    if (String(role).trim() !== 'Influencer') {
       return res.status(400).json({ message: 'role must be "Influencer" for this endpoint' });
     }
 
@@ -1734,9 +1694,77 @@ exports.verifyotp = async (req, res) => {
 
     const oldEmail = String(inf.email || '').trim().toLowerCase();
     const nextEmail = String(newEmail || '').trim().toLowerCase();
-    if (!nextEmail) return res.status(400).json({ message: 'newEmail is required' });
-    if (nextEmail === oldEmail) return res.status(400).json({ message: 'New email must be different from current email' });
+    if (!nextEmail) {
+      return res.status(400).json({ message: 'newEmail is required' });
+    }
+    if (nextEmail === oldEmail) {
+      return res.status(400).json({ message: 'New email must be different from current email' });
+    }
 
+    // ensure new email not used by another influencer
+    const emailRegexCI = new RegExp(`^${escapeRegExp(nextEmail)}$`, 'i');
+    const exists = await Influencer.findOne({ email: emailRegexCI }, '_id influencerId');
+    if (exists && String(exists.influencerId) !== String(influencerId)) {
+      return res.status(409).json({ message: 'New email already in use' });
+    }
+
+    // 🔐 generate ONE OTP and expiry (for NEW email only)
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+    await VerifyEmail.findOneAndUpdate(
+      { email: nextEmail, role: 'Influencer' },
+      {
+        $setOnInsert: { email: nextEmail, role: 'Influencer' },
+        $set: { otpCode: otp, otpExpiresAt: expiresAt, verified: false },
+        $inc: { attempts: 1 }
+      },
+      { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true }
+    );
+
+    // ✉️ send OTP ONLY to new email
+    const subject = 'Confirm email change';
+    const html = otpHtmlTemplate({
+      title: 'Verify your new email',
+      subtitle: 'Use this code to confirm your new email address.',
+      code: otp,
+      minutes: 10,
+      preheader: 'Confirm email change (new email)',
+    });
+    const text = otpTextFallback({ code: otp, minutes: 10, title: 'Verify your new email' });
+
+    await sendMail({ to: nextEmail, subject, html, text });
+
+    return res.status(200).json({ message: 'OTP sent to new email' });
+  } catch (err) {
+    console.error('Error in requestEmailUpdate:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+exports.verifyotp = async (req, res) => {
+  try {
+    const { influencerId, role = 'Influencer', otp, newEmail } = req.body || {};
+    if (!influencerId || !role || !otp || !newEmail) {
+      return res.status(400).json({ message: 'influencerId, role, otp, and newEmail are required' });
+    }
+    if (String(role).trim() !== 'Influencer') {
+      return res.status(400).json({ message: 'role must be "Influencer" for this endpoint' });
+    }
+
+    const inf = await Influencer.findOne({ influencerId });
+    if (!inf) return res.status(404).json({ message: 'Influencer not found' });
+
+    const oldEmail = String(inf.email || '').trim().toLowerCase();
+    const nextEmail = String(newEmail || '').trim().toLowerCase();
+    if (!nextEmail) {
+      return res.status(400).json({ message: 'newEmail is required' });
+    }
+    if (nextEmail === oldEmail) {
+      return res.status(400).json({ message: 'New email must be different from current email' });
+    }
+
+    // ensure new email not used by another influencer
     const emailRegexCI = new RegExp(`^${escapeRegExp(nextEmail)}$`, 'i');
     const exists = await Influencer.findOne({ email: emailRegexCI }, '_id influencerId');
     if (exists && String(exists.influencerId) !== String(influencerId)) {
@@ -1745,40 +1773,31 @@ exports.verifyotp = async (req, res) => {
 
     const now = new Date();
 
-    const oldVE = await VerifyEmail.findOne({
-      email: oldEmail,
-      role: 'Influencer',
-      otpCode: String(oldEmailOtp).trim(),
-      otpExpiresAt: { $gt: now }
-    });
-    if (!oldVE) {
-      return res.status(400).json({ message: 'Invalid or expired OTP for old email' });
-    }
-
-    const newVE = await VerifyEmail.findOne({
+    // verify OTP for NEW email only
+    const ve = await VerifyEmail.findOne({
       email: nextEmail,
       role: 'Influencer',
-      otpCode: String(newEmailOtp).trim(),
+      otpCode: String(otp).trim(),
       otpExpiresAt: { $gt: now }
     });
-    if (!newVE) {
+
+    if (!ve) {
       return res.status(400).json({ message: 'Invalid or expired OTP for new email' });
     }
 
+    // update influencer email
     inf.email = nextEmail;
     await inf.save();
 
-    oldVE.verified = false;
-    oldVE.otpCode = undefined;
-    oldVE.otpExpiresAt = undefined;
-    oldVE.verifiedAt = new Date();
-    await oldVE.save();
+    // mark new email as verified, clear code
+    ve.verified = true;
+    ve.otpCode = undefined;
+    ve.otpExpiresAt = undefined;
+    ve.verifiedAt = new Date();
+    await ve.save();
 
-    newVE.verified = true;
-    newVE.otpCode = undefined;
-    newVE.otpExpiresAt = undefined;
-    newVE.verifiedAt = new Date();
-    await newVE.save();
+    // optional: clean up old email VerifyEmail record
+    await VerifyEmail.deleteOne({ email: oldEmail, role: 'Influencer' }).catch(() => { });
 
     return res.status(200).json({ message: 'Email updated successfully' });
   } catch (err) {

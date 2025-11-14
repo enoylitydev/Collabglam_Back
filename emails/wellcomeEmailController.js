@@ -17,9 +17,9 @@ const transporter = nodemailer.createTransport({
 const BRAND_EMAIL_CONTENT = {
   subject: `Welcome to CollabGlam🚀`,
   htmlTemplate: (name) => `
-    <div style="font-family: 'Arial', sans-serif; max-width: 600px; margin: auto; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; background-color: #ffffff;">
+    <div style="font-family: 'Arial', sans-serif; max-width: 600px; margin: auto; border: 1px solid #e0e0e0; border-radius: 16px; overflow: hidden; background-color: #ffffff;">
       <!-- Header: Brand Focused (Darker Blue) -->
-      <div style="color: white; padding: 20px; text-align: center;">
+      <div style=" padding: 20px; text-align: center;">
         <h2 style="margin: 0; font-size: 24px;">CollabGlam Brand Welcome</h2>
       </div>
       <div style="height:4px;background:linear-gradient(90deg,#FF6A00 0%, #FF8A00 30%, #FF9A00 60%, #FFBF00 100%);"></div>
@@ -54,7 +54,7 @@ const BRAND_EMAIL_CONTENT = {
 
         <!-- Support Section -->
         <p style="margin-top: 30px;">Need help getting started? Visit our 
-            <a href="https://collabglam.com/help" style="color: #3498db; text-decoration: none;">Help Center</a> or contact us at 
+            contact us at 
             <a href="mailto:support@collabglam.com" style="color: #3498db; text-decoration: none;">support@collabglam.com</a> — our team is happy to assist you anytime.
         </p>
 
@@ -76,9 +76,9 @@ const BRAND_EMAIL_CONTENT = {
 const INFLUENCER_EMAIL_CONTENT = {
   subject: `Welcome to CollabGlam — Let’s Begin Your Creator Journey 🌈`,
   htmlTemplate: (name) => `
-    <div style="font-family: 'Arial', sans-serif; max-width: 600px; margin: auto; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; background-color: #ffffff;">
+    <div style="font-family: 'Arial', sans-serif; max-width: 600px; margin: auto; border: 1px solid #e0e0e0; border-radius: 16px; overflow: hidden; background-color: #ffffff;">
       <!-- Header: Influencer Focused (Lighter Blue) -->
-      <div style="color: white; padding: 20px; text-align: center;">
+      <div style="padding: 20px; text-align: center;">
         <h2 style="margin: 0; font-size: 24px;">CollabGlam Influencer Welcome</h2>
       </div>
       <div style="height:4px;background:linear-gradient(90deg,#FF6A00 0%, #FF8A00 30%, #FF9A00 60%, #FFBF00 100%);"></div>
@@ -107,13 +107,13 @@ const INFLUENCER_EMAIL_CONTENT = {
             <a href="https://collabglam.com/influencer/new-collab" 
                style="background-color: #FF9A00; color: white; padding: 12px 25px; 
                       text-decoration: none; border-radius: 5px; font-weight: bold; font-size: 16px; display: inline-block;">
-                Collab Now
+                Browse Campaigns
             </a>
         </div>
 
         <!-- Support Section -->
         <p style="margin-top: 30px;">Need any guidance? We’re always here to help. Visit our 
-            <a href="https://collabglam.com/help" style="color: #3498db; text-decoration: none;">Help Center</a> or email 
+            email 
             <a href="mailto:support@collabglam.com" style="color: #3498db; text-decoration: none;">support@collabglam.com</a>.
         </p>
 

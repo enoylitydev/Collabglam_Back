@@ -1,10 +1,25 @@
 // models/modash.js
 const mongoose = require('mongoose');
 const { v4: uuidv4 } = require('uuid');
+const UUIDv4Regex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /* -------------------------- Shared sub-schemas --------------------------- */
 const weightItemSchema = new mongoose.Schema(
   { code: String, name: String, weight: Number },
+  { _id: false }
+);
+
+const categoryLinkSchema = new mongoose.Schema(
+  {
+    categoryId: { type: Number, required: true },
+    categoryName: { type: String, required: true, trim: true },
+    subcategoryId: {
+      type: String,
+      required: true,
+      match: [UUIDv4Regex, 'Invalid subcategoryId (must be UUID v4)']
+    },
+    subcategoryName: { type: String, required: true, trim: true }
+  },
   { _id: false }
 );
 
@@ -146,8 +161,7 @@ const modashSchema = new mongoose.Schema(
     bio: String,
 
     // NOTE: categories were only used under socialProfiles in Influencer;
-    // If you still need them, you can copy the categoryLinkSchema from influencer.
-    categories: { type: [mongoose.Schema.Types.Mixed], default: [] },
+    categories: { type: [categoryLinkSchema], default: [] },
 
     hashtags: [{ tag: String, weight: Number }],
     mentions: [{ tag: String, weight: Number }],
