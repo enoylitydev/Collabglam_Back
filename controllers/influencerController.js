@@ -1636,96 +1636,14 @@ exports.updateProfile = async (req, res) => {
   }
 };
 
-/* ================= Email Update (two-OTP flow, same template) ================= */
+/* ================= Email Update (single-OTP to NEW email) ================= */
 exports.requestEmailUpdate = async (req, res) => {
   try {
     const { influencerId, newEmail, role = 'Influencer' } = req.body || {};
     if (!influencerId || !newEmail || !role) {
       return res.status(400).json({ message: 'influencerId, newEmail and role are required' });
     }
-    if (!['Influencer', 'Brand'].includes(String(role))) {
-      return res.status(400).json({ message: 'role must be "Influencer" or "Brand"' });
-    }
-    if (role !== 'Influencer') {
-      return res.status(400).json({ message: 'This endpoint is for Influencer role only' });
-    }
-
-    const inf = await Influencer.findOne({ influencerId });
-    if (!inf) return res.status(404).json({ message: 'Influencer not found' });
-
-    const oldEmail = String(inf.email || '').trim().toLowerCase();
-    const nextEmail = String(newEmail).trim().toLowerCase();
-    if (!nextEmail) return res.status(400).json({ message: 'newEmail is required' });
-    if (nextEmail === oldEmail) return res.status(400).json({ message: 'New email must be different from current email' });
-
-    const emailRegexCI = new RegExp(`^${escapeRegExp(nextEmail)}$`, 'i');
-    const exists = await Influencer.findOne({ email: emailRegexCI }, '_id influencerId');
-    if (exists && String(exists.influencerId) !== String(influencerId)) {
-      return res.status(409).json({ message: 'New email already in use' });
-    }
-
-    const codeOld = Math.floor(100000 + Math.random() * 900000).toString();
-    const codeNew = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
-    await VerifyEmail.findOneAndUpdate(
-      { email: oldEmail, role: 'Influencer' },
-      {
-        $set: { otpCode: codeOld, otpExpiresAt: expiresAt },
-        $inc: { attempts: 1 }
-      },
-      { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true }
-    );
-
-    await VerifyEmail.findOneAndUpdate(
-      { email: nextEmail, role: 'Influencer' },
-      {
-        $set: { otpCode: codeNew, otpExpiresAt: expiresAt, verified: false },
-        $inc: { attempts: 1 }
-      },
-      { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true }
-    );
-
-    // HTML emails (brand-style)
-    const oldSubject = 'Confirm email change (old email verification)';
-    const oldHtml = otpHtmlTemplate({
-      title: 'Confirm email change',
-      subtitle: 'Use this code to confirm changing away from this email.',
-      code: codeOld,
-      minutes: 10,
-      preheader: 'Confirm email change (old email)',
-    });
-    const oldText = otpTextFallback({ code: codeOld, minutes: 10, title: 'Confirm email change' });
-
-    const newSubject = 'Confirm email change (new email verification)';
-    const newHtml = otpHtmlTemplate({
-      title: 'Verify your new email',
-      subtitle: 'Use this code to confirm your new email address.',
-      code: codeNew,
-      minutes: 10,
-      preheader: 'Confirm email change (new email)',
-    });
-    const newText = otpTextFallback({ code: codeNew, minutes: 10, title: 'Verify your new email' });
-
-    await Promise.all([
-      sendMail({ to: oldEmail, subject: oldSubject, html: oldHtml, text: oldText }),
-      sendMail({ to: nextEmail, subject: newSubject, html: newHtml, text: newText }),
-    ]);
-
-    return res.status(200).json({ message: 'OTPs sent to old and new emails' });
-  } catch (err) {
-    console.error('Error in requestEmailUpdate:', err);
-    return res.status(500).json({ message: 'Internal server error' });
-  }
-};
-
-exports.verifyotp = async (req, res) => {
-  try {
-    const { influencerId, role = 'Influencer', oldEmailOtp, newEmailOtp, newEmail } = req.body || {};
-    if (!influencerId || !role || !oldEmailOtp || !newEmailOtp || !newEmail) {
-      return res.status(400).json({ message: 'influencerId, role, oldEmailOtp, newEmailOtp, and newEmail are required' });
-    }
-    if (String(role) !== 'Influencer') {
+    if (String(role).trim() !== 'Influencer') {
       return res.status(400).json({ message: 'role must be "Influencer" for this endpoint' });
     }
 
@@ -1734,9 +1652,77 @@ exports.verifyotp = async (req, res) => {
 
     const oldEmail = String(inf.email || '').trim().toLowerCase();
     const nextEmail = String(newEmail || '').trim().toLowerCase();
-    if (!nextEmail) return res.status(400).json({ message: 'newEmail is required' });
-    if (nextEmail === oldEmail) return res.status(400).json({ message: 'New email must be different from current email' });
+    if (!nextEmail) {
+      return res.status(400).json({ message: 'newEmail is required' });
+    }
+    if (nextEmail === oldEmail) {
+      return res.status(400).json({ message: 'New email must be different from current email' });
+    }
 
+    // ensure new email not used by another influencer
+    const emailRegexCI = new RegExp(`^${escapeRegExp(nextEmail)}$`, 'i');
+    const exists = await Influencer.findOne({ email: emailRegexCI }, '_id influencerId');
+    if (exists && String(exists.influencerId) !== String(influencerId)) {
+      return res.status(409).json({ message: 'New email already in use' });
+    }
+
+    // 🔐 generate ONE OTP and expiry (for NEW email only)
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+    await VerifyEmail.findOneAndUpdate(
+      { email: nextEmail, role: 'Influencer' },
+      {
+        $setOnInsert: { email: nextEmail, role: 'Influencer' },
+        $set: { otpCode: otp, otpExpiresAt: expiresAt, verified: false },
+        $inc: { attempts: 1 }
+      },
+      { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true }
+    );
+
+    // ✉️ send OTP ONLY to new email
+    const subject = 'Confirm email change';
+    const html = otpHtmlTemplate({
+      title: 'Verify your new email',
+      subtitle: 'Use this code to confirm your new email address.',
+      code: otp,
+      minutes: 10,
+      preheader: 'Confirm email change (new email)',
+    });
+    const text = otpTextFallback({ code: otp, minutes: 10, title: 'Verify your new email' });
+
+    await sendMail({ to: nextEmail, subject, html, text });
+
+    return res.status(200).json({ message: 'OTP sent to new email' });
+  } catch (err) {
+    console.error('Error in requestEmailUpdate:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+exports.verifyotp = async (req, res) => {
+  try {
+    const { influencerId, role = 'Influencer', otp, newEmail } = req.body || {};
+    if (!influencerId || !role || !otp || !newEmail) {
+      return res.status(400).json({ message: 'influencerId, role, otp, and newEmail are required' });
+    }
+    if (String(role).trim() !== 'Influencer') {
+      return res.status(400).json({ message: 'role must be "Influencer" for this endpoint' });
+    }
+
+    const inf = await Influencer.findOne({ influencerId });
+    if (!inf) return res.status(404).json({ message: 'Influencer not found' });
+
+    const oldEmail = String(inf.email || '').trim().toLowerCase();
+    const nextEmail = String(newEmail || '').trim().toLowerCase();
+    if (!nextEmail) {
+      return res.status(400).json({ message: 'newEmail is required' });
+    }
+    if (nextEmail === oldEmail) {
+      return res.status(400).json({ message: 'New email must be different from current email' });
+    }
+
+    // ensure new email not used by another influencer
     const emailRegexCI = new RegExp(`^${escapeRegExp(nextEmail)}$`, 'i');
     const exists = await Influencer.findOne({ email: emailRegexCI }, '_id influencerId');
     if (exists && String(exists.influencerId) !== String(influencerId)) {
@@ -1745,40 +1731,31 @@ exports.verifyotp = async (req, res) => {
 
     const now = new Date();
 
-    const oldVE = await VerifyEmail.findOne({
-      email: oldEmail,
-      role: 'Influencer',
-      otpCode: String(oldEmailOtp).trim(),
-      otpExpiresAt: { $gt: now }
-    });
-    if (!oldVE) {
-      return res.status(400).json({ message: 'Invalid or expired OTP for old email' });
-    }
-
-    const newVE = await VerifyEmail.findOne({
+    // verify OTP for NEW email only
+    const ve = await VerifyEmail.findOne({
       email: nextEmail,
       role: 'Influencer',
-      otpCode: String(newEmailOtp).trim(),
+      otpCode: String(otp).trim(),
       otpExpiresAt: { $gt: now }
     });
-    if (!newVE) {
+
+    if (!ve) {
       return res.status(400).json({ message: 'Invalid or expired OTP for new email' });
     }
 
+    // update influencer email
     inf.email = nextEmail;
     await inf.save();
 
-    oldVE.verified = false;
-    oldVE.otpCode = undefined;
-    oldVE.otpExpiresAt = undefined;
-    oldVE.verifiedAt = new Date();
-    await oldVE.save();
+    // mark new email as verified, clear code
+    ve.verified = true;
+    ve.otpCode = undefined;
+    ve.otpExpiresAt = undefined;
+    ve.verifiedAt = new Date();
+    await ve.save();
 
-    newVE.verified = true;
-    newVE.otpCode = undefined;
-    newVE.otpExpiresAt = undefined;
-    newVE.verifiedAt = new Date();
-    await newVE.save();
+    // optional: clean up old email VerifyEmail record
+    await VerifyEmail.deleteOne({ email: oldEmail, role: 'Influencer' }).catch(() => {});
 
     return res.status(200).json({ message: 'Email updated successfully' });
   } catch (err) {
