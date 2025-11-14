@@ -595,31 +595,73 @@ exports.registerInfluencer = async (req, res) => {
 
     // 🔹 1) Build Modash profile payloads from incoming data
     const profiles = [];
+
     if (Array.isArray(platforms)) {
+      // New structured payload: [{ provider, data, categories }]
       for (const item of platforms) {
         if (!item || !item.provider) continue;
+
         const mapped = mapPayload(String(item.provider).toLowerCase(), item.data);
-        if (mapped) profiles.push(mapped);
+        if (!mapped) continue;
+
+        // ⬇️ If frontend sent categories, attach them
+        if (Array.isArray(item.categories) && item.categories.length) {
+          mapped.categories = item.categories;
+        }
+
+        profiles.push(mapped);
       }
     } else {
+      // Legacy separate fields: youtube / tiktok / instagram
       const y = mapPayload('youtube', youtube);
       const tt = mapPayload('tiktok', tiktok);
       const ig = mapPayload('instagram', instagram);
-      if (y) profiles.push(y);
-      if (tt) profiles.push(tt);
-      if (ig) profiles.push(ig);
+
+      if (y) {
+        if (Array.isArray(youtube?.categories) && youtube.categories.length) {
+          y.categories = youtube.categories;
+        }
+        profiles.push(y);
+      }
+
+      if (tt) {
+        if (Array.isArray(tiktok?.categories) && tiktok.categories.length) {
+          tt.categories = tiktok.categories;
+        }
+        profiles.push(tt);
+      }
+
+      if (ig) {
+        if (Array.isArray(instagram?.categories) && instagram.categories.length) {
+          ig.categories = instagram.categories;
+        }
+        profiles.push(ig);
+      }
     }
+
 
     if (!profiles.length) {
       return res.status(400).json({ message: 'No valid platform payloads provided' });
     }
 
-    // 🔹 2) Normalize categories for each profile (based on Modash providerRaw)
+    // 🔹 2) Normalize categories for each profile
     const idx = await buildCategoryIndex();
+
     for (const prof of profiles) {
-      const rawCats = extractRawCategoriesFromProviderRaw(prof.providerRaw);
+      let rawCats = [];
+
+      // 1️⃣ Prefer categories explicitly sent from frontend (platforms[i].categories / youtube.categories etc.)
+      if (Array.isArray(prof.categories) && prof.categories.length) {
+        rawCats = prof.categories;
+      } else {
+        // 2️⃣ Fallback: derive from Modash providerRaw (categories / interests)
+        rawCats = extractRawCategoriesFromProviderRaw(prof.providerRaw);
+      }
+
+      // Convert whatever we have -> [{ categoryId, categoryName, subcategoryId, subcategoryName }]
       prof.categories = normalizeCategories(rawCats, idx);
     }
+
 
     // 🔹 3) Resolve languages into embedded refs
     let languageDocs = [];

@@ -2,6 +2,7 @@
 const Influencer = require('../models/influencer');
 const MediaKit = require('../models/mediaKit');
 const { refreshMediaKitForInfluencer } = require('../jobs/mediakitSync');
+const Modash = require('../models/modash'); 
 
 // ------------------------------- Helpers --------------------------------
 
@@ -45,12 +46,43 @@ function buildSnapshotFromInfluencer(infDoc) {
   return snapshot;
 }
 
+// Map Modash docs → MediaKit.socialProfiles format (public-safe)
+function mapModashToSocialProfiles(modashDocs = []) {
+  if (!Array.isArray(modashDocs)) return [];
+
+  return modashDocs.map((p) => ({
+    provider: p.provider,                         // 'instagram' | 'tiktok' | 'youtube'
+    username: p.username || p.handle || null,
+    fullname: p.fullname || null,
+    url: p.url || null,
+    picture: p.picture || null,
+
+    followers: p.followers ?? null,
+    engagements: p.engagements ?? null,
+    engagementRate: p.engagementRate ?? null,
+    averageViews: p.averageViews ?? null,
+
+    // keep compact stats + categories
+    stats: p.stats || null,
+    categories: Array.isArray(p.categories) ? p.categories : [],
+
+    // light-weight content & affinity
+    recentPosts: Array.isArray(p.recentPosts) ? p.recentPosts : [],
+    popularPosts: Array.isArray(p.popularPosts) ? p.popularPosts : [],
+    hashtags: Array.isArray(p.hashtags) ? p.hashtags : [],
+    mentions: Array.isArray(p.mentions) ? p.mentions : [],
+    brandAffinity: Array.isArray(p.brandAffinity) ? p.brandAffinity : [],
+    lookalikes: Array.isArray(p.lookalikes) ? p.lookalikes : [],
+    sponsoredPosts: Array.isArray(p.sponsoredPosts) ? p.sponsoredPosts : [],
+
+    // timestamps from Modash doc
+    createdAt: p.createdAt || null,
+    updatedAt: p.updatedAt || null
+  }));
+}
+
 // ------------------------------- Controllers ----------------------------
 
-// POST /api/mediakits/by-influencer
-// Body: { influencerId }
-// If a MediaKit exists -> return it (no error).
-// If not -> create from Influencer snapshot and return it.
 async function createByInfluencer(req, res) {
   try {
     const { influencerId } = req.body || {};
@@ -61,28 +93,38 @@ async function createByInfluencer(req, res) {
     const influencer = await Influencer.findOne({ influencerId });
     if (!influencer) return res.status(404).json({ error: 'Influencer not found' });
 
-    // If a MediaKit already exists for this influencer, refresh it from the latest Influencer data before returning
+    // 1) Fetch Modash profiles and map → socialProfiles snapshot
+    const modashProfiles = await Modash.find({ influencer: influencer._id }).lean();
+    const socialProfilesSnapshot = mapModashToSocialProfiles(modashProfiles);
+
+    // 2) If MediaKit exists, refresh + patch socialProfiles
     const existing = await MediaKit.findOne({ influencerId });
     if (existing) {
       const refreshed = await refreshMediaKitForInfluencer(influencerId);
-      // If for some reason it wasn't updated (e.g., deleted between calls), fall back to the existing MediaKit
       const doc = refreshed || existing;
+
+      if (socialProfilesSnapshot.length) {
+        doc.socialProfiles = socialProfilesSnapshot;
+        await doc.save();
+      }
+
       return res.status(200).json({
         mediaKitId: doc.mediaKitId,
-        mediaKit: sanitizeMediaKit(doc)
+        mediaKit: sanitizeMediaKit(doc),
       });
     }
 
-    // Otherwise, build a fresh snapshot from Influencer and create a new MediaKit
+    // 3) Otherwise create new MediaKit from Influencer snapshot
     const snapshot = buildSnapshotFromInfluencer(influencer);
     const mediaKit = await MediaKit.create({
       influencerId,
-      ...snapshot
+      ...snapshot,
+      socialProfiles: socialProfilesSnapshot,
     });
 
     return res.status(201).json({
       mediaKitId: mediaKit.mediaKitId,
-      mediaKit: sanitizeMediaKit(mediaKit)
+      mediaKit: sanitizeMediaKit(mediaKit),
     });
   } catch (err) {
     console.error('Create MediaKit error:', err);
@@ -125,21 +167,38 @@ async function updateMediaKit(req, res) {
   }
 }
 
-// GET /api/mediakits
-// Returns only: name, email, primaryPlatform, username
+// Returns array of sanitized MediaKits with trimmed socialProfiles
 async function getAllMediaKits(_req, res) {
   try {
     const docs = await MediaKit.find(
       {},
-      { name: 1, email: 1, primaryPlatform: 1, socialProfiles: 1, _id: 0 }
+      {
+        _id: 0,
+        __v: 0,
+        password: 0
+      }
     ).lean();
 
-    const items = (docs || []).map(d => ({
-      name: d.name ?? null,
-      email: d.email ?? null,
-      primaryPlatform: d.primaryPlatform ?? null,
-      username: pickUsername(d.primaryPlatform, d.socialProfiles)
-    }));
+    // If some kits don't have socialProfiles yet, we can fill them from Modash
+    const items = await Promise.all(
+      (docs || []).map(async (d) => {
+        const kit = { ...d };
+
+        if (!Array.isArray(kit.socialProfiles) || kit.socialProfiles.length === 0) {
+          if (kit.influencerId) {
+            const modashProfiles = await Modash.find({ influencerId: kit.influencerId }).lean();
+            kit.socialProfiles = mapModashToSocialProfiles(modashProfiles);
+          } else {
+            kit.socialProfiles = [];
+          }
+        } else {
+          // in case old docs store full Modash docs, remap them to the slim form
+          kit.socialProfiles = mapModashToSocialProfiles(kit.socialProfiles);
+        }
+
+        return kit;
+      })
+    );
 
     return res.json(items);
   } catch (err) {
@@ -147,6 +206,7 @@ async function getAllMediaKits(_req, res) {
     return res.status(500).json({ error: 'Internal server error' });
   }
 }
+
 
 // POST /api/mediakits/sync/by-influencer
 // Body: { influencerId }
