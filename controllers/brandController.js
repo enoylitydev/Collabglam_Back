@@ -61,21 +61,21 @@ const transporter = nodemailer.createTransport({
 
 // ---------- Pretty HTML OTP templates (orange/yellow accents) ----------
 
-const esc = (s = '') => String(s).replace(/[&<>"]/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+const esc = (s = '') => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const PREHEADER = (t) => `<div style="display:none;opacity:0;visibility:hidden;overflow:hidden;height:0;width:0;mso-hide:all;">${esc(t)}</div>`;
 
 // Email-safe design tokens (inline CSS)
-const WRAP  = 'max-width:640px;margin:0 auto;padding:0;background:#f7fafc;color:#0f172a;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;';
+const WRAP = 'max-width:640px;margin:0 auto;padding:0;background:#f7fafc;color:#0f172a;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;';
 const SHELL = 'padding:24px;';
-const CARD  = 'border-radius:16px;background:#ffffff;border:1px solid #e5e7eb;overflow:hidden;box-shadow:0 8px 20px rgba(17,24,39,0.06);';
-const BRAND_BAR  = 'padding:18px 20px;background:#ffffff;color:#111827;border-bottom:1px solid #FFE8B7;';
+const CARD = 'border-radius:16px;background:#ffffff;border:1px solid #e5e7eb;overflow:hidden;box-shadow:0 8px 20px rgba(17,24,39,0.06);';
+const BRAND_BAR = 'padding:18px 20px;background:#ffffff;color:#111827;border-bottom:1px solid #FFE8B7;';
 const BRAND_NAME = 'font-weight:900;font-size:15px;letter-spacing:.2px;';
 const ACCENT_BAR = 'height:4px;background:linear-gradient(90deg,#FF6A00 0%, #FF8A00 30%, #FF9A00 60%, #FFBF00 100%);';
-const HDR   = 'padding:20px 24px 6px 24px;font-weight:800;font-size:20px;color:#111827;';
-const SUBHDR= 'padding:0 24px 10px 24px;color:#374151;font-size:13px;';
-const BODY  = 'padding:0 24px 24px 24px;';
-const FOOT  = 'padding:14px 24px;color:#6b7280;font-size:12px;border-top:1px solid #f1f5f9;background:#fcfcfd;';
-const BTN   = 'display:inline-block;background:#111827;color:#ffffff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800;';
+const HDR = 'padding:20px 24px 6px 24px;font-weight:800;font-size:20px;color:#111827;';
+const SUBHDR = 'padding:0 24px 10px 24px;color:#374151;font-size:13px;';
+const BODY = 'padding:0 24px 24px 24px;';
+const FOOT = 'padding:14px 24px;color:#6b7280;font-size:12px;border-top:1px solid #f1f5f9;background:#fcfcfd;';
+const BTN = 'display:inline-block;background:#111827;color:#ffffff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800;';
 const SMALL = 'color:#6b7280;font-size:12px;';
 
 const CODE_WRAPPER = 'margin-top:12px;margin-bottom:6px;';
@@ -459,12 +459,23 @@ exports.register = async (req, res) => {
         expiresAt: expire,
         features: (freePlan.features || []).map((f) => ({
           key: f.key,
-          limit: typeof f.value === 'number' ? f.value : 0,
+          value: f.value,
+          limit: typeof f.value === 'number' ? Number(f.value) : 0,
           used: 0,
+          note: f.note,
+          resetsEvery: f.resetsEvery,
+          resetsAt: null,
         })),
+        internalCredits: {
+          used: 0,
+          resetsAt: null,
+        },
       };
+
       brand.subscriptionExpired = false;
     }
+
+
 
     await brand.save();
 
@@ -1203,8 +1214,15 @@ exports.getBrandQuotas = async (req, res) => {
   if (!brand?.subscription) return res.status(404).json({ message: 'Subscription not found' });
 
   const byKey = new Map((brand.subscription.features || []).map(f => [f.key, f]));
-  const v = k => byKey.get(k) || {};
-  const publicCreditsShown = toNum(v('search_quota').value) + toNum(v('profile_view_quota').value);
+  const v = (k) => byKey.get(k) || {};
+  const toNum = (x) => {
+    const n = Number(x);
+    return Number.isFinite(n) ? n : 0;
+  };
+
+  const publicCreditsShown =
+    toNum(v('search_quota').limit ?? v('search_quota').value) +
+    toNum(v('profile_view_quota').limit ?? v('profile_view_quota').value);
 
   return res.status(200).json({
     public: {
