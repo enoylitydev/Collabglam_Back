@@ -34,11 +34,6 @@ const DOC_MIMES = new Set([
 //  Subscription / Quota helpers
 // ===============================
 
-/**
- * Read numeric limit from a subscription feature row.
- * Falls back to 0 if no usable limit.
- * Expected shape: { key, limit, used } but supports value as fallback.
- */
 function readLimit(featureRow) {
   if (!featureRow) return 0;
   const raw = featureRow.limit ?? featureRow.value ?? 0;
@@ -46,11 +41,6 @@ function readLimit(featureRow) {
   return Number.isFinite(num) ? num : 0;
 }
 
-/**
- * Ensure "monthly window" for a feature.
- * For now this is a no-op that simply returns the passed row.
- * If you later add proper monthly reset tracking, plug that logic here.
- */
 async function ensureMonthlyWindow(influencerId, featureKey, featureRow) {
   return featureRow;
 }
