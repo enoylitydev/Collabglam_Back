@@ -12,6 +12,8 @@ const SubscriptionPlan = require('../models/subscription');
 const getFeature = require('../utils/getFeature');
 const Milestone = require('../models/milestone');
 const Country = require('../models/country');
+const Modash = require('../models/modash'); // adjust path if needed
+
 
 // ✅ persisted notifications helper (creates DB row + emits via socket.io)
 const { createAndEmit } = require('../utils/notifier');
@@ -645,24 +647,40 @@ exports.getCampaignsByInfluencer = async (req, res) => {
   if (!influencerId) return res.status(400).json({ message: 'influencerId is required' });
 
   try {
+    // We still need the Influencer for subscription/limits
     const inf = await Influencer.findOne({ influencerId }).lean();
     if (!inf) return res.status(404).json({ message: 'Influencer not found' });
 
-    const subIdToParentNum = await buildSubToParentNumMap();
+    // ---- NEW: pull categories from Modash instead of Influencer.onboarding ----
+    // Prefer linking via ObjectId if Influencer is found; otherwise try stored string field.
+    const modashFilter = inf?._id
+      ? { influencer: inf._id }
+      : { influencerId }; // If you guarantee Modash.influencerId mirrors the same string
 
-    const selectedSubIds = new Set((inf.onboarding?.subcategories || [])
-      .map(s => s?.subcategoryId).filter(Boolean).map(String));
+    // Only fetch categories to keep the payload small
+    const modashes = await Modash.find(modashFilter, { categories: 1 }).lean();
 
-    const selectedCatNumIds = new Set();
-    if (typeof inf.onboarding?.categoryId === 'number') selectedCatNumIds.add(inf.onboarding.categoryId);
+    const selectedSubIds = new Set();     // UUID v4 strings
+    const selectedCatNumIds = new Set();  // numeric categoryId
 
-    for (const subId of selectedSubIds) {
-      const parentNum = subIdToParentNum.get(subId);
-      if (typeof parentNum === 'number') selectedCatNumIds.add(parentNum);
+    for (const m of modashes) {
+      const cats = Array.isArray(m?.categories) ? m.categories : [];
+      for (const c of cats) {
+        // Guard & normalize
+        const subId = typeof c?.subcategoryId === 'string' ? c.subcategoryId.trim() : '';
+        const catIdNum = Number(c?.categoryId);
+
+        if (subId) selectedSubIds.add(subId);
+        if (Number.isFinite(catIdNum)) selectedCatNumIds.add(catIdNum);
+      }
     }
 
+    // If the influencer has no Modash categories, no matches
     if (selectedSubIds.size === 0 && selectedCatNumIds.size === 0) {
-      return res.json({ meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 }, campaigns: [] });
+      return res.json({
+        meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 },
+        campaigns: []
+      });
     }
 
     const subIdsArr = Array.from(selectedSubIds);
@@ -684,13 +702,16 @@ exports.getCampaignsByInfluencer = async (req, res) => {
       Campaign.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limNum).lean()
     ]);
 
+    // ---- Same subscription quota checks as before ----
     let canApply = true;
+
     const applyF = (inf.subscription?.features || []).find(f => f.key === 'apply_to_campaigns_quota');
     if (applyF) {
       const fReset = await ensureMonthlyWindow(influencerId, 'apply_to_campaigns_quota', applyF);
       const lim = readLimit(fReset);
       if (lim > 0 && Number(fReset.used || 0) >= lim) canApply = false;
     }
+
     const capF = (inf.subscription?.features || []).find(f => f.key === 'active_collaborations_limit');
     const cap = readLimit(capF);
     if (cap > 0) {
@@ -699,7 +720,15 @@ exports.getCampaignsByInfluencer = async (req, res) => {
     }
 
     const totalPages = Math.ceil(total / limNum);
-    const annotated = campaigns.map((c) => ({ ...c, hasApplied: 0, hasApproved: 0, isContracted: 0, contractId: null, isAccepted: 0, canApply }));
+    const annotated = campaigns.map(c => ({
+      ...c,
+      hasApplied: 0,
+      hasApproved: 0,
+      isContracted: 0,
+      contractId: null,
+      isAccepted: 0,
+      canApply
+    }));
 
     return res.json({ meta: { total, page: pageNum, limit: limNum, totalPages }, campaigns: annotated });
   } catch (err) {
@@ -707,6 +736,7 @@ exports.getCampaignsByInfluencer = async (req, res) => {
     return res.status(500).json({ message: 'Internal server error' });
   }
 };
+
 
 // ===============================
 //  INFLUENCER: APPROVED (milestone + contract)
