@@ -1,6 +1,22 @@
 const mongoose = require('mongoose');
 const { v4: uuidv4 } = require('uuid');
 
+const ID_PREFIX = "ds";
+const ID_DIGITS = 6;
+
+async function generateShortDisputeId() {
+  const last = await mongoose.model('Dispute').findOne().sort({ createdAt: -1 }).lean();
+  if (!last || !last.disputeId) {
+    return ID_PREFIX + "1".padStart(ID_DIGITS, "0");
+  }
+
+  const digitsMatch = String(last.disputeId).match(/(\d+)$/);
+  const prevNum = digitsMatch ? parseInt(digitsMatch[1], 10) : 0;
+  const nextNum = Math.max(0, prevNum) + 1;
+
+  return ID_PREFIX + String(nextNum).padStart(ID_DIGITS, "0");
+}
+
 const attachmentSchema = new mongoose.Schema({
   url: { type: String, required: true },
   originalName: { type: String },
@@ -18,7 +34,7 @@ const commentSchema = new mongoose.Schema({
 }, { _id: false });
 
 const disputeSchema = new mongoose.Schema({
-  disputeId: { type: String, required: true, unique: true, default: uuidv4 },
+  disputeId: { type: String, required: true, unique: true },
 
   // linkage
   campaignId: { type: String, required: false, default: null, ref: 'Campaign' },
@@ -48,6 +64,11 @@ const disputeSchema = new mongoose.Schema({
 
   comments: { type: [commentSchema], default: [] }
 }, { timestamps: true });
+
+disputeSchema.pre('validate', async function () {
+  if (this.disputeId) return;
+  this.disputeId = await generateShortDisputeId();
+});
 
 disputeSchema.index({ brandId: 1, createdAt: -1 });
 disputeSchema.index({ influencerId: 1, createdAt: -1 });
