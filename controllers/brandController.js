@@ -104,7 +104,7 @@ function otpHtmlTemplate({
 }) {
   const hasCta = Boolean(ctaHref && ctaLabel);
   return `
-  ${PREHEADER(`${preheader}: ${code}`)}
+ ${PREHEADER(preheader)}
   <div style="${WRAP}">
     <div style="${SHELL}">
       <div style="${CARD}">
@@ -1021,7 +1021,7 @@ exports.verifyEmailUpdate = async (req, res) => {
     await doc.save();
 
     // Optional: clean up old email VerifyEmail record
-    await VerifyEmail.deleteOne({ email: oldEmail, role: 'Brand' }).catch(() => {});
+    await VerifyEmail.deleteOne({ email: oldEmail, role: 'Brand' }).catch(() => { });
 
     // Fresh JWT reflecting new email
     const token = jwt.sign(

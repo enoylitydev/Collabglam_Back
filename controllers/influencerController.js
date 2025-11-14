@@ -39,7 +39,7 @@ const SMTP_PASS = process.env.SMTP_PASS;
 const JWT_SECRET = process.env.JWT_SECRET;
 
 const MAIL_FROM_NAME = process.env.MAIL_FROM_NAME || 'CollabGlam';
-const PRODUCT_NAME   = process.env.PRODUCT_NAME   || 'CollabGlam';
+const PRODUCT_NAME = process.env.PRODUCT_NAME || 'CollabGlam';
 
 const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
@@ -49,20 +49,20 @@ const transporter = nodemailer.createTransport({
 });
 
 /* ===== Shared professional HTML OTP template (orange/yellow accents) ===== */
-const esc = (s = '') => String(s).replace(/[&<>"]/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+const esc = (s = '') => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const PREHEADER = (t) => `<div style="display:none;opacity:0;visibility:hidden;overflow:hidden;height:0;width:0;mso-hide:all;">${esc(t)}</div>`;
 
-const WRAP  = 'max-width:640px;margin:0 auto;padding:0;background:#f7fafc;color:#0f172a;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;';
+const WRAP = 'max-width:640px;margin:0 auto;padding:0;background:#f7fafc;color:#0f172a;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;';
 const SHELL = 'padding:24px;';
-const CARD  = 'border-radius:16px;background:#ffffff;border:1px solid #e5e7eb;overflow:hidden;box-shadow:0 8px 20px rgba(17,24,39,0.06);';
-const BRAND_BAR  = 'padding:18px 20px;background:#ffffff;color:#111827;border-bottom:1px solid #FFE8B7;';
+const CARD = 'border-radius:16px;background:#ffffff;border:1px solid #e5e7eb;overflow:hidden;box-shadow:0 8px 20px rgba(17,24,39,0.06);';
+const BRAND_BAR = 'padding:18px 20px;background:#ffffff;color:#111827;border-bottom:1px solid #FFE8B7;';
 const BRAND_NAME = 'font-weight:900;font-size:15px;letter-spacing:.2px;';
 const ACCENT_BAR = 'height:4px;background:linear-gradient(90deg,#FF6A00 0%, #FF8A00 30%, #FF9A00 60%, #FFBF00 100%);';
-const HDR   = 'padding:20px 24px 6px 24px;font-weight:800;font-size:20px;color:#111827;';
-const SUBHDR= 'padding:0 24px 10px 24px;color:#374151;font-size:13px;';
-const BODY  = 'padding:0 24px 24px 24px;';
-const FOOT  = 'padding:14px 24px;color:#6b7280;font-size:12px;border-top:1px solid #f1f5f9;background:#fcfcfd;';
-const BTN   = 'display:inline-block;background:#111827;color:#ffffff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800;';
+const HDR = 'padding:20px 24px 6px 24px;font-weight:800;font-size:20px;color:#111827;';
+const SUBHDR = 'padding:0 24px 10px 24px;color:#374151;font-size:13px;';
+const BODY = 'padding:0 24px 24px 24px;';
+const FOOT = 'padding:14px 24px;color:#6b7280;font-size:12px;border-top:1px solid #f1f5f9;background:#fcfcfd;';
+const BTN = 'display:inline-block;background:#111827;color:#ffffff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800;';
 const SMALL = 'color:#6b7280;font-size:12px;';
 
 const CODE_WRAPPER = 'margin-top:12px;margin-bottom:6px;';
@@ -91,7 +91,7 @@ function otpHtmlTemplate({
 }) {
   const hasCta = Boolean(ctaHref && ctaLabel);
   return `
-  ${PREHEADER(`${preheader}: ${code}`)}
+ ${PREHEADER(preheader)}
   <div style="${WRAP}">
     <div style="${SHELL}">
       <div style="${CARD}">
@@ -573,7 +573,7 @@ exports.registerInfluencer = async (req, res) => {
     if (!password || String(password).length < 8) {
       return res.status(400).json({ message: 'Password must be at least 8 characters' });
     }
-    if (!name || !countryId ) {
+    if (!name || !countryId) {
       return res.status(400).json({ message: 'Missing required fields (name, countryId)' });
     }
 
@@ -1490,7 +1490,7 @@ exports.suggestInfluencers = async (req, res) => {
     if (!q) return res.json({ success: true, suggestions: [] });
 
     const candidates = await Influencer.find(
-      { },
+      {},
       'name categoryName platformName country socialMedia'
     ).limit(100).lean();
 
@@ -1755,7 +1755,7 @@ exports.verifyotp = async (req, res) => {
     await ve.save();
 
     // optional: clean up old email VerifyEmail record
-    await VerifyEmail.deleteOne({ email: oldEmail, role: 'Influencer' }).catch(() => {});
+    await VerifyEmail.deleteOne({ email: oldEmail, role: 'Influencer' }).catch(() => { });
 
     return res.status(200).json({ message: 'Email updated successfully' });
   } catch (err) {
