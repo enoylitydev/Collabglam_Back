@@ -19,7 +19,7 @@ function disputeCreatedTemplate({ userName, ticketId, category }) {
     html: `
      <div style="font-family: 'Arial', sans-serif; max-width: 600px; margin: auto; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; background-color: #ffffff;">
       <!-- Header: Brand Focused (Darker Blue) -->
-      <div style="color: white; padding: 20px; text-align: center;">
+      <div style="padding: 20px; text-align: center;">
         <h2 style="margin: 0; font-size: 24px;">CollabGlam</h2>
       </div>
       <div style="height:4px;background:linear-gradient(90deg,#FF6A00 0%, #FF8A00 30%, #FF9A00 60%, #FFBF00 100%);"></div>
@@ -30,7 +30,7 @@ function disputeCreatedTemplate({ userName, ticketId, category }) {
       <p>Our support team will review it and get back to you shortly.</p>
 
       <p><strong>Ticket ID:</strong> ${ticketId}</p>
-      <p><strong>Category:</strong> ${category}</p>
+      <p><strong>Subject:</strong> ${category}</p>
 
       <p>You can track your dispute anytime from your dashboard under <b>“My Disputes.”</b></p>
       <br>
@@ -47,7 +47,7 @@ function disputeResolvedTemplate({ userName, ticketId, resolutionSummary }) {
     html: `
      <div style="font-family: 'Arial', sans-serif; max-width: 600px; margin: auto; border: 1px solid #e0e0e0; border-radius: 16px; overflow: hidden; background-color: #ffffff;">
       <!-- Header: Brand Focused (Darker Blue) -->
-      <div style="color: white; padding: 20px; text-align: center;">
+      <div style="padding: 20px; text-align: center;">
         <h2 style="margin: 0; font-size: 24px;">CollabGlam</h2>
       </div>
       <div style="height:4px;background:linear-gradient(90deg,#FF6A00 0%, #FF8A00 30%, #FF9A00 60%, #FFBF00 100%);"></div>
@@ -93,25 +93,41 @@ transporter.verify((err, success) => {
 });
 
 // -------------------------
-// Controller functions
+// Core Email Logic
+// -------------------------
+async function handleSendDisputeCreated({ email, userName, ticketId, category }) {
+  if (!email || !userName || !ticketId) {
+    throw new Error('email, userName, and ticketId are required');
+  }
+  const template = disputeCreatedTemplate({ userName, ticketId, category });
+  await transporter.sendMail({
+    from: process.env.SMTP_USER,
+    to: email,
+    subject: template.subject,
+    html: template.html,
+  });
+}
+
+async function handleSendDisputeResolved({ email, userName, ticketId, resolutionSummary }) {
+  if (!email || !userName || !ticketId || !resolutionSummary) {
+    throw new Error('email, userName, ticketId, and resolutionSummary are required');
+  }
+  const template = disputeResolvedTemplate({ userName, ticketId, resolutionSummary });
+  await transporter.sendMail({
+    from: process.env.SMTP_USER,
+    to: email,
+    subject: template.subject,
+    html: template.html,
+  });
+}
+
+
+// -------------------------
+// Controller functions (for routes)
 // -------------------------
 async function sendDisputeCreated(req, res) {
   try {
-    const { email, userName, ticketId, category } = req.body;
-
-    if (!email || !userName || !ticketId) {
-      return res.status(400).json({ success: false, error: 'email, userName, and ticketId are required' });
-    }
-
-    const template = disputeCreatedTemplate({ userName, ticketId, category });
-
-    await transporter.sendMail({
-      from: process.env.SMTP_USER,
-      to: email,
-      subject: template.subject,
-      html: template.html,
-    });
-
+    await handleSendDisputeCreated(req.body);
     res.json({ success: true, message: 'Dispute created email sent' });
   } catch (err) {
     console.error('sendDisputeCreated Error:', err);
@@ -121,21 +137,7 @@ async function sendDisputeCreated(req, res) {
 
 async function sendDisputeResolved(req, res) {
   try {
-    const { email, userName, ticketId, resolutionSummary } = req.body;
-
-    if (!email || !userName || !ticketId || !resolutionSummary) {
-      return res.status(400).json({ success: false, error: 'email, userName, ticketId, and resolutionSummary are required' });
-    }
-
-    const template = disputeResolvedTemplate({ userName, ticketId, resolutionSummary });
-
-    await transporter.sendMail({
-      from: process.env.SMTP_USER,
-      to: email,
-      subject: template.subject,
-      html: template.html,
-    });
-
+    await handleSendDisputeResolved(req.body);
     res.json({ success: true, message: 'Dispute resolved email sent' });
   } catch (err) {
     console.error('sendDisputeResolved Error:', err);
@@ -145,5 +147,7 @@ async function sendDisputeResolved(req, res) {
 
 module.exports = {
   sendDisputeCreated,
-  sendDisputeResolved
+  sendDisputeResolved,
+  handleSendDisputeCreated,
+  handleSendDisputeResolved,
 };

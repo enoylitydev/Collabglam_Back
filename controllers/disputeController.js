@@ -4,6 +4,7 @@ const Campaign = require('../models/campaign');
 const Admin = require('../models/admin');
 const Brand = require('../models/brand');
 const Influencer = require('../models/influencer');
+const { handleSendDisputeCreated, handleSendDisputeResolved } = require('../emails/disputeEmailController');
 
 const ALLOWED_STATUSES = new Set(['open', 'in_review', 'awaiting_user', 'resolved', 'rejected']);
 
@@ -76,7 +77,22 @@ exports.createDispute = async (req, res) => {
 
     await dispute.save();
 
-    // NOTE: email/notification logic removed
+    // Send email notification
+    let user;
+    if (me.role === 'Brand') {
+      user = await Brand.findOne({ brandId: me.id }).lean();
+    } else if (me.role === 'Influencer') {
+      user = await Influencer.findOne({ influencerId: me.id }).lean();
+    }
+
+    if (user) {
+      await handleSendDisputeCreated({
+        email: user.email,
+        userName: user.name,
+        ticketId: dispute.disputeId,
+        category: dispute.subject,
+      });
+    }
 
     return res.status(201).json({ message: 'Dispute created', disputeId: dispute.disputeId });
   } catch (err) {
@@ -361,23 +377,27 @@ exports.adminList = async (req, res) => {
       .limit(l)
       .lean();
 
-    // Enrich with brand/influencer names
+    // Enrich with brand/influencer/campaign names
     try {
       const brandIds = Array.from(new Set(rows.map(r => r.brandId).filter(Boolean))).map(String);
       const influencerIds = Array.from(new Set(rows.map(r => r.influencerId).filter(Boolean))).map(String);
+      const campaignIds = Array.from(new Set(rows.map(r => r.campaignId).filter(Boolean))).map(String);
 
-      const [brands, influencers] = await Promise.all([
+      const [brands, influencers, campaigns] = await Promise.all([
         brandIds.length ? Brand.find({ brandId: { $in: brandIds } }).select('brandId name').lean() : [],
         influencerIds.length ? Influencer.find({ influencerId: { $in: influencerIds } }).select('influencerId name').lean() : [],
+        campaignIds.length ? Campaign.find({ campaignsId: { $in: campaignIds } }).select('campaignsId productOrServiceName').lean() : [],
       ]);
 
       const brandMap = new Map((brands || []).map(b => [String(b.brandId), b.name]));
       const infMap = new Map((influencers || []).map(i => [String(i.influencerId), i.name]));
+      const campMap = new Map((campaigns || []).map(c => [String(c.campaignsId), c.productOrServiceName]));
 
       const enriched = rows.map(r => ({
         ...r,
         brandName: brandMap.get(String(r.brandId)) || null,
         influencerName: infMap.get(String(r.influencerId)) || null,
+        campaignName: r.campaignId ? (campMap.get(String(r.campaignId)) || null) : null,
       }));
 
       return res.status(200).json({ page: p, limit: l, total, totalPages: Math.ceil(total / l), disputes: enriched });
@@ -414,7 +434,32 @@ exports.adminUpdateStatus = async (req, res) => {
     }
     await d.save();
 
-    // NOTE: email/notification logic removed
+    // If resolved, send email to both parties
+    if (d.status === 'resolved') {
+      const [brand, influencer] = await Promise.all([
+        Brand.findOne({ brandId: d.brandId }).lean(),
+        Influencer.findOne({ influencerId: d.influencerId }).lean()
+      ]);
+
+      const resolutionSummary = resolution || 'The dispute has been reviewed and resolved by our team.';
+
+      if (brand) {
+        await handleSendDisputeResolved({
+          email: brand.email,
+          userName: brand.name,
+          ticketId: d.disputeId,
+          resolutionSummary,
+        });
+      }
+      if (influencer) {
+        await handleSendDisputeResolved({
+          email: influencer.email,
+          userName: influencer.name,
+          ticketId: d.disputeId,
+          resolutionSummary,
+        });
+      }
+    }
 
     return res.status(200).json({ message: 'Status updated' });
   } catch (err) {
