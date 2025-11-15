@@ -246,6 +246,7 @@ exports.createCampaign = (req, res) => {
         return res.status(403).json({ message: `You have reached this cycle’s campaign quota ${limit}.` });
       }
 
+
       // targetAudience
       let audienceData = { age: { MinAge: 0, MaxAge: 0 }, gender: 2, locations: [] };
       if (targetAudience) {
@@ -932,22 +933,42 @@ exports.getAcceptedCampaigns = async (req, res) => {
 //  ACCEPTED INFLUENCERS (per Campaign)
 // ===============================
 exports.getAcceptedInfluencers = async (req, res) => {
-  const { campaignId, search = '', page = 1, limit = 10, sortBy = 'createdAt', order = 'desc' } = req.body;
+  const {
+    campaignId,
+    search = '',
+    page = 1,
+    limit = 10,
+    sortBy = 'createdAt',
+    order = 'desc'
+  } = req.body;
 
-  if (!campaignId) return res.status(400).json({ message: 'campaignId is required' });
+  if (!campaignId) {
+    return res.status(400).json({ message: 'campaignId is required' });
+  }
 
   try {
-    const contracts = await Contract.find({ campaignId, isAccepted: 1 }, 'influencerId contractId feeAmount').lean();
+    const contracts = await Contract.find(
+      { campaignId, isAccepted: 1 },
+      'influencerId contractId feeAmount'
+    ).lean();
 
     const influencerIds = contracts.map((c) => c.influencerId);
-    if (influencerIds.length === 0) return res.status(200).json({ meta: { total: 0, page, limit, totalPages: 0 }, influencers: [] });
+    if (!influencerIds.length) {
+      return res.status(200).json({
+        meta: { total: 0, page, limit, totalPages: 0 },
+        influencers: []
+      });
+    }
 
     const contractMap = new Map();
     const feeMap = new Map();
-    contracts.forEach((c) => { contractMap.set(c.influencerId, c.contractId); feeMap.set(c.influencerId, c.feeAmount); });
+    contracts.forEach((c) => {
+      contractMap.set(String(c.influencerId), c.contractId);
+      feeMap.set(String(c.influencerId), c.feeAmount);
+    });
 
     const filter = { influencerId: { $in: influencerIds } };
-    if (search.trim()) {
+    if (search && search.trim()) {
       const term = search.trim();
       const regex = new RegExp(term, 'i');
       filter.$or = [{ name: regex }, { handle: regex }, { email: regex }];
@@ -957,29 +978,134 @@ exports.getAcceptedInfluencers = async (req, res) => {
     const limNum = Math.max(1, parseInt(limit, 10));
     const skip = (pageNum - 1) * limNum;
 
-    const SORT_WHITELIST = { createdAt: 'createdAt', name: 'name', followerCount: 'followerCount', feeAmount: 'feeAmount' };
+    const SORT_WHITELIST = {
+      createdAt: 'createdAt',
+      name: 'name',
+      followerCount: 'followerCount',
+      feeAmount: 'feeAmount'
+    };
     const sortField = SORT_WHITELIST[sortBy] || 'createdAt';
     const sortDir = order === 'asc' ? 1 : -1;
     const needPostSort = sortField === 'feeAmount';
     const mongoSort = needPostSort ? {} : { [sortField]: sortDir };
 
+    // 1️⃣ Fetch influencers (paged)
     const [total, rawInfluencers] = await Promise.all([
       Influencer.countDocuments(filter),
-      Influencer.find(filter).sort(mongoSort).skip(skip).limit(limNum).select('-passwordHash -__v').lean()
+      Influencer.find(filter)
+        .sort(mongoSort)
+        .skip(skip)
+        .limit(limNum)
+        .select('-passwordHash -__v')
+        .lean()
     ]);
 
-    let influencers = rawInfluencers.map((i) => ({ ...i, contractId: contractMap.get(i.influencerId), feeAmount: feeMap.get(i.influencerId), isAccepted: 1 }));
-
-    if (needPostSort) {
-      influencers.sort((a, b) => (sortDir === 1 ? a.feeAmount - b.feeAmount : b.feeAmount - a.feeAmount));
+    if (!rawInfluencers.length) {
+      return res.json({
+        meta: { total: 0, page: pageNum, limit: limNum, totalPages: 0 },
+        influencers: []
+      });
     }
 
-    return res.json({ meta: { total, page: pageNum, limit: limNum, totalPages: Math.ceil(total / limNum) }, influencers });
+    // 2️⃣ Fetch Modash profiles for ONLY these paged influencers
+    const pageInfluencerIds = rawInfluencers.map((i) => String(i.influencerId));
+    const modashProfiles = await Modash.find(
+      { influencerId: { $in: pageInfluencerIds } },
+      'influencerId username handle followers provider'
+    ).lean();
+
+    // Group Modash docs by influencerId
+    const modashByInfluencerId = new Map();
+    modashProfiles.forEach((m) => {
+      const key = String(m.influencerId);
+      if (!modashByInfluencerId.has(key)) {
+        modashByInfluencerId.set(key, []);
+      }
+      modashByInfluencerId.get(key).push(m);
+    });
+
+    const ALLOWED_PROVIDERS = ['youtube', 'instagram', 'tiktok'];
+
+    // Helper: pick "primary" Modash profile
+    function pickPrimaryProfile(influencerDoc, profilesForInfluencer) {
+      if (!Array.isArray(profilesForInfluencer) || profilesForInfluencer.length === 0) {
+        return null;
+      }
+
+      const primaryPlatform = (influencerDoc.primaryPlatform || '').toLowerCase();
+
+      if (ALLOWED_PROVIDERS.includes(primaryPlatform)) {
+        const direct = profilesForInfluencer.find(
+          (p) => (p.provider || '').toLowerCase() === primaryPlatform
+        );
+        if (direct) return direct;
+      }
+
+      // Fallback → profile with highest followers
+      return profilesForInfluencer.reduce((best, current) => {
+        if (!best) return current;
+        const bestFollowers =
+          typeof best.followers === 'number' ? best.followers : 0;
+        const currentFollowers =
+          typeof current.followers === 'number' ? current.followers : 0;
+        return currentFollowers > bestFollowers ? current : best;
+      }, null);
+    }
+
+    // 3️⃣ Merge in contract info + **primary** social handle + **primary** audience size
+    let influencers = rawInfluencers.map((inf) => {
+      const key = String(inf.influencerId);
+      const profiles = modashByInfluencerId.get(key) || [];
+      const primaryProfile = pickPrimaryProfile(inf, profiles);
+
+      const socialHandle =
+        (primaryProfile && (primaryProfile.username || primaryProfile.handle)) ||
+        inf.handle ||
+        null;
+
+      const audienceSize =
+        primaryProfile && typeof primaryProfile.followers === 'number'
+          ? primaryProfile.followers
+          : typeof inf.followerCount === 'number'
+          ? inf.followerCount
+          : 0;
+
+      return {
+        ...inf,
+        contractId: contractMap.get(key) || null,
+        feeAmount: feeMap.get(key) || 0,
+        isAccepted: 1,
+        socialHandle,        // handle of primary account
+        audienceSize,        // followers of primary account
+        primaryPlatform: inf.primaryPlatform || null,
+        primaryProvider: primaryProfile ? primaryProfile.provider : null
+      };
+    });
+
+    // 4️⃣ Optional post-sort by feeAmount (unchanged)
+    if (needPostSort) {
+      influencers.sort((a, b) =>
+        sortDir === 1 ? a.feeAmount - b.feeAmount : b.feeAmount - a.feeAmount
+      );
+    }
+
+    return res.json({
+      meta: {
+        total,
+        page: pageNum,
+        limit: limNum,
+        totalPages: Math.ceil(total / limNum)
+      },
+      influencers
+    });
   } catch (err) {
     console.error('Error in getAcceptedInfluencers:', err);
-    return res.status(500).json({ message: 'Internal server error' });
+    return res
+      .status(500)
+      .json({ message: 'Internal server error' });
   }
 };
+
 
 // ===============================
 //  INFLUENCER: CONTRACTED (assigned but no milestone)
