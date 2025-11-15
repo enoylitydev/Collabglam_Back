@@ -799,7 +799,7 @@ async function renderPDFWithPuppeteer({ html, res, filename = "Contract.pdf", he
 
   try {
     browser = await puppeteer.launch({
-      headless: true, // use boolean, works better on many hosts
+      headless: true,
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
@@ -807,13 +807,12 @@ async function renderPDFWithPuppeteer({ html, res, filename = "Contract.pdf", he
         "--disable-gpu",
         "--disable-extensions",
       ],
-      // allow overriding path in prod
       executablePath: process.env.CHROME_EXECUTABLE_PATH || undefined,
     });
 
     const page = await browser.newPage();
     await page.emulateMediaType("print");
-    await page.setContent(html, { waitUntil: ["load", "domcontentloaded", "networkidle0"] });
+    await page.setContent(html, { waitUntil: "networkidle0" });
 
     const needsLandscape = /data-require-landscape="1"/i.test(html);
 
@@ -834,7 +833,7 @@ async function renderPDFWithPuppeteer({ html, res, filename = "Contract.pdf", he
     return res.end(pdf);
   } catch (e) {
     console.error("Puppeteer PDF failed", e);
-    return respondError(res, "PDF rendering failed", 500, e);
+    throw e;
   } finally {
     try {
       if (browser) await browser.close();
