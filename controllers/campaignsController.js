@@ -34,6 +34,60 @@ const DOC_MIMES = new Set([
 //  Subscription / Quota helpers
 // ===============================
 
+async function ensureBrandQuota(brandId, featureKey, amount = 1) {
+  if (!brandId) {
+    throw new Error('brandId is required for quota checks');
+  }
+
+  // Only fetch subscription; keep it light
+  const brand = await Brand.findOne({ brandId }, 'subscription').lean();
+  if (!brand || !brand.subscription) {
+    throw new Error('Brand subscription not configured');
+  }
+
+  const feature = getFeature.getFeature(brand.subscription, featureKey);
+
+  // If feature is missing → treat as unlimited (same semantics as influencer quotas)
+  if (!feature) {
+    return { limit: 0, used: 0, remaining: Infinity };
+  }
+
+  // value OR limit can hold the numeric cap
+  const limit = readLimit(feature); // 0 or NaN -> unlimited
+  const used = Number(feature.used || 0) || 0;
+
+  // If limit is 0 => unlimited, just return
+  if (limit === 0) {
+    return { limit: 0, used, remaining: Infinity };
+  }
+
+  // Enforce limit
+  if (used + amount > limit) {
+    const remaining = Math.max(limit - used, 0);
+    const err = new Error(`Quota exceeded for feature ${featureKey}`);
+    err.code = 'QUOTA_EXCEEDED';
+    err.meta = { limit, used, requested: amount, remaining };
+    throw err;
+  }
+
+  // Persist usage
+  await Brand.updateOne(
+    {
+      brandId,
+      'subscription.features.key': featureKey
+    },
+    {
+      $inc: { 'subscription.features.$.used': amount }
+    }
+  );
+
+  return {
+    limit,
+    used: used + amount,
+    remaining: limit - (used + amount)
+  };
+}
+
 function readLimit(featureRow) {
   if (!featureRow) return 0;
   const raw = featureRow.limit ?? featureRow.value ?? 0;
@@ -232,19 +286,26 @@ exports.createCampaign = (req, res) => {
         return res.status(400).json({ message: 'productOrServiceName and goal are required.' });
       }
 
-      // Brand & plan
-      const brand = await Brand.findOne({ brandId });
-      if (!brand) return res.status(404).json({ message: 'Brand not found.' });
+// Brand & plan
+const brand = await Brand.findOne({ brandId });
+if (!brand) return res.status(404).json({ message: 'Brand not found.' });
 
-      const plan = await SubscriptionPlan.findOne({ planId: brand.subscription.planId }).lean();
-      if (!plan) return res.status(500).json({ message: 'Subscription plan not found.' });
+const plan = await SubscriptionPlan.findOne({ planId: brand.subscription.planId }).lean();
+if (!plan) return res.status(500).json({ message: 'Subscription plan not found.' });
 
-      const liveCap = getFeature.getFeature(brand.subscription, 'live_campaigns_limit');
-      const limit = liveCap ? liveCap.limit : 0;
-      const used = liveCap ? liveCap.used : 0;
-      if (limit > 0 && used >= limit) {
-        return res.status(403).json({ message: `You have reached this cycle’s campaign quota ${limit}.` });
-      }
+// Enforce ACTIVE CAMPAIGNS LIMIT (concurrent)
+const campFeat = getFeature.getFeature(brand.subscription, 'active_campaigns_limit');
+const campLimit = readLimit(campFeat); // 0 => unlimited / enterprise
+
+if (campLimit > 0) {
+  const currentActive = await Campaign.countDocuments({ brandId, isActive: 1 });
+  if (currentActive >= campLimit) {
+    return res.status(403).json({
+      message: `You have reached your active campaign limit (${campLimit}).`
+    });
+  }
+}
+
 
 
       // targetAudience
@@ -327,13 +388,6 @@ exports.createCampaign = (req, res) => {
 
       await newCampaign.save();
 
-      // update usage
-      if (limit > 0) {
-        await Brand.updateOne(
-          { brandId, 'subscription.features.key': 'live_campaigns_limit' },
-          { $inc: { 'subscription.features.$.used': 1 } }
-        );
-      }
 
       // ==== Notifications to matching influencers ====
       try {
