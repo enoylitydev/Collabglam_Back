@@ -798,7 +798,19 @@ async function renderPDFWithPuppeteer({ html, res, filename = "Contract.pdf", he
     </div>`;
 
   try {
-    browser = await puppeteer.launch({ headless: "new", args: ["--no-sandbox", "--disable-setuid-sandbox"] });
+    browser = await puppeteer.launch({
+      headless: true, // use boolean, works better on many hosts
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-extensions",
+      ],
+      // allow overriding path in prod
+      executablePath: process.env.CHROME_EXECUTABLE_PATH || undefined,
+    });
+
     const page = await browser.newPage();
     await page.emulateMediaType("print");
     await page.setContent(html, { waitUntil: ["load", "domcontentloaded", "networkidle0"] });
@@ -819,26 +831,10 @@ async function renderPDFWithPuppeteer({ html, res, filename = "Contract.pdf", he
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `inline; filename=${filename}`);
-    res.end(pdf);
+    return res.end(pdf);
   } catch (e) {
-    console.warn("Puppeteer PDF failed; falling back to PDFKit", e);
-    try {
-      const doc = new PDFDocument({ margin: 50 });
-      res.setHeader("Content-Type", "application/pdf");
-      res.setHeader("Content-Disposition", `inline; filename=${filename}`);
-      doc.pipe(res);
-      doc.fontSize(18).text("Master Brand–Influencer Agreement", { align: "center" }).moveDown();
-      const paragraphs = String(
-        html.replace(/<[^>]+>/g, "\n").replace(/\n{2,}/g, "\n\n")
-      ).split(/\n\s*\n/);
-      paragraphs.forEach((p, i) => {
-        doc.fontSize(11).text(p.trim(), { align: "justify" });
-        if (i < paragraphs.length - 1) doc.moveDown();
-      });
-      doc.end();
-    } catch (e2) {
-      return respondError(res, "PDF rendering failed", 500, e2);
-    }
+    console.error("Puppeteer PDF failed", e);
+    return respondError(res, "PDF rendering failed", 500, e);
   } finally {
     try {
       if (browser) await browser.close();
