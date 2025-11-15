@@ -5,6 +5,7 @@ const { fetch } = require('undici');
 
 const ModashProfile = require('../models/modash');
 const Influencer = require('../models/influencer');
+const { ensureBrandQuota } = require('../utils/quota');
 
 const MODASH_API_KEY = process.env.MODASH_API_KEY;
 const MODASH_BASE_URL = process.env.MODASH_BASE_URL || 'https://api.modash.io/v1';
@@ -635,11 +636,30 @@ async function frontendUsers(req, res) {
 async function frontendSearch(req, res) {
   try {
     const payload = req.body || {};
+    const brandId = payload.brandId || payload.brand_id;
+
+    if (!brandId) {
+      return res.status(400).json({ error: 'brandId is required for search' });
+    }
+
+    // Enforce searches_per_month
+    try {
+      await ensureBrandQuota(brandId, 'searches_per_month', 1);
+    } catch (e) {
+      if (e.code === 'QUOTA_EXCEEDED') {
+        return res.status(403).json({
+          error: 'You have reached your monthly search limit.',
+          meta: e.meta
+        });
+      }
+      throw e;
+    }
+
     const platforms = Array.isArray(payload.platforms) ? payload.platforms : [];
     const body = payload.body || {};
 
     if (!platforms.length || !body) {
-      return res.status(400).json({ error: 'Provide { platforms, body }' });
+      return res.status(400).json({ error: 'Provide { brandId, platforms, body }' });
     }
 
     const responses = [];
@@ -653,7 +673,7 @@ async function frontendSearch(req, res) {
       const firstBody = buildPlatformBody(platform, body);
       let data = await modashPOST(`/${platform}/search`, firstBody);
 
-      // If YouTube came back empty, try ONE relaxed retry (optional)
+      // Optional YouTube fallback if empty
       const enableFallback = (process.env.MODASH_YT_FALLBACK || '1') !== '0';
       if (platform === 'youtube' && enableFallback && Number((data && data.total) || 0) === 0) {
         const retryBody = buildPlatformBody(platform, body, { relax: true });
@@ -671,7 +691,6 @@ async function frontendSearch(req, res) {
     }
 
     const collected = [];
-
     for (const { platform, data } of responses) {
       const bag = []
         .concat(Array.isArray(data && data.results) ? data.results : [])
@@ -693,7 +712,13 @@ async function frontendSearch(req, res) {
       0
     );
 
-    return res.json({ results: merged, total, unique: merged.length });
+    return res.json({
+      results: merged,
+      total,
+      unique: merged.length
+      // Optionally also return remaining quota here, if you want:
+      // quota: { feature: 'searches_per_month', ... (from ensureBrandQuota) }
+    });
   } catch (err) {
     const raw = (err && err.message) || '';
     const isSensitive = /api token|developer section|modash|authorization|bearer|modash_api_key/i.test(
@@ -723,6 +748,13 @@ function toCalcMethod(input) {
  */
 async function frontendReport(req, res) {
   try {
+    const brandId =
+      (req.query.brandId || req.query.brand_id || '').toString().trim();
+
+    if (!brandId) {
+      return res.status(400).json({ error: 'brandId is required for profile views' });
+    }
+
     const platform = (req.query.platform || '').toString().toLowerCase();
     const userId = (req.query.userId || '').toString();
     const calculationMethod = toCalcMethod(req.query.calculationMethod);
@@ -747,7 +779,20 @@ async function frontendReport(req, res) {
       return res.status(400).json({ error: 'userId is required' });
     }
 
-    /* -------------------- 1) Try DB cache first -------------------- */
+    // Enforce profile_views_per_month
+    try {
+      await ensureBrandQuota(brandId, 'profile_views_per_month', 1);
+    } catch (e) {
+      if (e.code === 'QUOTA_EXCEEDED') {
+        return res.status(403).json({
+          error: 'You have reached your monthly profile view limit.',
+          meta: e.meta
+        });
+      }
+      throw e;
+    }
+
+    // 1) Cache
     if (!forceFresh) {
       try {
         const cached = await findCachedReport({ platform, userId, influencerId });
@@ -767,7 +812,7 @@ async function frontendReport(req, res) {
       }
     }
 
-    /* ---------------- 2) Fallback: call Modash API ----------------- */
+    // 2) Live Modash call
     try {
       const fetchedAt = new Date();
 
@@ -776,20 +821,20 @@ async function frontendReport(req, res) {
         { calculationMethod }
       );
 
-      // Persist into Modash collection (best-effort)
+      // Persist Modash profile (best-effort)
       try {
         await upsertModashProfileFromReport({
           platform,
           reportJSON: data,
           influencerId,
-          fetchedAt,
+          fetchedAt
         });
       } catch (saveErr) {
         console.error('[modash] Failed to upsert Modash profile:', saveErr);
       }
 
       const out = Object.assign({}, data, {
-        _lastFetchedAt: fetchedAt.toISOString(),
+        _lastFetchedAt: fetchedAt.toISOString()
       });
 
       return res.json(out);

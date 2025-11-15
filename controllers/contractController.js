@@ -316,8 +316,20 @@ function normalizeDeliverable(d = {}, opts = {}) {
     nd.revisionRoundsIncluded = opts.defaultRevRounds ?? 1;
   if (nd.additionalRevisionFee === undefined)
     nd.additionalRevisionFee = opts.extraRevisionFee ?? 0;
-  if (nd.liveRetentionMonths === undefined)
-    nd.liveRetentionMonths = nd.minLiveHours === undefined ? "-" : nd.liveRetentionMonths;
+
+  // ✅ SANITIZE liveRetentionMonths FOR NUMBER SCHEMA
+  if (
+    nd.liveRetentionMonths === "-" ||
+    nd.liveRetentionMonths === "" ||
+    nd.liveRetentionMonths === null ||
+    nd.liveRetentionMonths === undefined
+  ) {
+    // treat "-" and empty as "no retention set"
+    nd.liveRetentionMonths = undefined;
+  } else if (typeof nd.liveRetentionMonths === "string") {
+    const parsed = Number(nd.liveRetentionMonths);
+    nd.liveRetentionMonths = Number.isFinite(parsed) ? parsed : undefined;
+  }
 
   return nd;
 }
@@ -1167,7 +1179,6 @@ exports.initiate = async (req, res) => {
             minLiveHours: 720,
             revisionRoundsIncluded: brandInput.revisionsIncluded ?? 1,
             additionalRevisionFee: admin.extraRevisionFee ?? 0,
-            liveRetentionMonths: "-",
             tags: [],
             handles: [],
             captions: "",
@@ -1881,7 +1892,15 @@ const ALLOWED_INFLUENCER_KEYS = [
 
 exports.brandUpdateFields = async (req, res) => {
   try {
-    const { contractId, brandId, brandUpdates = {} } = req.body;
+    const {
+      contractId,
+      brandId,
+      brandUpdates = {},
+      type = 0, // 0 = update/save, 1 = preview
+    } = req.body;
+
+    const isPreview = Number(type) === 1;
+
     assertRequired(req.body, ["contractId", "brandId"]);
 
     const contract = await Contract.findOne({ contractId, brandId });
@@ -1895,8 +1914,10 @@ exports.brandUpdateFields = async (req, res) => {
 
     const before = { brand: contract.brand?.toObject?.() || contract.brand };
 
+    // apply incoming brandUpdates (mutating the in-memory contract)
     for (const k of Object.keys(brandUpdates)) {
       if (!ALLOWED_BRAND_KEYS.includes(k)) continue;
+
       if (k === "goLive" && brandUpdates.goLive?.start) {
         const dd = clampDraftDue(brandUpdates.goLive.start);
         (contract.brand.deliverablesExpanded || []).forEach((d) => {
@@ -1906,12 +1927,14 @@ exports.brandUpdateFields = async (req, res) => {
         contract.other.autoCalcs = contract.other.autoCalcs || {};
         contract.other.autoCalcs.firstDraftDue = dd;
       }
-      if (k === "requestedEffectiveDate")
-        contract.requestedEffectiveDate = new Date(brandUpdates[k]);
-      else if (k === "requestedEffectiveDateTimezone")
-        contract.requestedEffectiveDateTimezone = brandUpdates[k];
 
-      else contract.brand[k] = brandUpdates[k];
+      if (k === "requestedEffectiveDate") {
+        contract.requestedEffectiveDate = new Date(brandUpdates[k]);
+      } else if (k === "requestedEffectiveDateTimezone") {
+        contract.requestedEffectiveDateTimezone = brandUpdates[k];
+      } else {
+        contract.brand[k] = brandUpdates[k];
+      }
     }
 
     // Enforce influencer handle & backfill per-deliverable spec fields
@@ -1920,6 +1943,7 @@ exports.brandUpdateFields = async (req, res) => {
       "handle"
     ).lean();
     const enforcedHandle = inf?.handle || "";
+
     if (Array.isArray(contract.brand?.deliverablesExpanded)) {
       contract.brand.deliverablesExpanded = normalizeDeliverablesArray(
         contract.brand.deliverablesExpanded,
@@ -1931,17 +1955,34 @@ exports.brandUpdateFields = async (req, res) => {
         }
       );
     }
+
     contract.other = contract.other || {};
     contract.other.influencerProfile = contract.other.influencerProfile || {};
     contract.other.influencerProfile.handle = enforcedHandle;
 
-    const after = { brand: contract.brand };
+    // IMPORTANT: convert after.brand to plain object too
+    const after = { brand: contract.brand?.toObject?.() || contract.brand };
     const editedFields = computeEditedFields(before, after, ["brand"]);
+
+    // PREVIEW MODE: do NOT save, do NOT emit events, just return the computed contract
+    if (isPreview) {
+      const contractPreview = contract.toObject ? contract.toObject() : { ...contract };
+      contractPreview.brand = after.brand;
+
+      return respondOK(res, {
+        message: "Brand fields preview",
+        contract: contractPreview,
+        editedFields,
+      });
+    }
+
+    // UPDATE MODE: persist changes and fire events
     markEdit(contract, "brand", editedFields);
 
     // During edit window (post influencer acceptance, pre-fully-signed)
-    if (!["finalize", "signing", "locked"].includes(contract.status))
+    if (!["finalize", "signing", "locked"].includes(contract.status)) {
       contract.status = "negotiation";
+    }
     contract.lastSentAt = new Date();
 
     await contract.save();
@@ -1950,7 +1991,7 @@ exports.brandUpdateFields = async (req, res) => {
       editedFields,
     });
 
-    // 🔔 notify influencer (brand edited)
+    // notify influencer (brand edited)
     await createAndEmit({
       recipientType: "influencer",
       influencerId: String(contract.influencerId),
@@ -1962,7 +2003,7 @@ exports.brandUpdateFields = async (req, res) => {
       actionPath: `/influencer/my-campaign`,
     });
 
-    // 🔔 self receipt for brand (brand edited)
+    // self receipt for brand (brand edited)
     await createAndEmit({
       recipientType: "brand",
       brandId: String(contract.brandId),
