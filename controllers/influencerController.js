@@ -487,6 +487,30 @@ function extractRawCategoriesFromProviderRaw(providerRaw) {
   return prof.categories || root.categories || prof.interests || root.interests || [];
 }
 
+function normalizeHandle(handle, username) {
+  let h = (handle || username || '').trim();
+  if (!h) return null;
+  if (!h.startsWith('@')) h = '@' + h;
+  return h;
+}
+
+async function loadSocialProfilesFromModash(influencerId) {
+  const docs = await Modash.find(
+    { influencerId: String(influencerId) },
+    'provider handle username followers url picture'
+  ).lean();
+
+  return docs.map(d => ({
+    provider: d.provider,
+    handle: normalizeHandle(d.handle, d.username),
+    username: d.username || null,
+    followers: Number(d.followers) || 0,
+    url: d.url || null,
+    picture: d.picture || null
+  }));
+}
+
+
 const mapPayload = (provider, input) => {
   const p = safeParse(input);
   if (!p) return null;
@@ -725,7 +749,6 @@ exports.registerInfluencer = async (req, res) => {
       };
       inf.subscriptionExpired = false;
     }
-
     // Save influencer first
     await inf.save();
 
@@ -1004,6 +1027,10 @@ exports.getById = async (req, res) => {
     if (!influencer) {
       return res.status(404).json({ message: 'Influencer not found' });
     }
+
+    // 🔹 NEW: attach socialProfiles from Modash
+    const socialProfiles = await loadSocialProfilesFromModash(id);
+    influencer.socialProfiles = socialProfiles;
 
     return res.status(200).json({ influencer });
   } catch (err) {
@@ -1814,11 +1841,22 @@ exports.getLiteById = async (req, res) => {
     }
 
     const doc = await Influencer.findOne({ influencerId: id })
-      .select('influencerId name email subscription.planId subscription.planName subscription.expiresAt')
+      .select('influencerId name email primaryPlatform subscription.planId subscription.planName subscription.expiresAt')
       .lean();
 
     if (!doc) {
       return res.status(404).json({ message: 'Influencer not found' });
+    }
+
+    // 🔹 Get social profiles from Modash
+    const socialProfiles = await loadSocialProfilesFromModash(id);
+
+    // Pick a primary profile (prefer influencer.primaryPlatform, else most followers)
+    let primaryProfile = null;
+    if (socialProfiles.length) {
+      primaryProfile =
+        socialProfiles.find(p => p.provider === doc.primaryPlatform) ||
+        socialProfiles.slice().sort((a, b) => (b.followers || 0) - (a.followers || 0))[0];
     }
 
     return res.status(200).json({
@@ -1827,7 +1865,13 @@ exports.getLiteById = async (req, res) => {
       email: doc.email || '',
       planId: doc.subscription?.planId || null,
       planName: doc.subscription?.planName || null,
-      expiresAt: doc.subscription?.expiresAt || null
+      expiresAt: doc.subscription?.expiresAt || null,
+
+      // 🔹 NEW:
+      primaryPlatform: doc.primaryPlatform || null,
+      socialProfiles,
+      primaryProfile,
+      socialProfilesCount: socialProfiles.length
     });
   } catch (err) {
     console.error('Error in getLiteById:', err);

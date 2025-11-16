@@ -6,6 +6,7 @@ const Influencer = require('../models/influencer');
 const Contract = require('../models/contract');
 const Category = require('../models/categories');
 const { createAndEmit } = require('../utils/notifier');
+const Modash = require('../models/modash');
 
 const ACTIVE_CONTRACT_STATUSES = [
   'draft', 'sent', 'viewed', 'negotiation', 'finalize', 'signing', 'locked', 'rejected'
@@ -279,7 +280,35 @@ exports.getListByCampaign = async (req, res) => {
     ].join(' ');
 
     const influencersRaw = await Influencer.find(filter).select(projection).lean();
+    // 🔹 Get Modash profiles for these influencers
+    const modashProfiles = await Modash.find(
+      { influencerId: { $in: influencerIds.map(String) } },
+      'influencerId provider handle username followers'
+    ).lean();
 
+    // Group Modash profiles by influencerId
+    const modashByInf = new Map();
+    for (const p of modashProfiles) {
+      const key = String(p.influencerId);
+      if (!modashByInf.has(key)) modashByInf.set(key, []);
+      modashByInf.get(key).push(p);
+    }
+
+    // Pick the best Modash profile for a given influencer
+    function pickModashProfile(profiles = [], primaryPlatform) {
+      if (!Array.isArray(profiles) || profiles.length === 0) return null;
+
+      // 1) Try to match their primaryPlatform
+      if (primaryPlatform) {
+        const hit = profiles.find(p => p.provider === primaryPlatform);
+        if (hit) return hit;
+      }
+
+      // 2) Fallback: profile with most followers
+      return profiles
+        .slice()
+        .sort((a, b) => (Number(b.followers) || 0) - (Number(a.followers) || 0))[0] || null;
+    }
     const contracts = await Contract.find({ campaignId }).lean();
     const isContractedCampaign = contracts.length > 0 ? 1 : 0;
     const contractByInf = new Map(contracts.map(c => [String(c.influencerId), c]));
@@ -306,13 +335,21 @@ exports.getListByCampaign = async (req, res) => {
         }
       }
 
-      const audienceSize = Array.isArray(inf.socialProfiles)
-        ? inf.socialProfiles.reduce((sum, p) => sum + (Number(p?.followers) || 0), 0)
-        : 0;
+      const profiles = modashByInf.get(String(inf.influencerId)) || [];
 
-      const chosen = pickProfileForHandle(inf.socialProfiles, inf.primaryPlatform);
-      let handle = (chosen?.handle || chosen?.username || '').trim() || null;
-      if (handle && !handle.startsWith('@')) handle = '@' + handle;
+      // Sum followers across all Modash profiles for this influencer
+      const audienceSize = profiles.reduce(
+        (sum, p) => sum + (Number(p?.followers) || 0),
+        0
+      );
+
+      // Choose the “best” Modash profile (primaryPlatform first, then highest followers)
+      const chosen = pickModashProfile(profiles, inf.primaryPlatform);
+
+      let handle = chosen ? (chosen.handle || chosen.username || '').trim() : null;
+      if (handle && !handle.startsWith('@') && handle) {
+        handle = '@' + handle;
+      }
 
       const c = contractByInf.get(String(inf.influencerId));
       const isAssigned = approvedId === inf.influencerId ? 1 : 0;

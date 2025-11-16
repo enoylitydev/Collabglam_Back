@@ -201,17 +201,27 @@ exports.getMyPlan = async (req, res) => {
   if (!userType || !userId) {
     return res.status(400).json({ message: 'userType & userId required' });
   }
+
   const Model = userType === 'Brand' ? Brand : Influencer;
+
   const user = await Model.findOne(
     userType === 'Brand' ? { brandId: userId } : { influencerId: userId }
-  ).populate('subscription.planId');
-  if (!user) return res.status(404).json({ message: `${userType} not found` });
+  ).lean();
+
+  if (!user) {
+    return res.status(404).json({ message: `${userType} not found` });
+  }
+
+  const sub = user.subscription || {};
+  const planDoc = sub.planId
+    ? await SubscriptionPlan.findOne({ planId: sub.planId }).lean()
+    : null;
 
   return res.json({
     message: 'Current subscription fetched',
-    plan: user.subscription.planId,
-    startedAt: user.subscription.startedAt,
-    expiresAt: user.subscription.expiresAt,
-    expired: user.subscriptionExpired
+    plan: planDoc,                      // full plan metadata
+    startedAt: sub.startedAt || null,
+    expiresAt: sub.expiresAt || null,
+    expired: !!user.subscriptionExpired
   });
 };

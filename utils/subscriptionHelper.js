@@ -2,7 +2,8 @@
 const SubscriptionPlan = require('../models/subscription');
 
 exports.getFreePlan = async (role) => {
-  const targetName = role === 'Brand' ? 'free' : 'basic';
+  // both Brand & Influencer use the "free" plan name
+  const targetName = 'free';
 
   let plan = await SubscriptionPlan
     .findOne({ role, name: targetName })
