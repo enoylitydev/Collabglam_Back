@@ -35,7 +35,6 @@ const unsubscribeRoutes   = require('./routes/unsubscribeRoutes');
 const disputeRoutes       = require('./routes/disputeRoutes');
 const notificationsRoutes = require('./routes/notificationsRoutes');
 const emailRoutes = require('./routes/emailRoutes');
-
 // jobs
 const unseenMessageNotifier = require('./jobs/unseenMessageNotifier');
 
