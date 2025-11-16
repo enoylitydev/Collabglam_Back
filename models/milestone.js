@@ -30,16 +30,31 @@ const milestoneHistorySchema = new mongoose.Schema({
     type: String,
     default: ''
   },
+
+  // brand clicked “release” (for this milestone)
   released: {
     type: Boolean,
     default: false
   },
   releasedAt: {
     type: Date
+  },
+
+  // NEW: payout status for platform flow
+  // pending -> not released
+  // initiated -> released by brand, waiting for admin
+  // paid -> approved by admin / sent to influencer
+  payoutStatus: {
+    type: String,
+    enum: ['pending', 'initiated', 'paid'],
+    default: 'pending'
+  },
+  paidAt: {
+    type: Date
   }
-}, { 
-  _id: false,        // you still key off milestoneHistoryId  
-  timestamps: true   // adds createdAt & updatedAt on each sub‐doc
+}, {
+  _id: false,
+  timestamps: true
 });
 
 const milestoneSchema = new mongoose.Schema({

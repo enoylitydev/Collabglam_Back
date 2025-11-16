@@ -5,6 +5,7 @@ const Brand = require('../models/brand'); // Assuming you have a Brand model
 const Influencer = require('../models/influencer'); // Assuming you have an Influencer model
 const Campaign = require('../models/campaign');
 const Milestone = require('../models/milestone'); // Assuming you have a Milestone model
+const Modash = require('../models/modash');
 const escapeRegex = (s = '') => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 /**
  * POST /admin/login
@@ -218,28 +219,54 @@ exports.getBrandById = async (req, res) => {
 
 // controllers/influencerController.js
 exports.getByInfluencerId = async (req, res) => {
-    try {
-        // 1) Pull influencerId from query
-        const influencerId = req.query.id;
-        if (!influencerId) return res.status(400).json({ message: 'Query parameter id is required.' });
-
-        const influencer = await Influencer.findOne(
-            { influencerId },
-            '-password -__v'
-        ).lean();
-
-        if (!influencer) {
-            return res.status(404).json({ message: 'Influencer not found' });
-        }
-
-        // 3) Send the document back
-        return res.status(200).json({ influencer });
-    } catch (error) {
-        console.error('Error fetching influencer by ID:', error);
-        return res
-            .status(500)
-            .json({ message: 'Internal server error' });
+  try {
+    // 1) Pull influencerId from query
+    const influencerId = req.query.id;
+    if (!influencerId) {
+      return res
+        .status(400)
+        .json({ message: 'Query parameter id is required.' });
     }
+
+    // 2) Fetch influencer (basic profile / onboarding / etc.)
+    const influencer = await Influencer.findOne(
+      { influencerId },
+      '-password -__v'
+    ).lean();
+
+    if (!influencer) {
+      return res.status(404).json({ message: 'Influencer not found' });
+    }
+
+    // 3) Fetch Modash data for this influencer
+    //    We try via ObjectId link *or* via influencerId string
+    const modashProfiles = await Modash.find(
+      {
+        $or: [
+          { influencer: influencer._id },              // linked via ref
+          { influencerId: influencer.influencerId }    // backup by string
+        ]
+      },
+      '-__v -providerRaw' // optional: hide heavy/raw fields
+    ).lean();
+
+    // If you only ever want the Modash for the primary platform:
+    // const modashProfile = await Modash.findOne(
+    //   { influencer: influencer._id, provider: influencer.primaryPlatform },
+    //   '-__v -providerRaw'
+    // ).lean();
+
+    // 4) Send combined data back
+    return res.status(200).json({
+      influencer,
+      modash: modashProfiles    // or `modash: modashProfile` if using single
+    });
+  } catch (error) {
+    console.error('Error fetching influencer & Modash by ID:', error);
+    return res
+      .status(500)
+      .json({ message: 'Internal server error' });
+  }
 };
 
 

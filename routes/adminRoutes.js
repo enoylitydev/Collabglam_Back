@@ -6,6 +6,14 @@ const {login,getAllBrands,getList,getAllCampaigns,getBrandById,
 
 } = require('../controllers/adminController');  
 
+
+const {
+  adminListPayouts,
+  adminMarkMilestonePaid
+} = require('../controllers/milestoneController');
+
+
+
 // POST /admin/create
 router.post('/login', login);    
 router.post('/brand/getlist', getAllBrands);
@@ -19,6 +27,9 @@ router.post('/campaign/getByBrandId', getCampaignsByBrandId);
 
 router.get('/influencer/byId', adminGetInfluencerById);
 router.post('/influencer/list', adminGetInfluencerList);
+
+router.post('/milestone/payout', adminListPayouts);
+router.post('/milestone/update', adminMarkMilestonePaid);
 
 
 module.exports = router;
