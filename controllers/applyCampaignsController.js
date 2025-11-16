@@ -7,6 +7,8 @@ const Contract = require('../models/contract');
 const Category = require('../models/categories');
 const { createAndEmit } = require('../utils/notifier');
 const Modash = require('../models/modash');
+const Brand = require('../models/brand');
+const { sendMail } = require('../utils/mailer');
 
 const ACTIVE_CONTRACT_STATUSES = [
   'draft', 'sent', 'viewed', 'negotiation', 'finalize', 'signing', 'locked', 'rejected'
@@ -159,7 +161,146 @@ exports.applyToCampaign = async (req, res) => {
       .findOne({ campaignsId: campaignId }, 'campaignsId brandId brandName productOrServiceName')
       .lean();
 
-    // 5A) ✅ Notify brand (persist + live)
+    // 4.1) Fetch brand email
+    let brandEmail = null;
+    let brandDisplayName = camp?.brandName || '';
+
+    if (camp?.brandId) {
+      const brandDoc = await Brand.findOne(
+        { brandId: camp.brandId },
+        'email name'
+      ).lean();
+
+      if (brandDoc) {
+        brandEmail = brandDoc.email || null;
+        if (!brandDisplayName && brandDoc.name) {
+          brandDisplayName = brandDoc.name;
+        }
+      }
+    }
+
+    // 4.2) Send email to brand (non-fatal on failure)
+    if (brandEmail) {
+      const brandAppBaseUrl =
+        process.env.FRONTEND_ORIGIN || 'https://collabglam.com';
+
+      const subject = `New application for "${camp?.productOrServiceName || 'your campaign'}"`;
+      const dashboardLink = `${brandAppBaseUrl}/brand/created-campaign/applied-inf?id=${campaignId}`;
+
+      const plainText = `
+Hi ${brandDisplayName || 'there'},
+
+${inf.name || 'An influencer'} has just applied to your campaign "${camp?.productOrServiceName || 'Campaign'}".
+
+Influencer ID: ${influencerId}
+Total applicants so far: ${applicantCount}
+
+You can review the application(s) here:
+${dashboardLink}
+
+— CollabGlam
+      `.trim();
+
+      const accentFrom = "#FFA135";
+      const accentTo = "#FF7236";
+
+      const htmlBody = `
+  <div style="background-color:#f5f5f7;padding:24px;margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+    <table width="100%" border="0" cellspacing="0" cellpadding="0" style="max-width:600px;margin:0 auto;background:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e5e5e5;">
+      <tr>
+        <td style="padding:20px 24px 12px 24px;border-bottom:1px solid #f0f0f0;background:#111111;">
+          <h1 style="margin:0;font-size:18px;line-height:1.4;color:#ffffff;font-weight:600;">
+            New Campaign Application
+          </h1>
+          <p style="margin:4px 0 0 0;font-size:13px;color:#f5f5f5;">
+            An influencer just applied to your campaign on CollabGlam.
+          </p>
+        </td>
+      </tr>
+
+      <tr>
+        <td style="padding:20px 24px 16px 24px;">
+          <p style="margin:0 0 12px 0;font-size:14px;color:#333333;">
+            Hi ${brandDisplayName || 'there'},
+          </p>
+
+          <p style="margin:0 0 16px 0;font-size:14px;color:#333333;line-height:1.6;">
+            <strong>${inf.name || 'An influencer'}</strong> has just applied to your campaign
+            <strong>"${camp?.productOrServiceName || 'Campaign'}"</strong>.
+          </p>
+
+          <table width="100%" border="0" cellspacing="0" cellpadding="0" style="border-collapse:collapse;margin:0 0 16px 0;">
+            <tr>
+              <td style="padding:10px 12px;border:1px solid #eeeeee;border-radius:8px;background:#fafafa;">
+                <p style="margin:0;font-size:13px;color:#555555;line-height:1.6;">
+                  <strong style="display:inline-block;width:130px;">Applicants so far:</strong>
+                  <span>${applicantCount}</span>
+                </p>
+              </td>
+            </tr>
+          </table>
+
+          <p style="margin:0 0 18px 0;font-size:14px;color:#333333;line-height:1.6;">
+            You can review this application and manage all applicants directly from your dashboard.
+          </p>
+
+          <table border="0" cellspacing="0" cellpadding="0" style="margin:0 0 8px 0;">
+            <tr>
+              <td align="center" style="border-radius:999px;overflow:hidden;">
+                <a href="${dashboardLink}"
+                  style="
+                    display:inline-block;
+                    padding:10px 22px;
+                    font-size:14px;
+                    font-weight:600;
+                    text-decoration:none;
+                    border-radius:999px;
+                    background:${accentFrom};
+                    background-image:linear-gradient(135deg, ${accentFrom}, ${accentTo});
+                    color:#ffffff;
+                    border:1px solid ${accentFrom};
+                    box-shadow:0 2px 6px rgba(0,0,0,0.12);
+                  ">
+                  View Applicants
+                </a>
+              </td>
+            </tr>
+          </table>
+
+          <p style="margin:10px 0 0 0;font-size:11px;color:#888888;line-height:1.4;">
+            If the button doesn’t work, copy and paste this link into your browser:<br/>
+            <span style="word-break:break-all;color:#555555;">${dashboardLink}</span>
+          </p>
+        </td>
+      </tr>
+
+      <tr>
+        <td style="padding:14px 24px 18px 24px;border-top:1px solid #f0f0f0;background:#fafafa;">
+          <p style="margin:0;font-size:11px;color:#999999;line-height:1.5;">
+            You’re receiving this email because your brand has a campaign on CollabGlam.
+          </p>
+          <p style="margin:4px 0 0 0;font-size:11px;color:#999999;">
+            — CollabGlam Team
+          </p>
+        </td>
+      </tr>
+    </table>
+  </div>
+`;
+
+      try {
+        await sendMail({
+          to: brandEmail,
+          subject,
+          text: plainText,
+          html: htmlBody
+        });
+      } catch (e) {
+        console.warn('Email to brand failed (applyToCampaign):', e?.message || e);
+      }
+    }
+
+    // 5A) ✅ Notify brand (persist + live, as before)
     if (camp?.brandId) {
       try {
         await createAndEmit({

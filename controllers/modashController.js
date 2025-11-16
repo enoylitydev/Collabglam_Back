@@ -9,7 +9,7 @@ const { ensureBrandQuota } = require('../utils/quota');
 
 const MODASH_API_KEY = process.env.MODASH_API_KEY;
 const MODASH_BASE_URL = process.env.MODASH_BASE_URL || 'https://api.modash.io/v1';
-const MODASH_AUTH_HEADER = (process.env.MODASH_AUTH_HEADER || '').toLowerCase(); // optional override
+const MODASH_AUTH_HEADER = (process.env.MODASH_AUTH_HEADER || '').toLowerCase();
 
 if (!MODASH_API_KEY) {
   throw new Error('MODASH_API_KEY is missing. Add it to your environment.');
@@ -21,154 +21,6 @@ const ALLOWED_PLATFORMS = new Set(['instagram', 'youtube', 'tiktok']);
 /*                               Auth header logic                            */
 /* -------------------------------------------------------------------------- */
 
-/**
- * Map normalized legacy report -> Modash model fields
- */
-function mapReportToModashDoc(normalized, platform, influencerDoc) {
-  const prof = normalized.profile || {};
-
-  return {
-    // Relations
-    influencer: influencerDoc ? influencerDoc._id : undefined,
-    influencerId: influencerDoc ? influencerDoc.influencerId : undefined,
-
-    // Core
-    provider: platform,
-    userId: prof.userId,
-    username: prof.username,
-    fullname: prof.fullname,
-    handle: prof.handle,
-    url: prof.url,
-    picture: prof.picture,
-
-    followers: prof.followers,
-    engagements: prof.engagements,
-    engagementRate: prof.engagementRate,
-    averageViews: prof.averageViews,
-
-    isPrivate: normalized.isPrivate,
-    isVerified: normalized.isVerified,
-    accountType: normalized.accountType,
-    secUid: normalized.secUid,
-
-    city: normalized.city,
-    state: normalized.state,
-    country: normalized.country,
-    ageGroup: normalized.ageGroup,
-    gender: normalized.gender,
-    language: normalized.language,
-
-    statsByContentType: normalized.statsByContentType,
-    stats: normalized.stats,
-    recentPosts: normalized.recentPosts,
-    popularPosts: normalized.popularPosts,
-
-    postsCount: normalized.postsCount,
-    avgLikes: normalized.avgLikes,
-    avgComments: normalized.avgComments,
-    avgViews: normalized.avgViews,
-    avgReelsPlays: normalized.avgReelsPlays,
-    totalLikes: normalized.totalLikes,
-    totalViews: normalized.totalViews,
-
-    bio: normalized.bio,
-
-    categories: normalized.categories || [],
-
-    hashtags: normalized.hashtags || [],
-    mentions: normalized.mentions || [],
-    brandAffinity: normalized.brandAffinity || [],
-
-    audience: normalized.audience,
-    audienceCommenters: normalized.audienceCommenters,
-    lookalikes: normalized.lookalikes || [],
-
-    sponsoredPosts: normalized.sponsoredPosts || [],
-    paidPostPerformance: normalized.paidPostPerformance,
-    paidPostPerformanceViews: normalized.paidPostPerformanceViews,
-    sponsoredPostsMedianViews: normalized.sponsoredPostsMedianViews,
-    sponsoredPostsMedianLikes: normalized.sponsoredPostsMedianLikes,
-    nonSponsoredPostsMedianViews: normalized.nonSponsoredPostsMedianViews,
-    nonSponsoredPostsMedianLikes: normalized.nonSponsoredPostsMedianLikes,
-
-    audienceExtra: normalized.audienceExtra,
-    providerRaw: normalized.providerRaw,
-  };
-}
-
-async function upsertModashProfileFromReport({ platform, reportJSON, influencerId, fetchedAt }) {
-  if (!reportJSON) return null;
-
-  const normalized = normalizeReportLegacy(reportJSON);
-  const prof = normalized.profile || {};
-  if (!prof.userId) {
-    // No stable id → nothing to store safely
-    return null;
-  }
-
-  let influencerDoc = null;
-
-  // Try to link to your internal Influencer (if provided)
-  if (influencerId) {
-    influencerDoc = await Influencer.findOne({ influencerId }).select('_id influencerId');
-    if (!influencerDoc) {
-      console.warn('[modash] No Influencer found for influencerId=', influencerId);
-    }
-  }
-
-  const now = fetchedAt || new Date();
-
-  // Build base doc data from normalized report
-  const docData = Object.assign(
-    {},
-    mapReportToModashDoc(normalized, platform, influencerDoc),
-    {
-      providerRaw: reportJSON,
-      lastFetchedAt: now,
-    }
-  );
-
-  // Build an upsert query:
-  // - If we have a linked Influencer → key by influencer+provider
-  // - Else → key by userId+provider (pure Modash cache)
-  const query = { provider: platform };
-
-  if (influencerDoc && influencerDoc._id) {
-    query.influencer = influencerDoc._id;
-  } else {
-    query.userId = prof.userId;
-  }
-
-  const saved = await ModashProfile.findOneAndUpdate(
-    query,
-    { $set: docData },
-    { upsert: true, new: true, setDefaultsOnInsert: true }
-  );
-
-  return saved;
-}
-
-async function findCachedReport({ platform, userId, influencerId }) {
-  const q = { provider: platform };
-
-  if (influencerId) {
-    q.influencerId = influencerId;
-  } else if (userId) {
-    q.userId = userId;
-  } else {
-    return null;
-  }
-
-  const doc = await ModashProfile.findOne(q).lean();
-  if (!doc || !doc.providerRaw) return null;
-
-  return {
-    providerRaw: doc.providerRaw,
-    lastFetchedAt: doc.lastFetchedAt || doc.updatedAt || doc.createdAt || null,
-  };
-}
-
-// Build one header style
 function headerVariant(kind, rawKey) {
   const key = String(rawKey).trim();
   const bearerToken = key.replace(/^bearer\s+/i, '');
@@ -177,14 +29,13 @@ function headerVariant(kind, rawKey) {
   if (kind === 'authorization') {
     h.authorization = `Bearer ${bearerToken}`;
   } else if (kind === 'accesstoken') {
-    h.accesstoken = bearerToken; // exact header name per some Modash builds
+    h.accesstoken = bearerToken;
   } else {
     h['x-api-key'] = key;
   }
   return h;
 }
 
-// Determine initial preference
 function primaryHeaderKind() {
   if (MODASH_AUTH_HEADER === 'authorization') return 'authorization';
   if (MODASH_AUTH_HEADER === 'accesstoken' || MODASH_AUTH_HEADER === 'accessToken') return 'accesstoken';
@@ -192,7 +43,6 @@ function primaryHeaderKind() {
   return 'x-api-key';
 }
 
-// Order we’ll try on a 403
 function fallbackKinds(primary) {
   const all = ['x-api-key', 'authorization', 'accesstoken'];
   return [primary, ...all.filter((k) => k !== primary)];
@@ -212,7 +62,6 @@ function toQuery(params = {}) {
   return s ? `?${s}` : '';
 }
 
-// Low-level request with automatic header fallbacks on 403
 async function modashRequest({ method, path, query, body }) {
   const url = `${MODASH_BASE_URL}${path}${toQuery(query)}`;
   const kinds = fallbackKinds(primaryHeaderKind());
@@ -237,12 +86,11 @@ async function modashRequest({ method, path, query, body }) {
       if (!res.ok) {
         const err = new Error(
           (json && (json.message || json.error)) ||
-            `Modash ${res.status} ${res.statusText}`
+          `Modash ${res.status} ${res.statusText}`
         );
         err.status = res.status;
         err.response = json || undefined;
 
-        // 403 may be header-style related; try next header kind
         if (res.status === 403) {
           lastErr = err;
           continue;
@@ -250,15 +98,12 @@ async function modashRequest({ method, path, query, body }) {
         throw err;
       }
 
-      // success
       return json;
     } catch (e) {
       lastErr = e;
-      // try next header variant
     }
   }
 
-  // If we exhausted all variants
   throw lastErr || new Error('Unknown Modash error');
 }
 
@@ -271,16 +116,14 @@ async function modashPOST(path, body) {
 }
 
 /* -------------------------------------------------------------------------- */
-/*                        Helpers shared by frontend APIs                     */
+/*                        Normalization & DB helpers                          */
 /* -------------------------------------------------------------------------- */
 
-/** Convert to finite number (or undefined) */
 function toNum(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : undefined;
 }
 
-// Prefer the first non-empty trimmed string, else undefined
 function firstNonEmpty() {
   for (const v of arguments) {
     if (typeof v === 'string') {
@@ -291,19 +134,315 @@ function firstNonEmpty() {
   return undefined;
 }
 
-// Extract @handle from a YouTube URL like https://youtube.com/@somehandle
 function extractYouTubeHandleFromUrl(u) {
   if (!u) return undefined;
   const m = u.match(/youtube\.com\/@([A-Za-z0-9._-]+)/i);
   return m ? m[1] : undefined;
 }
 
-// Some Modash shapes nest the primary data differently
 function pickPrimarySrc(item) {
   return (item && (item.profile || item.channel || item.creator || item.user)) || item;
 }
 
-/** ---------- Normalization / Dedupe for search ---------- */
+/**
+ * Normalize raw Modash report response into standard structure
+ */
+function normalizeReportData(reportJSON) {
+  const p = (reportJSON && reportJSON.profile) || {};
+  const prof = p.profile || p;
+
+  return {
+    profile: {
+      userId: p.userId || prof.userId,
+      username: prof.username,
+      fullname: prof.fullname,
+      handle: prof.handle || (prof.username ? `@${prof.username}` : undefined),
+      url: prof.url,
+      picture: prof.picture,
+      followers: prof.followers,
+      engagements: prof.engagements,
+      engagementRate: prof.engagementRate,
+      averageViews: prof.averageViews,
+    },
+    isPrivate: p.isPrivate,
+    isVerified: p.isVerified,
+    accountType: p.accountType,
+    secUid: p.secUid,
+    city: p.city,
+    state: p.state,
+    country: p.country,
+    ageGroup: p.ageGroup,
+    gender: p.gender,
+    language: p.language,
+    statsByContentType: p.statsByContentType,
+    stats: p.stats,
+    recentPosts: p.recentPosts,
+    popularPosts: p.popularPosts,
+    postsCount: p.postsCount || p.postsCounts,
+    avgLikes: p.avgLikes,
+    avgComments: p.avgComments,
+    avgViews: p.avgViews,
+    avgReelsPlays: p.avgReelsPlays,
+    totalLikes: p.totalLikes,
+    totalViews: p.totalViews,
+    bio: p.description || p.bio,
+    categories: [],
+    hashtags: p.hashtags,
+    mentions: p.mentions,
+    brandAffinity: p.brandAffinity,
+    audience: p.audience,
+    audienceCommenters: p.audienceCommenters,
+    lookalikes: p.lookalikes || p.audienceLookalikes,
+    sponsoredPosts: p.sponsoredPosts,
+    paidPostPerformance: p.paidPostPerformance,
+    paidPostPerformanceViews: p.paidPostPerformanceViews,
+    sponsoredPostsMedianViews: p.sponsoredPostsMedianViews,
+    sponsoredPostsMedianLikes: p.sponsoredPostsMedianLikes,
+    nonSponsoredPostsMedianViews: p.nonSponsoredPostsMedianViews,
+    nonSponsoredPostsMedianLikes: p.nonSponsoredPostsMedianLikes,
+    audienceExtra: p.audienceExtra,
+    providerRaw: reportJSON,
+  };
+}
+
+/**
+ * Convert normalized report to ModashProfile document
+ */
+function mapReportToModashDoc(normalized, platform, opts = {}) {
+  const prof = normalized.profile || {};
+  const { influencerId, userId } = opts; // userId can override whatever is in the profile
+
+  const doc = {
+    provider: platform,
+    userId: userId || prof.userId, // <-- always prefer the explicit userId we pass in
+    username: prof.username,
+    fullname: prof.fullname,
+    handle: prof.handle,
+    url: prof.url,
+    picture: prof.picture,
+    followers: prof.followers,
+    engagements: prof.engagements,
+    engagementRate: prof.engagementRate,
+    averageViews: prof.averageViews,
+    isPrivate: normalized.isPrivate,
+    isVerified: normalized.isVerified,
+    accountType: normalized.accountType,
+    secUid: normalized.secUid,
+    city: normalized.city,
+    state: normalized.state,
+    country: normalized.country,
+    ageGroup: normalized.ageGroup,
+    gender: normalized.gender,
+    language: normalized.language,
+    statsByContentType: normalized.statsByContentType,
+    stats: normalized.stats,
+    recentPosts: normalized.recentPosts,
+    popularPosts: normalized.popularPosts,
+    postsCount: normalized.postsCount,
+    avgLikes: normalized.avgLikes,
+    avgComments: normalized.avgComments,
+    avgViews: normalized.avgViews,
+    avgReelsPlays: normalized.avgReelsPlays,
+    totalLikes: normalized.totalLikes,
+    totalViews: normalized.totalViews,
+    bio: normalized.bio,
+    categories: normalized.categories || [],
+    hashtags: normalized.hashtags || [],
+    mentions: normalized.mentions || [],
+    brandAffinity: normalized.brandAffinity || [],
+    audience: normalized.audience,
+    audienceCommenters: normalized.audienceCommenters,
+    lookalikes: normalized.lookalikes || [],
+    sponsoredPosts: normalized.sponsoredPosts || [],
+    paidPostPerformance: normalized.paidPostPerformance,
+    paidPostPerformanceViews: normalized.paidPostPerformanceViews,
+    sponsoredPostsMedianViews: normalized.sponsoredPostsMedianViews,
+    sponsoredPostsMedianLikes: normalized.sponsoredPostsMedianLikes,
+    nonSponsoredPostsMedianViews: normalized.nonSponsoredPostsMedianViews,
+    nonSponsoredPostsMedianLikes: normalized.nonSponsoredPostsMedianLikes,
+    audienceExtra: normalized.audienceExtra,
+    providerRaw: normalized.providerRaw,
+  };
+
+  // Only set influencerId if provided (for linked profiles)
+  if (influencerId) {
+    doc.influencerId = influencerId;
+  }
+
+  return doc;
+}
+
+/**
+ * Upsert ModashProfile from normalized report data
+ * CRITICAL: Always updates by userId + platform (primary lookup)
+ * influencerId is stored only if explicitly provided
+ */
+async function upsertModashProfileFromReport(normalized, platform, opts = {}) {
+  const prof = normalized.profile || {};
+  const influencerId = opts.influencerId || null;
+  const userIdFromRequest = opts.userIdFromRequest || null;
+
+  // Prefer the userId coming from Modash, fall back to what we called the endpoint with
+  const canonicalUserId = String(
+    prof.userId ||
+    userIdFromRequest ||
+    ''
+  ).trim() || null;
+
+  if (!canonicalUserId) {
+    console.warn('[upsertModashProfile] No userId found (normalized + request), skipping save');
+    return null;
+  }
+
+  // Prepare document data with the canonical userId
+  const doc = mapReportToModashDoc(normalized, platform, {
+    influencerId,
+    userId: canonicalUserId,
+  });
+
+  try {
+    let existing = null;
+
+    // 1) Try by canonical userId (normal path)
+    existing = await ModashProfile.findOne({
+      provider: platform,
+      userId: canonicalUserId,
+    });
+
+    // 2) If not found and we have the raw request userId, try that too
+    //    This lets us "replace" old userIds on refresh.
+    if (!existing && userIdFromRequest && userIdFromRequest !== canonicalUserId) {
+      existing = await ModashProfile.findOne({
+        provider: platform,
+        userId: userIdFromRequest,
+      });
+    }
+
+    // 3) As a last resort, if we have an influencerId, try to find by that
+    if (!existing && influencerId) {
+      existing = await ModashProfile.findOne({
+        provider: platform,
+        influencerId,
+      });
+    }
+
+    if (existing) {
+      Object.assign(existing, doc);
+
+      const saved = await existing.save();
+      console.log(
+        `[upsertModashProfile] Updated ${platform} profile for userId: ${canonicalUserId}`
+      );
+      return saved;
+    }
+
+    // 4) No existing doc found → create a new one
+    const created = await ModashProfile.create(doc);
+
+    console.log(
+      `[upsertModashProfile] Created ${platform} profile for userId: ${canonicalUserId}`
+    );
+    return created;
+  } catch (err) {
+    // Handle duplicate key on (influencer, provider)
+    if (err && err.code === 11000) {
+      console.warn(
+        '[upsertModashProfile] Duplicate key error, trying to update existing doc instead of inserting',
+        err.keyPattern,
+        err.keyValue
+      );
+
+      try {
+        let existing = null;
+
+        // a) If duplicate on influencer+provider, find that doc
+        if (err.keyPattern && err.keyPattern.influencer === 1 && err.keyPattern.provider === 1) {
+          existing = await ModashProfile.findOne({
+            provider: err.keyValue && err.keyValue.provider,
+            influencer: err.keyValue && err.keyValue.influencer, // usually null
+          });
+        }
+
+        // b) Fallback: try by canonical userId
+        if (!existing) {
+          existing = await ModashProfile.findOne({
+            provider: platform,
+            userId: canonicalUserId,
+          });
+        }
+
+        // c) Fallback: try by userIdFromRequest
+        if (!existing && userIdFromRequest && userIdFromRequest !== canonicalUserId) {
+          existing = await ModashProfile.findOne({
+            provider: platform,
+            userId: userIdFromRequest,
+          });
+        }
+
+        // d) Fallback: try by influencerId if we have one
+        if (!existing && influencerId) {
+          existing = await ModashProfile.findOne({
+            provider: platform,
+            influencerId,
+          });
+        }
+
+        if (!existing) {
+          console.error('[upsertModashProfile] Duplicate key but could not find existing doc to update');
+          return null;
+        }
+
+        // Merge new data into the existing doc.
+        // NOTE: doc does NOT contain "influencer", so we won't break the index.
+        Object.assign(existing, doc);
+
+        const saved = await existing.save();
+        console.log('[upsertModashProfile] Resolved duplicate by updating existing doc');
+        return saved;
+      } catch (innerErr) {
+        console.error('[upsertModashProfile] Error while resolving duplicate key:', innerErr);
+        throw innerErr;
+      }
+    }
+
+    console.error('[upsertModashProfile] Error saving to database:', err);
+    throw err;
+  }
+}
+
+/**
+ * Find cached report by userId or influencerId
+ */
+async function findCachedReport({ platform, userId, influencerId }) {
+  let doc = null;
+
+  // Primary lookup by userId
+  if (userId) {
+    doc = await ModashProfile.findOne({
+      provider: platform,
+      userId,
+    }).lean();
+  }
+
+  // Fallback lookup by influencerId
+  if (!doc && influencerId) {
+    doc = await ModashProfile.findOne({
+      provider: platform,
+      influencerId,
+    }).lean();
+  }
+
+  if (!doc || !doc.providerRaw) return null;
+
+  return {
+    providerRaw: doc.providerRaw,
+    lastFetchedAt: doc.lastFetchedAt || doc.updatedAt || doc.createdAt || null,
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/*                        Search helpers                                      */
+/* -------------------------------------------------------------------------- */
 
 function normalizeSearchItem(item, platform) {
   const src = pickPrimarySrc(item);
@@ -311,7 +450,6 @@ function normalizeSearchItem(item, platform) {
   const url = firstNonEmpty(src && src.url, src && src.channelUrl, src && src.profileUrl);
   const derivedHandleFromUrl = extractYouTubeHandleFromUrl(url);
 
-  // Expand possible handle fields and strip a leading '@' if present
   const rawUsername = firstNonEmpty(
     src && src.username,
     src && src.handle,
@@ -325,42 +463,22 @@ function normalizeSearchItem(item, platform) {
 
   const userId = String(
     (item && item.userId) ||
-      (src && src.userId) ||
-      (src && src.id) ||
-      (src && src.channelId) ||
-      (src && src.profileId) ||
-      ''
-  )
-    .trim() || undefined;
+    (src && src.userId) ||
+    (src && src.id) ||
+    (src && src.channelId) ||
+    (src && src.profileId) ||
+    ''
+  ).trim() || undefined;
 
   return {
     userId,
     username,
-    fullname:
-      (src && (src.fullName || src.fullname || src.display_name || src.title || src.name)) || '',
-    followers:
-      toNum(src && (src.followers || src.followerCount || (src.stats && src.stats.followers))) || 0,
-    engagementRate:
-      toNum(src && (src.engagementRate || (src.stats && src.stats.engagementRate))) || 0,
-    engagements: toNum(
-      src &&
-        (src.engagements ||
-          (src.stats && (src.stats.avgEngagements || src.stats.avgLikes)))
-    ),
-    averageViews: toNum(
-      src &&
-        (src.averageViews ||
-          (src.stats && src.stats.avgViews) ||
-          src.avgViews)
-    ),
-    picture:
-      (src &&
-        (src.picture ||
-          src.avatar ||
-          src.profilePicUrl ||
-          src.thumbnail ||
-          src.channelThumbnailUrl)) ||
-      undefined,
+    fullname: (src && (src.fullName || src.fullname || src.display_name || src.title || src.name)) || '',
+    followers: toNum(src && (src.followers || src.followerCount || (src.stats && src.stats.followers))) || 0,
+    engagementRate: toNum(src && (src.engagementRate || (src.stats && src.stats.engagementRate))) || 0,
+    engagements: toNum(src && (src.engagements || (src.stats && (src.stats.avgEngagements || src.stats.avgLikes)))),
+    averageViews: toNum(src && (src.averageViews || (src.stats && src.stats.avgViews) || src.avgViews)),
+    picture: (src && (src.picture || src.avatar || src.profilePicUrl || src.thumbnail || src.channelThumbnailUrl)) || undefined,
     url,
     isVerified: Boolean(src && (src.isVerified || src.verified)),
     isPrivate: Boolean(src && src.isPrivate),
@@ -368,10 +486,9 @@ function normalizeSearchItem(item, platform) {
   };
 }
 
-// Prefer entries with verification, then ones that actually have a username
 function betterSearchResult(a, b) {
   if (a.isVerified !== b.isVerified) return a.isVerified ? a : b;
-  if (!!a.username !== !!b.username) return a.username ? a : b; // prefer item with a username
+  if (!!a.username !== !!b.username) return a.username ? a : b;
   if ((a.followers || 0) !== (b.followers || 0)) return (a.followers || 0) > (b.followers || 0) ? a : b;
   if ((a.engagementRate || 0) !== (b.engagementRate || 0))
     return (a.engagementRate || 0) > (b.engagementRate || 0) ? a : b;
@@ -398,7 +515,9 @@ function dedupeSearchItems(items) {
   return Array.from(map.values());
 }
 
-/* ---------- YouTube search body helpers (for /search endpoint) ---------- */
+/* -------------------------------------------------------------------------- */
+/*                          YouTube body helpers                              */
+/* -------------------------------------------------------------------------- */
 
 const DEFAULT_YT_SORT = { field: 'followers', direction: 'desc' };
 const YT_ALLOWED_AGE = new Set([18, 25, 35, 45, 65]);
@@ -407,9 +526,6 @@ function deepClone(x) {
   return JSON.parse(JSON.stringify(x));
 }
 
-/**
- * Sanitize YouTube body so the API won't silently return empty results.
- */
 function sanitizeYouTubeBody(original, opts) {
   const b = deepClone(original || {});
   b.page = b.page != null ? b.page : 0;
@@ -425,12 +541,10 @@ function sanitizeYouTubeBody(original, opts) {
   const infl = b.filter.influencer;
   const aud = b.filter.audience;
 
-  // lastposted must be >= 30 (days)
   if (typeof infl.lastposted === 'number' && infl.lastposted < 30) {
     infl.lastposted = 30;
   }
 
-  // influencer.age min/max must be one of [18,25,35,45,65]
   if (infl.age) {
     const min = infl.age.min;
     const max = infl.age.max;
@@ -439,12 +553,10 @@ function sanitizeYouTubeBody(original, opts) {
     }
   }
 
-  // Can't send both audience.age and audience.ageRange together
   if (aud.age && aud.ageRange) {
     delete aud.ageRange;
   }
 
-  // Drop filterOperations entirely for YouTube
   if (Array.isArray(infl.filterOperations)) {
     delete infl.filterOperations;
   }
@@ -471,7 +583,7 @@ function buildPlatformBody(platform, body, opts) {
 }
 
 /* -------------------------------------------------------------------------- */
-/*                          /api/modash/users equivalent                      */
+/*                          /api/modash/users                                 */
 /* -------------------------------------------------------------------------- */
 
 function scoreForQuery(u, qLower) {
@@ -481,7 +593,6 @@ function scoreForQuery(u, qLower) {
 
   if (uname === qLower) return 100;
   if (url.indexOf(`/@${qLower}`) !== -1) return 95;
-
   if (full === qLower) return 90;
   if (uname.startsWith(qLower)) return 70;
   if (full.startsWith(qLower)) return 60;
@@ -491,7 +602,6 @@ function scoreForQuery(u, qLower) {
   return 10;
 }
 
-/** Merge duplicates by platform+username, keeping the highest-score version */
 function dedupeByBest(items) {
   const map = new Map();
   for (const it of items) {
@@ -505,10 +615,6 @@ function dedupeByBest(items) {
   return Array.from(map.values());
 }
 
-/**
- * FRONTEND USERS CONTROLLER
- * Mirrors Next `/api/modash/users` route.
- */
 async function frontendUsers(req, res) {
   try {
     const qParam = (req.query.q || '').toString();
@@ -557,8 +663,8 @@ async function frontendUsers(req, res) {
               p === 'instagram'
                 ? `https://instagram.com/${username}`
                 : p === 'tiktok'
-                ? `https://www.tiktok.com/@${username}`
-                : `https://www.youtube.com/@${username}`,
+                  ? `https://www.tiktok.com/@${username}`
+                  : `https://www.youtube.com/@${username}`,
           };
 
           const s = scoreForQuery(u, q);
@@ -582,7 +688,6 @@ async function frontendUsers(req, res) {
       });
     }
 
-    // Sort by score, then verified, then followers
     results.sort((a, b) => {
       const sDiff = (b.__score || 0) - (a.__score || 0);
       if (sDiff !== 0) return sDiff;
@@ -615,9 +720,7 @@ async function frontendUsers(req, res) {
     return res.json({ results: safeResults });
   } catch (err) {
     const raw = (err && err.message) || '';
-    const isSensitive = /api token|developer section|modash|authorization|bearer|modash_api_key/i.test(
-      String(raw)
-    );
+    const isSensitive = /api token|developer section|modash|authorization|bearer|modash_api_key/i.test(String(raw));
     const safe = isSensitive ? 'Lookup failed' : raw || 'Lookup failed';
     const status = (err && err.status) || 400;
     return res.status(status).json({ error: safe });
@@ -625,14 +728,9 @@ async function frontendUsers(req, res) {
 }
 
 /* -------------------------------------------------------------------------- */
-/*                        /api/modash (search) equivalent                     */
+/*                        /api/modash/search                                  */
 /* -------------------------------------------------------------------------- */
 
-/**
- * FRONTEND SEARCH CONTROLLER
- * Mirrors Next `/api/modash` route:
- *  - POST { platforms: Platform[], body: any }
- */
 async function frontendSearch(req, res) {
   try {
     const payload = req.body || {};
@@ -642,7 +740,6 @@ async function frontendSearch(req, res) {
       return res.status(400).json({ error: 'brandId is required for search' });
     }
 
-    // Enforce searches_per_month
     try {
       await ensureBrandQuota(brandId, 'searches_per_month', 1);
     } catch (e) {
@@ -673,7 +770,6 @@ async function frontendSearch(req, res) {
       const firstBody = buildPlatformBody(platform, body);
       let data = await modashPOST(`/${platform}/search`, firstBody);
 
-      // Optional YouTube fallback if empty
       const enableFallback = (process.env.MODASH_YT_FALLBACK || '1') !== '0';
       if (platform === 'youtube' && enableFallback && Number((data && data.total) || 0) === 0) {
         const retryBody = buildPlatformBody(platform, body, { relax: true });
@@ -683,7 +779,7 @@ async function frontendSearch(req, res) {
             data = retryData;
           }
         } catch {
-          // ignore retry failures; keep original empty result
+          // ignore
         }
       }
 
@@ -707,23 +803,16 @@ async function frontendSearch(req, res) {
     }
 
     const merged = dedupeSearchItems(collected);
-    const total = responses.reduce(
-      (sum, r) => sum + Number((r.data && r.data.total) || 0),
-      0
-    );
+    const total = responses.reduce((sum, r) => sum + Number((r.data && r.data.total) || 0), 0);
 
     return res.json({
       results: merged,
       total,
       unique: merged.length
-      // Optionally also return remaining quota here, if you want:
-      // quota: { feature: 'searches_per_month', ... (from ensureBrandQuota) }
     });
   } catch (err) {
     const raw = (err && err.message) || '';
-    const isSensitive = /api token|developer section|modash|authorization|bearer|modash_api_key/i.test(
-      String(raw)
-    );
+    const isSensitive = /api token|developer section|modash|authorization|bearer|modash_api_key/i.test(String(raw));
     const safe = isSensitive ? 'Search failed' : raw || 'Search failed';
     const status = (err && err.status) || 400;
     return res.status(status).json({ error: safe });
@@ -731,7 +820,7 @@ async function frontendSearch(req, res) {
 }
 
 /* -------------------------------------------------------------------------- */
-/*                      /api/modash/report equivalent (simple)                */
+/*                      /api/modash/report                                    */
 /* -------------------------------------------------------------------------- */
 
 function toCalcMethod(input) {
@@ -739,17 +828,9 @@ function toCalcMethod(input) {
   return String(input).toLowerCase() === 'average' ? 'average' : 'median';
 }
 
-/**
- * FRONTEND REPORT CONTROLLER
- * GET ?platform=instagram|tiktok|youtube&userId=...&calculationMethod=...
- * Optional:
- *  - influencerId
- *  - force=1 / refresh=1 → bypass cache
- */
 async function frontendReport(req, res) {
   try {
-    const brandId =
-      (req.query.brandId || req.query.brand_id || '').toString().trim();
+    const brandId = (req.query.brandId || req.query.brand_id || '').toString().trim();
 
     if (!brandId) {
       return res.status(400).json({ error: 'brandId is required for profile views' });
@@ -759,10 +840,7 @@ async function frontendReport(req, res) {
     const userId = (req.query.userId || '').toString();
     const calculationMethod = toCalcMethod(req.query.calculationMethod);
 
-    const influencerId =
-      (req.query.influencerId || req.query.influencer_id || '')
-        .toString()
-        .trim() || null;
+    const influencerId = (req.query.influencerId || req.query.influencer_id || '').toString().trim() || null;
 
     const forceFresh =
       req.query.force === '1' ||
@@ -771,15 +849,13 @@ async function frontendReport(req, res) {
       req.query.refresh === 'true';
 
     if (!platform || !ALLOWED_PLATFORMS.has(platform)) {
-      return res
-        .status(400)
-        .json({ error: 'platform must be instagram|tiktok|youtube' });
+      return res.status(400).json({ error: 'platform must be instagram|tiktok|youtube' });
     }
     if (!userId) {
       return res.status(400).json({ error: 'userId is required' });
     }
 
-    // Enforce profile_views_per_month
+    // Enforce profile_views_per_month quota
     try {
       await ensureBrandQuota(brandId, 'profile_views_per_month', 1);
     } catch (e) {
@@ -792,11 +868,12 @@ async function frontendReport(req, res) {
       throw e;
     }
 
-    // 1) Cache
+    // 1) Check cache first (unless force refresh)
     if (!forceFresh) {
       try {
         const cached = await findCachedReport({ platform, userId, influencerId });
-        if (cached) {
+        if (cached && cached.providerRaw) {
+          console.log(`[frontendReport] ✓ Returning cached report for ${platform}/${userId}`);
           const out = Object.assign({}, cached.providerRaw);
           if (cached.lastFetchedAt) {
             const d = new Date(cached.lastFetchedAt);
@@ -807,45 +884,26 @@ async function frontendReport(req, res) {
           return res.json(out);
         }
       } catch (cacheErr) {
-        console.error('[modash] Cache lookup failed:', cacheErr);
-        // continue to live Modash call
+        console.error('[frontendReport] ✗ Cache lookup failed:', cacheErr.message);
       }
     }
 
-    // 2) Live Modash call
-    try {
-      const fetchedAt = new Date();
+    // 2) Fetch fresh data from Modash API
+    console.log(`[frontendReport] Fetching fresh report from Modash API for ${platform}/${userId}`);
 
-      const data = await modashGET(
+    let reportJSON;
+    try {
+      reportJSON = await modashGET(
         `/${platform}/profile/${encodeURIComponent(userId)}/report`,
         { calculationMethod }
       );
-
-      // Persist Modash profile (best-effort)
-      try {
-        await upsertModashProfileFromReport({
-          platform,
-          reportJSON: data,
-          influencerId,
-          fetchedAt
-        });
-      } catch (saveErr) {
-        console.error('[modash] Failed to upsert Modash profile:', saveErr);
-      }
-
-      const out = Object.assign({}, data, {
-        _lastFetchedAt: fetchedAt.toISOString()
-      });
-
-      return res.json(out);
-    } catch (e) {
-      const raw = (e && e.message) || '';
+    } catch (apiErr) {
+      const raw = (apiErr && apiErr.message) || '';
       let safeMsg = 'Report unavailable';
 
       try {
-        const errResp = e && e.response;
-        const rawMsg =
-          (errResp && (errResp.message || errResp.error)) || raw;
+        const errResp = apiErr && apiErr.response;
+        const rawMsg = (errResp && (errResp.message || errResp.error)) || raw;
         const isSensitive =
           /api token|developer section|modash|authorization|bearer|modash_api_key|marketer\.modash\.io/i.test(
             String(rawMsg)
@@ -855,20 +913,45 @@ async function frontendReport(req, res) {
         // ignore
       }
 
-      const status = (e && e.status) ? e.status : 502;
+      const status = (apiErr && apiErr.status) ? apiErr.status : 502;
       return res.status(status).json({ error: safeMsg });
     }
+
+    // 3) Save to database (best effort)
+    const fetchedAt = new Date();   // <-- this was missing
+
+    try {
+      console.log(`[frontendReport] Normalizing and saving report to database`);
+
+      const normalized = normalizeReportData(reportJSON);
+
+      await upsertModashProfileFromReport(normalized, platform, {
+        userIdFromRequest: userId
+      });
+
+      console.log(`[frontendReport] Successfully saved report for ${platform}/${userId}`);
+    } catch (saveErr) {
+      console.error('[frontendReport] Failed to save Modash profile to database:', saveErr);
+      // We still return the data even if DB save failed
+    }
+
+    // 4) Return the fresh data immediately
+    const out = Object.assign({}, reportJSON, {
+      _lastFetchedAt: fetchedAt.toISOString()
+    });
+
+    return res.json(out);
+
   } catch (err) {
+    console.error('[frontendReport] ✗ Unexpected error:', err);
     const raw = (err && err.message) || '';
     return res.status(500).json({ error: raw || 'Internal error' });
   }
 }
 
 /* -------------------------------------------------------------------------- */
-/*                       Existing resolveProfile + search                     */
+/*                       Legacy resolveProfile + search                       */
 /* -------------------------------------------------------------------------- */
-
-/* --- Legacy helpers for resolveProfile --- */
 
 async function searchForUsername(platform, username) {
   const clean = String(username || '').replace(/^@/, '').trim();
@@ -927,72 +1010,12 @@ function buildPreviewFromReport(reportJSON) {
   return {
     fullname: prof.fullname || null,
     username: prof.username || null,
-    followers:
-      typeof prof.followers === 'number' ? prof.followers : null,
+    followers: typeof prof.followers === 'number' ? prof.followers : null,
     picture: prof.picture || null,
     url: prof.url || null,
   };
 }
 
-function normalizeReportLegacy(reportJSON) {
-  const p = (reportJSON && reportJSON.profile) || {};
-  const prof = p.profile || p;
-  return {
-    profile: {
-      userId: p.userId || prof.userId,
-      username: prof.username,
-      fullname: prof.fullname,
-      handle: prof.handle || (prof.username ? `@${prof.username}` : undefined),
-      url: prof.url,
-      picture: prof.picture,
-      followers: prof.followers,
-      engagements: prof.engagements,
-      engagementRate: prof.engagementRate,
-      averageViews: prof.averageViews,
-    },
-    isPrivate: p.isPrivate,
-    isVerified: p.isVerified,
-    accountType: p.accountType,
-    secUid: p.secUid,
-    city: p.city,
-    state: p.state,
-    country: p.country,
-    ageGroup: p.ageGroup,
-    gender: p.gender,
-    language: p.language,
-    statsByContentType: p.statsByContentType,
-    stats: p.stats,
-    recentPosts: p.recentPosts,
-    popularPosts: p.popularPosts,
-    postsCount: p.postsCount || p.postsCounts,
-    avgLikes: p.avgLikes,
-    avgComments: p.avgComments,
-    avgViews: p.avgViews,
-    avgReelsPlays: p.avgReelsPlays,
-    totalLikes: p.totalLikes,
-    totalViews: p.totalViews,
-    bio: p.description || p.bio,
-    hashtags: p.hashtags,
-    mentions: p.mentions,
-    brandAffinity: p.brandAffinity,
-    audience: p.audience,
-    audienceCommenters: p.audienceCommenters,
-    lookalikes: p.lookalikes || p.audienceLookalikes,
-    audienceExtra: p.audienceExtra,
-    sponsoredPosts: p.sponsoredPosts,
-    paidPostPerformance: p.paidPostPerformance,
-    paidPostPerformanceViews: p.paidPostPerformanceViews,
-    sponsoredPostsMedianViews: p.sponsoredPostsMedianViews,
-    sponsoredPostsMedianLikes: p.sponsoredPostsMedianLikes,
-    nonSponsoredPostsMedianViews: p.nonSponsoredPostsMedianViews,
-    nonSponsoredPostsMedianLikes: p.nonSponsoredPostsMedianLikes,
-    providerRaw: reportJSON,
-  };
-}
-
-/**
- * Legacy: resolveProfile
- */
 async function resolveProfile(req, res) {
   try {
     let platform = (req.body && req.body.platform) || '';
@@ -1003,9 +1026,7 @@ async function resolveProfile(req, res) {
     if (username.startsWith('@')) username = username.slice(1);
 
     if (!ALLOWED_PLATFORMS.has(platform)) {
-      return res
-        .status(400)
-        .json({ message: 'platform must be instagram | youtube | tiktok' });
+      return res.status(400).json({ message: 'platform must be instagram | youtube | tiktok' });
     }
     if (!username) {
       return res.status(400).json({ message: 'username (handle) is required' });
@@ -1014,34 +1035,30 @@ async function resolveProfile(req, res) {
     let reportJSON = null;
     let userIdResolved = null;
 
-    // First try report directly with handle
+    // Try direct report with handle
     try {
       reportJSON = await getReportLegacy(platform, username);
       userIdResolved =
         (reportJSON &&
           reportJSON.profile &&
           (reportJSON.profile.userId ||
-            (reportJSON.profile.profile &&
-              reportJSON.profile.profile.userId))) ||
+            (reportJSON.profile.profile && reportJSON.profile.profile.userId))) ||
         null;
     } catch (e) {
       if (e && e.status === 403) {
         return res.status(403).json({
-          message:
-            'Forbidden from Modash. Verify your API key / header type and that your plan allows the report endpoint.',
+          message: 'Forbidden from Modash. Verify your API key / header type and plan.',
           details: e.response || undefined,
         });
       }
       if (!e || (e.status !== 404 && e.status !== 400)) throw e;
     }
 
-    // If direct handle failed, search to resolve userId
+    // If direct failed, search to resolve userId
     if (!reportJSON) {
       const hit = await searchForUsername(platform, username);
       if (!hit || !hit.userId) {
-        return res
-          .status(404)
-          .json({ message: 'No profile found for that username' });
+        return res.status(404).json({ message: 'No profile found for that username' });
       }
       userIdResolved = hit.userId;
 
@@ -1050,8 +1067,7 @@ async function resolveProfile(req, res) {
       } catch (e) {
         if (e && e.status === 403) {
           return res.status(403).json({
-            message:
-              'Forbidden from Modash when fetching the report. Your API key/plan likely lacks access to /profile/{id}/report.',
+            message: 'Forbidden from Modash when fetching report.',
             details: e.response || undefined,
           });
         }
@@ -1059,8 +1075,19 @@ async function resolveProfile(req, res) {
       }
     }
 
-    const normalized = normalizeReportLegacy(reportJSON);
+    const normalized = normalizeReportData(reportJSON);
     const preview = buildPreviewFromReport(reportJSON);
+
+    // Save to database asynchronously (no influencerId for legacy)
+    (async () => {
+      try {
+        await upsertModashProfileFromReport(normalized, platform, {
+          userIdFromRequest: userIdResolved || username
+        });
+      } catch (saveErr) {
+        console.error('[resolveProfile] Failed to save profile:', saveErr.message);
+      }
+    })();
 
     return res.json({
       message: 'ok',
@@ -1073,8 +1100,7 @@ async function resolveProfile(req, res) {
   } catch (e) {
     if (e && e.status === 403) {
       return res.status(403).json({
-        message:
-          'Forbidden from Modash. Verify your API key / plan and endpoint access.',
+        message: 'Forbidden from Modash.',
         details: e.response || undefined,
       });
     }
@@ -1082,24 +1108,15 @@ async function resolveProfile(req, res) {
       return res.status(404).json({ message: 'No profile found' });
     }
     console.error('resolveProfile error:', e);
-    return res
-      .status(500)
-      .json({ message: (e && e.message) || 'Modash error' });
+    return res.status(500).json({ message: (e && e.message) || 'Modash error' });
   }
 }
 
-/**
- * Legacy simple passthrough search
- */
 async function legacySearch(req, res) {
   try {
-    const platform = String((req.body && req.body.platform) || '')
-      .toLowerCase()
-      .trim();
+    const platform = String((req.body && req.body.platform) || '').toLowerCase().trim();
     if (!ALLOWED_PLATFORMS.has(platform)) {
-      return res
-        .status(400)
-        .json({ message: 'platform must be instagram | youtube | tiktok' });
+      return res.status(400).json({ message: 'platform must be instagram | youtube | tiktok' });
     }
 
     const body = Object.assign({}, req.body);
@@ -1114,9 +1131,7 @@ async function legacySearch(req, res) {
         details: e.response || undefined,
       });
     }
-    return res
-      .status(500)
-      .json({ message: (e && e.message) || 'Modash error' });
+    return res.status(500).json({ message: (e && e.message) || 'Modash error' });
   }
 }
 
@@ -1126,11 +1141,16 @@ async function legacySearch(req, res) {
 
 module.exports = {
   // New frontend APIs
-  frontendUsers,    // GET /modash/users
-  frontendSearch,   // POST /modash/search
-  frontendReport,   // GET /modash/report
+  frontendUsers,
+  frontendSearch,
+  frontendReport,
 
   // Legacy endpoints
-  resolveProfile,   // POST /modash/resolveProfile
-  search: legacySearch, // POST /modash/search-legacy
+  resolveProfile,
+  search: legacySearch,
+
+  // Helper functions (if needed elsewhere)
+  normalizeReportData,
+  upsertModashProfileFromReport,
+  findCachedReport,
 };

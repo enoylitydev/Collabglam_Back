@@ -88,7 +88,8 @@ const audienceSchema = new mongoose.Schema(
 
 const modashSchema = new mongoose.Schema(
   {
-    // Link back to your main influencer
+    // Link back to your main influencer (ObjectId reference)
+    // This is for when you want to link a Modash profile to your Influencer collection
     influencer: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Influencer',
@@ -96,10 +97,11 @@ const modashSchema = new mongoose.Schema(
       index: true,
     },
 
-    // For safety, keep a copy of their influencerId string too (optional but handy)
+    // String version of influencer ID (for display/reference purposes)
+    // This can be null/empty for profiles saved without explicit influencer link
     influencerId: {
       type: String,
-      default: () => uuidv4(),
+      required: false,
       index: true
     },
 
@@ -111,11 +113,14 @@ const modashSchema = new mongoose.Schema(
       index: true
     },
 
-    // Identity
+    // CRITICAL: This is the Modash provider's userId (their internal ID)
+    // This is the PRIMARY KEY along with provider
     userId: {
       type: String,
+      required: true,  // Changed from optional to required
       index: true,
     },
+    
     username: String,
     fullname: String,
     handle: String,
@@ -160,7 +165,7 @@ const modashSchema = new mongoose.Schema(
     // Bio/tags/brand
     bio: String,
 
-    // NOTE: categories were only used under socialProfiles in Influencer;
+    // Categories (for categorization)
     categories: { type: [categoryLinkSchema], default: [] },
 
     hashtags: [{ tag: String, weight: Number }],
@@ -184,7 +189,7 @@ const modashSchema = new mongoose.Schema(
     // Misc extras
     audienceExtra: mongoose.Schema.Types.Mixed,
 
-    // Keep untouched provider payload too
+    // Keep untouched provider payload
     providerRaw: mongoose.Schema.Types.Mixed
   },
   {
@@ -193,19 +198,83 @@ const modashSchema = new mongoose.Schema(
 );
 
 /* ------------------------------ Indexes ---------------------------------- */
-modashSchema.index(
-  { influencer: 1, provider: 1 },
-  { unique: true, sparse: true }
-);
 
-// If not linked: one doc per userId+provider
+// PRIMARY INDEX: userId + provider (this is the main unique constraint)
+// Every document MUST have userId and provider
 modashSchema.index(
   { userId: 1, provider: 1 },
   {
     unique: true,
-    partialFilterExpression: { userId: { $exists: true, $ne: null } },
+    name: 'userId_provider_unique'
   }
 );
 
+// Secondary index for looking up by influencer ObjectId reference
+// This is non-unique because multiple platforms can link to same influencer
+modashSchema.index(
+  { influencer: 1, provider: 1 },
+  {
+    name: 'influencer_provider_lookup'
+  }
+);
+
+// Index for searching by influencerId string (for display purposes)
+modashSchema.index(
+  { influencerId: 1 },
+  {
+    sparse: true,  // Only index documents that have this field
+    name: 'influencerId_lookup'
+  }
+);
+
+// Compound index for common queries
+modashSchema.index(
+  { provider: 1, username: 1 },
+  {
+    name: 'provider_username_lookup'
+  }
+);
+
+/* ------------------------------ Pre-save Hook --------------------------- */
+
+// Validate that userId is always present
+modashSchema.pre('save', function(next) {
+  if (!this.userId) {
+    return next(new Error('userId is required for ModashProfile'));
+  }
+  if (!this.provider) {
+    return next(new Error('provider is required for ModashProfile'));
+  }
+  next();
+});
+
+/* ------------------------------ Instance Methods ------------------------ */
+
+// Helper to check if profile is linked to an influencer
+modashSchema.methods.isLinkedToInfluencer = function() {
+  return !!(this.influencer || this.influencerId);
+};
+
+// Get a display name for this profile
+modashSchema.methods.getDisplayName = function() {
+  return this.fullname || this.username || this.handle || 'Unknown';
+};
+
+/* ------------------------------ Static Methods -------------------------- */
+
+// Find or create by userId and provider
+modashSchema.statics.findByUserIdAndProvider = async function(userId, provider) {
+  return this.findOne({ userId, provider });
+};
+
+// Find all profiles for a given influencer
+modashSchema.statics.findByInfluencer = async function(influencerId) {
+  return this.find({
+    $or: [
+      { influencer: influencerId },
+      { influencerId: String(influencerId) }
+    ]
+  });
+};
 
 module.exports = mongoose.model('Modash', modashSchema);
