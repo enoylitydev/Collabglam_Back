@@ -1,5 +1,5 @@
 const mongoose = require('mongoose');
-const { GridFSBucket } = require('mongodb');
+const GridFSBucket = mongoose.mongo.GridFSBucket;
 const path = require('path');
 const mime = require('mime-types');
 const crypto = require('crypto');
@@ -15,7 +15,6 @@ async function ensureMongoConnected(timeoutMs = 7000) {
 }
 
 function getBucket(req) {
-  // Prefer the instance created in app.js
   const viaApp = req?.app?.get && req.app.get('gridfsBucket');
   if (viaApp) return viaApp;
   if (!mongoose.connection?.db) throw new Error('MongoDB connection is not ready');

@@ -88,14 +88,10 @@ const brandSchema = new mongoose.Schema(
       },
       match: [/^[a-z0-9._]{1,30}$/i, 'Invalid Instagram handle'],
     },
-    logoUrl: {
-      type: String,
-      set: normalizeUrl,
-      validate: {
-        validator: v => !v || /^https?:\/\/[^\s]+$/i.test(v),
-        message: 'Invalid logo URL',
-      },
-    },
+    
+    logoFileId: { type: String, trim: true },    // GridFS file _id as string
+    logoFilename: { type: String, trim: true },  // GridFS filename
+
     companySize: { type: String, enum: COMPANY_SIZE_ENUM },
     referralCode: { type: String, trim: true },
     isVerifiedRepresentative: { type: Boolean, required: true, default: false },
