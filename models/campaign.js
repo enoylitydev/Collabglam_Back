@@ -91,6 +91,13 @@ const campaignSchema = new mongoose.Schema({
     enum: ['Brand Awareness', 'Sales', 'Engagement'],
     required: true
   },
+
+  // ✅ NEW: campaignType (optional, no enum, not required)
+  campaignType: {
+    type: String,
+    default: ''
+  },
+
   creativeBriefText: {
     type: String,
     default: ''
@@ -123,6 +130,11 @@ const campaignSchema = new mongoose.Schema({
     enum: [0, 1],
     default: 0
   },
+  isDraft: {
+  type: Number,
+  enum: [0, 1],
+  default: 0 // 0 = normal, 1 = draft
+},
   createdAt: {
     type: Date,
     default: Date.now
