@@ -1,12 +1,25 @@
 // controllers/milestoneController.js
+
 const Milestone = require('../models/milestone');
 const Campaign = require('../models/campaign');
-const Brand = require('../models/brand');           // 👈 NEW
-const Influencer = require('../models/influencer'); // 👈 NEW
-const { createAndEmit } = require('../utils/notifier'); // ⬅️ use centralized notifier
+const Brand = require('../models/brand');
+const Influencer = require('../models/influencer');
+const { createAndEmit } = require('../utils/notifier');
 
-// POST /milestone/create
-// body: { brandId, influencerId, campaignId, milestoneTitle, amount, milestoneDescription }
+// ✉️ Email helpers
+const {
+  sendMilestoneCreatedEmail,
+  sendMilestoneReleasedEmail,
+  sendMilestonePaidEmail,
+} = require('../emails/milestonetemplet');
+
+// Helper to build app URL
+const APP_BASE_URL = process.env.APP_BASE_URL || '';
+
+/**
+ * POST /milestone/create
+ * body: { brandId, influencerId, campaignId, milestoneTitle, amount, milestoneDescription }
+ */
 exports.createMilestone = async (req, res) => {
   const {
     brandId,
@@ -14,16 +27,17 @@ exports.createMilestone = async (req, res) => {
     campaignId,
     milestoneTitle,
     amount,
-    milestoneDescription = ''
+    milestoneDescription = '',
   } = req.body;
 
   const amountNum = Number(amount);
   if (isNaN(amountNum)) {
     return res.status(400).json({ message: 'amount must be a valid number' });
   }
+
   if (!brandId || !influencerId || !campaignId || !milestoneTitle || amount == null) {
     return res.status(400).json({
-      message: 'brandId, influencerId, campaignId, milestoneTitle and amount are required'
+      message: 'brandId, influencerId, campaignId, milestoneTitle and amount are required',
     });
   }
 
@@ -34,22 +48,53 @@ exports.createMilestone = async (req, res) => {
       return res.status(404).json({ message: 'Campaign not found' });
     }
 
+    const campaignBudget = Number(camp.budget);
+    // if budget is not a valid number or <= 0, we skip budget enforcement
+    const hasBudget = !isNaN(campaignBudget) && campaignBudget > 0;
+
     // 2) Find or create the brand’s Milestone document
     let doc = await Milestone.findOne({ brandId });
     if (!doc) {
       doc = new Milestone({ brandId });
     }
 
+    // ensure numeric fields
+    doc.walletBalance = doc.walletBalance || 0;
+    doc.totalAmount = doc.totalAmount || 0;
+
     // 2a) Check previous milestone for this influencer+campaign
-    const prev = doc.milestoneHistory
-      .filter(e => e.influencerId === influencerId && e.campaignId === campaignId);
+    const prev = doc.milestoneHistory.filter(
+      (e) => e.influencerId === influencerId && e.campaignId === campaignId
+    );
 
     if (prev.length > 0) {
       prev.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
       const last = prev[0];
       if (!last.released) {
         return res.status(400).json({
-          message: 'Cannot create new milestone until the previous milestone is released'
+          message: 'Cannot create new milestone until the previous milestone is released',
+        });
+      }
+    }
+
+    // 2b) NEW: check total milestone amount vs campaign budget
+    if (hasBudget) {
+      const existingTotalForCampaign = doc.milestoneHistory
+        .filter((e) => e.campaignId === campaignId)
+        .reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+
+      // already fully allocated = NO new milestones allowed
+      if (existingTotalForCampaign >= campaignBudget) {
+        return res.status(400).json({
+          message:
+            'You have added milestone equal to campaign now not able to add now milestone',
+        });
+      }
+
+      // adding this milestone would exceed budget
+      if (existingTotalForCampaign + amountNum > campaignBudget) {
+        return res.status(400).json({
+          message: 'Total milestone amount cannot exceed campaign budget',
         });
       }
     }
@@ -62,12 +107,13 @@ exports.createMilestone = async (req, res) => {
       amount: amountNum,
       milestoneDescription,
       released: false,
-      createdAt: new Date()
+      createdAt: new Date(),
     };
     doc.milestoneHistory.push(entry);
 
-    // 4) Update walletBalance
+    // 4) Update walletBalance (escrow) + totalAmount
     doc.walletBalance = (doc.walletBalance || 0) + amountNum;
+    doc.totalAmount = (doc.totalAmount || 0) + amountNum;
 
     // 5) Save
     await doc.save();
@@ -82,7 +128,7 @@ exports.createMilestone = async (req, res) => {
       entityType: 'campaign',
       entityId: String(campaignId),
       actionPath: `/influencer/my-campaign`,
-    }).catch(e => console.error('notify influencer (created) failed:', e));
+    }).catch((e) => console.error('notify influencer (created) failed:', e));
 
     // Brand → milestone history
     createAndEmit({
@@ -93,14 +139,38 @@ exports.createMilestone = async (req, res) => {
       entityType: 'campaign',
       entityId: String(campaignId),
       actionPath: `/brand/active-campaign`,
-    }).catch(e => console.error('notify brand (created) failed:', e));
+    }).catch((e) => console.error('notify brand (created) failed:', e));
+
+    // 6b) ✉️ Email to influencer (non-blocking)
+    try {
+      const [infDoc, brandDoc] = await Promise.all([
+        Influencer.findOne({ influencerId }, 'name email').lean(),
+        Brand.findOne({ brandId }, 'name').lean(),
+      ]);
+
+      if (infDoc && infDoc.email) {
+        sendMilestoneCreatedEmail({
+          to: infDoc.email,
+          influencerName: infDoc.name || '',
+          brandName: (brandDoc && brandDoc.name) || '',
+          campaignName: camp.productOrServiceName || '',
+          milestoneTitle,
+          amount: amountNum,
+          milestoneDescription,
+          dashboardUrl: `${APP_BASE_URL}/influencer/my-campaign`,
+        }).catch((e) => console.error('sendMilestoneCreatedEmail failed:', e));
+      }
+    } catch (emailErr) {
+      console.error('Error preparing milestone created email:', emailErr);
+    }
 
     // 7) Respond
     return res.status(201).json({
       message: 'Milestone created',
       milestoneId: doc.milestoneId,
       walletBalance: doc.walletBalance,
-      entry
+      totalAmount: doc.totalAmount,
+      entry,
     });
   } catch (err) {
     console.error('Error in createMilestone:', err);
@@ -108,8 +178,10 @@ exports.createMilestone = async (req, res) => {
   }
 };
 
-// POST /milestone/listByCampaign
-// body: { campaignId }
+/**
+ * POST /milestone/listByCampaign (route name can be /milestone/byCampaign)
+ * body: { campaignId }
+ */
 exports.getMilestonesByCampaign = async (req, res) => {
   const { campaignId } = req.body;
   if (!campaignId) {
@@ -119,14 +191,14 @@ exports.getMilestonesByCampaign = async (req, res) => {
   try {
     const docs = await Milestone.find({ 'milestoneHistory.campaignId': campaignId }).lean();
 
-    const entries = docs.flatMap(doc =>
+    const entries = docs.flatMap((doc) =>
       doc.milestoneHistory
-        .filter(e => e.campaignId === campaignId)
-        .map(e => ({
+        .filter((e) => e.campaignId === campaignId)
+        .map((e) => ({
           ...e,
           brandId: doc.brandId,
           milestoneId: doc.milestoneId,
-          walletBalance: doc.walletBalance
+          walletBalance: doc.walletBalance,
         }))
     );
 
@@ -134,7 +206,7 @@ exports.getMilestonesByCampaign = async (req, res) => {
 
     return res.status(200).json({
       message: 'Milestones fetched by campaign',
-      milestones: entries
+      milestones: entries,
     });
   } catch (err) {
     console.error('Error in getMilestonesByCampaign:', err);
@@ -149,43 +221,38 @@ exports.getMilestonesByCampaign = async (req, res) => {
 exports.getMilestonesByInfluencerAndCampaign = async (req, res) => {
   const { influencerId, campaignId } = req.body;
   if (!influencerId || !campaignId) {
-    return res.status(400).json({ message: 'influencerId and campaignId are required' });
+    return res
+      .status(400)
+      .json({ message: 'influencerId and campaignId are required' });
   }
 
   try {
     const docs = await Milestone.find({
       'milestoneHistory.influencerId': influencerId,
-      'milestoneHistory.campaignId': campaignId
+      'milestoneHistory.campaignId': campaignId,
     }).lean();
 
-    const entries = docs.flatMap(doc =>
+    const entries = docs.flatMap((doc) =>
       doc.milestoneHistory
-        .filter(e => e.influencerId === influencerId && e.campaignId === campaignId)
-        .map(e => {
-          // --------- Derive influencer-facing payout status ---------
-          // If you already added a field like `payoutStatus` on each entry
-          // (set by adminMarkMilestonePaid), we prefer that.
+        .filter((e) => e.influencerId === influencerId && e.campaignId === campaignId)
+        .map((e) => {
+          // Derive influencer-facing payout status
           let payoutStatus = e.payoutStatus;
 
-          // Fallback logic if not explicitly stored:
-          // - Not released at all  -> "pending"
-          // - Released by brand    -> "initiated"
-          // - Admin later should set `payoutStatus: 'paid'`
           if (!payoutStatus) {
             if (!e.released) {
               payoutStatus = 'pending';
             } else {
-              // brand has released; waiting for admin
               payoutStatus = 'initiated';
             }
           }
 
           return {
             ...e,
-            payoutStatus,               // 👈 use this on influencer UI
+            payoutStatus, // influencer UI uses this
             brandId: doc.brandId,
             milestoneId: doc.milestoneId,
-            walletBalance: doc.walletBalance
+            walletBalance: doc.walletBalance,
           };
         })
     );
@@ -194,7 +261,7 @@ exports.getMilestonesByInfluencerAndCampaign = async (req, res) => {
 
     return res.status(200).json({
       message: 'Milestones fetched by influencer and campaign',
-      milestones: entries
+      milestones: entries,
     });
   } catch (err) {
     console.error('Error in getMilestonesByInfluencerAndCampaign:', err);
@@ -213,16 +280,18 @@ exports.getMilestonesByInfluencer = async (req, res) => {
   }
 
   try {
-    const docs = await Milestone.find({ 'milestoneHistory.influencerId': influencerId }).lean();
+    const docs = await Milestone.find({
+      'milestoneHistory.influencerId': influencerId,
+    }).lean();
 
-    const entries = docs.flatMap(doc =>
+    const entries = docs.flatMap((doc) =>
       doc.milestoneHistory
-        .filter(e => e.influencerId === influencerId)
-        .map(e => ({
+        .filter((e) => e.influencerId === influencerId)
+        .map((e) => ({
           ...e,
           brandId: doc.brandId,
           milestoneId: doc.milestoneId,
-          walletBalance: doc.walletBalance
+          walletBalance: doc.walletBalance,
         }))
     );
 
@@ -230,7 +299,7 @@ exports.getMilestonesByInfluencer = async (req, res) => {
 
     return res.status(200).json({
       message: 'Milestones fetched by influencer',
-      milestones: entries
+      milestones: entries,
     });
   } catch (err) {
     console.error('Error in getMilestonesByInfluencer:', err);
@@ -253,22 +322,22 @@ exports.getMilestonesByBrand = async (req, res) => {
     if (!doc) {
       return res.status(200).json({
         message: 'No milestones found for this brand',
-        milestones: []
+        milestones: [],
       });
     }
 
-    const entries = doc.milestoneHistory.map(e => ({
+    const entries = doc.milestoneHistory.map((e) => ({
       ...e,
       brandId: doc.brandId,
       milestoneId: doc.milestoneId,
-      walletBalance: doc.walletBalance
+      walletBalance: doc.walletBalance,
     }));
 
     entries.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
     return res.status(200).json({
       message: 'Milestones fetched by brand',
-      milestones: entries
+      milestones: entries,
     });
   } catch (err) {
     console.error('Error in getMilestonesByBrand:', err);
@@ -276,8 +345,10 @@ exports.getMilestonesByBrand = async (req, res) => {
   }
 };
 
-// POST /milestone/balance
-// body: { brandId }
+/**
+ * POST /milestone/balance
+ * body: { brandId }
+ */
 exports.getWalletBalance = async (req, res) => {
   const { brandId } = req.body;
   if (!brandId) {
@@ -290,7 +361,7 @@ exports.getWalletBalance = async (req, res) => {
     return res.status(200).json({
       message: 'Wallet balance fetched',
       brandId,
-      balance
+      balance,
     });
   } catch (err) {
     console.error('Error in getWalletBalance:', err);
@@ -298,12 +369,16 @@ exports.getWalletBalance = async (req, res) => {
   }
 };
 
-// POST /milestone/release
-// body: { milestoneId, milestoneHistoryId }
+/**
+ * POST /milestone/release
+ * body: { milestoneId, milestoneHistoryId }
+ */
 exports.releaseMilestone = async (req, res) => {
   const { milestoneId, milestoneHistoryId } = req.body;
   if (!milestoneId || !milestoneHistoryId) {
-    return res.status(400).json({ message: 'milestoneId and milestoneHistoryId are required.' });
+    return res.status(400).json({
+      message: 'milestoneId and milestoneHistoryId are required.',
+    });
   }
 
   try {
@@ -312,20 +387,26 @@ exports.releaseMilestone = async (req, res) => {
       return res.status(404).json({ message: 'Milestone not found.' });
     }
 
-    const entry = doc.milestoneHistory.find(h => h.milestoneHistoryId === milestoneHistoryId);
+    const entry = doc.milestoneHistory.find(
+      (h) => h.milestoneHistoryId === milestoneHistoryId
+    );
     if (!entry) {
-      return res.status(404).json({ message: 'Milestone history entry not found.' });
+      return res
+        .status(404)
+        .json({ message: 'Milestone history entry not found.' });
     }
     if (entry.released) {
-      return res.status(400).json({ message: 'This milestone has already been released.' });
+      return res
+        .status(400)
+        .json({ message: 'This milestone has already been released.' });
     }
 
     // brand releases funds from its wallet
-    doc.walletBalance -= entry.amount;
+    doc.walletBalance = Math.max(0, (doc.walletBalance || 0) - Number(entry.amount || 0));
     entry.released = true;
     entry.releasedAt = new Date();
 
-    // NEW: admin flow → mark payout as INITIATED
+    // admin flow → mark payout as INITIATED
     entry.payoutStatus = 'initiated';
 
     await doc.save();
@@ -335,29 +416,68 @@ exports.releaseMilestone = async (req, res) => {
     createAndEmit({
       influencerId: entry.influencerId,
       type: 'milestone.initiated',
-      title: `Milestone payout initiated${entry.milestoneTitle ? `: ${entry.milestoneTitle}` : ''}`,
-      message: `Brand has released $${Number(entry.amount).toFixed(2)} for this campaign. `
-        + `It should be received within 24 - 48 hrs.`,
+      title: `Milestone payout initiated${
+        entry.milestoneTitle ? `: ${entry.milestoneTitle}` : ''
+      }`,
+      message:
+        `Brand has released $${Number(entry.amount).toFixed(
+          2
+        )} for this campaign. ` +
+        `It should be received within 24 - 48 hrs.`,
       entityType: 'campaign',
       entityId: String(entry.campaignId),
       actionPath: `/influencer/my-campaign`,
-    }).catch(e => console.error('notify influencer (initiated) failed:', e));
+    }).catch((e) => console.error('notify influencer (initiated) failed:', e));
 
     // Brand → they see release in their own history
     createAndEmit({
       brandId: doc.brandId,
       type: 'milestone.released',
-      title: `Milestone released${entry.milestoneTitle ? `: ${entry.milestoneTitle}` : ''}`,
-      message: `You released $${Number(entry.amount).toFixed(2)} for this campaign.`,
+      title: `Milestone released${
+        entry.milestoneTitle ? `: ${entry.milestoneTitle}` : ''
+      }`,
+      message: `You released $${Number(entry.amount).toFixed(
+        2
+      )} for this campaign.`,
       entityType: 'campaign',
       entityId: String(entry.campaignId),
       actionPath: `/brand/active-campaign`,
-    }).catch(e => console.error('notify brand (released) failed:', e));
+    }).catch((e) => console.error('notify brand (released) failed:', e));
+
+    // ✉️ Email to influencer: payout initiated
+    try {
+      const [infDoc, brandDoc, campDoc] = await Promise.all([
+        Influencer.findOne(
+          { influencerId: entry.influencerId },
+          'name email'
+        ).lean(),
+        Brand.findOne({ brandId: doc.brandId }, 'name').lean(),
+        Campaign.findOne(
+          { campaignsId: entry.campaignId },
+          'productOrServiceName'
+        ).lean(),
+      ]);
+
+      if (infDoc && infDoc.email) {
+        sendMilestoneReleasedEmail({
+          to: infDoc.email,
+          influencerName: infDoc.name || '',
+          brandName: (brandDoc && brandDoc.name) || '',
+          campaignName: (campDoc && campDoc.productOrServiceName) || '',
+          milestoneTitle: entry.milestoneTitle,
+          amount: entry.amount,
+          milestoneDescription: entry.milestoneDescription,
+          dashboardUrl: `${APP_BASE_URL}/influencer/my-campaign`,
+        }).catch((e) => console.error('sendMilestoneReleasedEmail failed:', e));
+      }
+    } catch (emailErr) {
+      console.error('Error preparing milestone released email:', emailErr);
+    }
 
     return res.status(200).json({
       message: 'Milestone released successfully (payout initiated).',
       releasedAmount: entry.amount,
-      payoutStatus: entry.payoutStatus
+      payoutStatus: entry.payoutStatus,
     });
   } catch (err) {
     console.error('Error in releaseMilestone:', err);
@@ -365,23 +485,30 @@ exports.releaseMilestone = async (req, res) => {
   }
 };
 
-// POST /milestone/paidTotal
-// body: { influencerId }
+/**
+ * POST /milestone/paidTotal
+ * body: { influencerId }
+ */
 exports.getInfluencerPaidTotal = async (req, res) => {
   const { influencerId } = req.body;
   if (!influencerId) {
     return res.status(400).json({ message: 'influencerId is required.' });
   }
   try {
-    const docs = await Milestone.find({ 'milestoneHistory.influencerId': influencerId });
+    const docs = await Milestone.find({
+      'milestoneHistory.influencerId': influencerId,
+    });
+
     let totalPaid = 0;
-    docs.forEach(d => {
+    docs.forEach((d) => {
       d.milestoneHistory
-        .filter(e =>
-          e.influencerId === influencerId &&
-          e.payoutStatus === 'paid'          // 👈 changed
+        .filter(
+          (e) =>
+            e.influencerId === influencerId && e.payoutStatus === 'paid'
         )
-        .forEach(e => { totalPaid += e.amount; });
+        .forEach((e) => {
+          totalPaid += Number(e.amount) || 0;
+        });
     });
     return res.json({ influencerId, totalPaid });
   } catch (err) {
@@ -390,10 +517,12 @@ exports.getInfluencerPaidTotal = async (req, res) => {
   }
 };
 
-
+/**
+ * POST /milestone/adminListPayouts
+ * body: { status = 'all' | 'initiated' | 'paid' | [...], page, limit }
+ */
 exports.adminListPayouts = async (req, res) => {
   try {
-    // status can be: "all" | "initiated" | "paid" | ["initiated","paid",...]
     const {
       status = 'all',
       page = 1,
@@ -421,10 +550,10 @@ exports.adminListPayouts = async (req, res) => {
     const baseQuery = { 'milestoneHistory.released': true };
     const docs = await Milestone.find(baseQuery).lean();
 
-    let entries = docs.flatMap(doc =>
+    let entries = docs.flatMap((doc) =>
       doc.milestoneHistory
-        .filter(e => e.released)
-        .map(e => ({
+        .filter((e) => e.released)
+        .map((e) => ({
           ...e,
           brandId: doc.brandId,
           milestoneId: doc.milestoneId,
@@ -433,7 +562,7 @@ exports.adminListPayouts = async (req, res) => {
 
     // If statusFilter is not "all", filter by payoutStatus
     if (statusFilter !== 'all') {
-      entries = entries.filter(e =>
+      entries = entries.filter((e) =>
         statusFilter.includes(e.payoutStatus || 'initiated')
       );
     }
@@ -447,9 +576,9 @@ exports.adminListPayouts = async (req, res) => {
     const dataPage = entries.slice(start, start + limitNum);
 
     // collect ids for lookups
-    const brandIds = [...new Set(dataPage.map(e => e.brandId))];
-    const influencerIds = [...new Set(dataPage.map(e => e.influencerId))];
-    const campaignIds = [...new Set(dataPage.map(e => e.campaignId))];
+    const brandIds = [...new Set(dataPage.map((e) => e.brandId))];
+    const influencerIds = [...new Set(dataPage.map((e) => e.influencerId))];
+    const campaignIds = [...new Set(dataPage.map((e) => e.campaignId))];
 
     const [brands, influencers, campaigns] = await Promise.all([
       Brand.find({ brandId: { $in: brandIds } }, 'brandId name').lean(),
@@ -463,15 +592,15 @@ exports.adminListPayouts = async (req, res) => {
       ).lean(),
     ]);
 
-    const brandMap = new Map(brands.map(b => [b.brandId, b.name]));
+    const brandMap = new Map(brands.map((b) => [b.brandId, b.name]));
     const influencerMap = new Map(
-      influencers.map(i => [i.influencerId, { name: i.name, email: i.email }])
+      influencers.map((i) => [i.influencerId, { name: i.name, email: i.email }])
     );
     const campaignMap = new Map(
-      campaigns.map(c => [c.campaignsId, c.productOrServiceName])
+      campaigns.map((c) => [c.campaignsId, c.productOrServiceName])
     );
 
-    const items = dataPage.map(e => {
+    const items = dataPage.map((e) => {
       const inf = influencerMap.get(e.influencerId) || {};
       return {
         milestoneId: e.milestoneId,
@@ -484,7 +613,7 @@ exports.adminListPayouts = async (req, res) => {
         campaignId: e.campaignId,
         campaignTitle: campaignMap.get(e.campaignId) || null,
         amount: e.amount,
-        payoutStatus: e.payoutStatus,   // "initiated" | "paid"
+        payoutStatus: e.payoutStatus, // "initiated" | "paid"
         releasedAt: e.releasedAt,
         createdAt: e.createdAt,
       };
@@ -504,15 +633,16 @@ exports.adminListPayouts = async (req, res) => {
   }
 };
 
-
-
-
+/**
+ * POST /milestone/adminMarkMilestonePaid
+ * body: { milestoneId, milestoneHistoryId }
+ */
 exports.adminMarkMilestonePaid = async (req, res) => {
   const { milestoneId, milestoneHistoryId } = req.body;
 
   if (!milestoneId || !milestoneHistoryId) {
     return res.status(400).json({
-      message: 'milestoneId and milestoneHistoryId are required.'
+      message: 'milestoneId and milestoneHistoryId are required.',
     });
   }
 
@@ -522,9 +652,13 @@ exports.adminMarkMilestonePaid = async (req, res) => {
       return res.status(404).json({ message: 'Milestone not found.' });
     }
 
-    const entry = doc.milestoneHistory.find(h => h.milestoneHistoryId === milestoneHistoryId);
+    const entry = doc.milestoneHistory.find(
+      (h) => h.milestoneHistoryId === milestoneHistoryId
+    );
     if (!entry) {
-      return res.status(404).json({ message: 'Milestone history entry not found.' });
+      return res
+        .status(404)
+        .json({ message: 'Milestone history entry not found.' });
     }
 
     if (!entry.released) {
@@ -532,7 +666,9 @@ exports.adminMarkMilestonePaid = async (req, res) => {
     }
 
     if (entry.payoutStatus === 'paid') {
-      return res.status(400).json({ message: 'This milestone is already marked as paid.' });
+      return res
+        .status(400)
+        .json({ message: 'This milestone is already marked as paid.' });
     }
 
     entry.payoutStatus = 'paid';
@@ -544,27 +680,63 @@ exports.adminMarkMilestonePaid = async (req, res) => {
     createAndEmit({
       influencerId: entry.influencerId,
       type: 'milestone.paid',
-      title: `Milestone paid${entry.milestoneTitle ? `: ${entry.milestoneTitle}` : ''}`,
-      message: `Your payout of $${Number(entry.amount).toFixed(2)} has been approved and marked as paid.`,
+      title: `Milestone paid${
+        entry.milestoneTitle ? `: ${entry.milestoneTitle}` : ''
+      }`,
+      message: `Your payout of $${Number(entry.amount).toFixed(
+        2
+      )} has been approved and marked as paid.`,
       entityType: 'campaign',
       entityId: String(entry.campaignId),
       actionPath: `/influencer/my-campaign`,
-    }).catch(e => console.error('notify influencer (paid) failed:', e));
+    }).catch((e) => console.error('notify influencer (paid) failed:', e));
 
     // notify brand
     createAndEmit({
       brandId: doc.brandId,
       type: 'milestone.paid',
       title: `Payout completed`,
-      message: `${entry.milestoneTitle || 'Milestone'} of $${Number(entry.amount).toFixed(2)} has been marked as paid.`,
+      message: `${
+        entry.milestoneTitle || 'Milestone'
+      } of $${Number(entry.amount).toFixed(2)} has been marked as paid.`,
       entityType: 'campaign',
       entityId: String(entry.campaignId),
       actionPath: `/brand/active-campaign`,
-    }).catch(e => console.error('notify brand (paid) failed:', e));
+    }).catch((e) => console.error('notify brand (paid) failed:', e));
+
+    // ✉️ Email to influencer: payout completed
+    try {
+      const [infDoc, brandDoc, campDoc] = await Promise.all([
+        Influencer.findOne(
+          { influencerId: entry.influencerId },
+          'name email'
+        ).lean(),
+        Brand.findOne({ brandId: doc.brandId }, 'name').lean(),
+        Campaign.findOne(
+          { campaignsId: entry.campaignId },
+          'productOrServiceName'
+        ).lean(),
+      ]);
+
+      if (infDoc && infDoc.email) {
+        sendMilestonePaidEmail({
+          to: infDoc.email,
+          influencerName: infDoc.name || '',
+          brandName: (brandDoc && brandDoc.name) || '',
+          campaignName: (campDoc && campDoc.productOrServiceName) || '',
+          milestoneTitle: entry.milestoneTitle,
+          amount: entry.amount,
+          milestoneDescription: entry.milestoneDescription,
+          dashboardUrl: `${APP_BASE_URL}/influencer/my-campaign`,
+        }).catch((e) => console.error('sendMilestonePaidEmail failed:', e));
+      }
+    } catch (emailErr) {
+      console.error('Error preparing milestone paid email:', emailErr);
+    }
 
     return res.status(200).json({
       message: 'Milestone marked as paid.',
-      payoutStatus: entry.payoutStatus
+      payoutStatus: entry.payoutStatus,
     });
   } catch (err) {
     console.error('Error in adminMarkMilestonePaid:', err);

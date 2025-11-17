@@ -68,11 +68,21 @@ const milestoneSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+
+  // running balance of escrow for this brand
   walletBalance: {
     type: Number,
     required: true,
     default: 0
   },
+
+  // NEW: total of all milestone amounts ever created for this brand
+  totalAmount: {
+    type: Number,
+    required: true,
+    default: 0
+  },
+
   milestoneHistory: {
     type: [milestoneHistorySchema],
     default: []
