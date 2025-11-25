@@ -43,7 +43,9 @@ async function buildSubToParentNameMap() {
 }
 
 async function ensureMonthlyWindow(influencerId, featureKey, featureObj) {
-  const isMonthly = /per\s*month/i.test(String(featureObj?.note || '')) || featureObj?.resetsEvery === 'monthly';
+  const isMonthly =
+    /per\s*month/i.test(String(featureObj?.note || '')) ||
+    featureObj?.resetsEvery === 'monthly';
   if (!isMonthly) return featureObj;
 
   const now = new Date();
@@ -404,32 +406,58 @@ exports.getListByCampaign = async (req, res) => {
 
     const subIdToCatName = await buildSubToParentNameMap();
 
-    const influencerIds = record.applicants.map(a => a.influencerId);
-    const filter = { influencerId: { $in: influencerIds } };
-    if (search?.trim()) filter.name = { $regex: search.trim(), $options: 'i' };
+    // All influencer UUIDs from applicants
+    const influencerIds = (record.applicants || [])
+      .map(a => a.influencerId)
+      .filter(Boolean)
+      .map(String); // normalize to string
 
+    if (!influencerIds.length) {
+      return res.status(200).json({
+        meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 },
+        applicantCount: record.applicants.length,
+        isContracted: 0,
+        contractId: null,
+        influencers: []
+      });
+    }
+
+    const filter = { influencerId: { $in: influencerIds } };
+    if (search?.trim()) {
+      filter.name = { $regex: search.trim(), $options: 'i' };
+    }
+
+    // Influencer basic fields only — socialProfiles are no longer in schema
     const projection = [
       'influencerId',
       'name',
       'primaryPlatform',
       'onboarding.categoryName',
-      'onboarding.subcategories',
-      'socialProfiles.provider',
-      'socialProfiles.handle',
-      'socialProfiles.username',
-      'socialProfiles.followers'
+      'onboarding.subcategories'
     ].join(' ');
 
     const influencersRaw = await Influencer.find(filter).select(projection).lean();
-    // 🔹 Get Modash profiles for these influencers
+
+    if (!influencersRaw.length) {
+      return res.status(200).json({
+        meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 },
+        applicantCount: record.applicants.length,
+        isContracted: 0,
+        contractId: null,
+        influencers: []
+      });
+    }
+
+    // 🔹 Get Modash profiles using influencerId (UUID string) ONLY
     const modashProfiles = await Modash.find(
-      { influencerId: { $in: influencerIds.map(String) } },
-      'influencerId provider handle username followers'
+      { influencerId: { $in: influencerIds } },
+      'influencerId provider handle username fullname followers'
     ).lean();
 
-    // Group Modash profiles by influencerId
+    // Group Modash profiles by influencerId (string)
     const modashByInf = new Map();
     for (const p of modashProfiles) {
+      if (!p.influencerId) continue;
       const key = String(p.influencerId);
       if (!modashByInf.has(key)) modashByInf.set(key, []);
       modashByInf.get(key).push(p);
@@ -450,24 +478,19 @@ exports.getListByCampaign = async (req, res) => {
         .slice()
         .sort((a, b) => (Number(b.followers) || 0) - (Number(a.followers) || 0))[0] || null;
     }
+
     const contracts = await Contract.find({ campaignId }).lean();
     const isContractedCampaign = contracts.length > 0 ? 1 : 0;
     const contractByInf = new Map(contracts.map(c => [String(c.influencerId), c]));
     const approvedId = record.approved?.[0]?.influencerId || null;
 
-    function pickProfileForHandle(profiles = [], primary) {
-      if (!Array.isArray(profiles) || profiles.length === 0) return null;
-      if (primary) {
-        const hit = profiles.find(p => p?.provider === primary);
-        if (hit) return hit;
-      }
-      return profiles.slice()
-        .sort((a, b) => (Number(b?.followers) || 0) - (Number(a?.followers) || 0))[0] || null;
-    }
-
-    const applicationCreatedAt = record.createdAt || record._id?.getTimestamp?.() || null;
+    const applicationCreatedAt =
+      record.createdAt || record._id?.getTimestamp?.() || null;
 
     const condensed = influencersRaw.map(inf => {
+      const infIdStr = String(inf.influencerId);
+
+      // Category name resolution (from onboarding or via Category map)
       let categoryName = inf?.onboarding?.categoryName || '';
       if (!categoryName && Array.isArray(inf?.onboarding?.subcategories)) {
         for (const s of inf.onboarding.subcategories) {
@@ -476,7 +499,7 @@ exports.getListByCampaign = async (req, res) => {
         }
       }
 
-      const profiles = modashByInf.get(String(inf.influencerId)) || [];
+      const profiles = modashByInf.get(infIdStr) || [];
 
       // Sum followers across all Modash profiles for this influencer
       const audienceSize = profiles.reduce(
@@ -487,12 +510,17 @@ exports.getListByCampaign = async (req, res) => {
       // Choose the “best” Modash profile (primaryPlatform first, then highest followers)
       const chosen = pickModashProfile(profiles, inf.primaryPlatform);
 
-      let handle = chosen ? (chosen.handle || chosen.username || '').trim() : null;
-      if (handle && !handle.startsWith('@') && handle) {
+      // 🔹 Handle from Modash only
+      let handle = null;
+      if (chosen) {
+        handle = (chosen.handle || chosen.username || chosen.fullname || '').trim() || null;
+      }
+
+      if (handle && !handle.startsWith('@')) {
         handle = '@' + handle;
       }
 
-      const c = contractByInf.get(String(inf.influencerId));
+      const c = contractByInf.get(infIdStr);
       const isAssigned = approvedId === inf.influencerId ? 1 : 0;
       const isContracted = c ? 1 : 0;
       const isAccepted = c?.isAccepted === 1 ? 1 : 0;
@@ -517,13 +545,22 @@ exports.getListByCampaign = async (req, res) => {
       };
     });
 
+    // Sorting
     const dir = sortOrder === 1 ? -1 : 1;
     if (sortField) {
-      const allowed = new Set(['name', 'primaryPlatform', 'category', 'audienceSize', 'handle', 'createdAt']);
+      const allowed = new Set([
+        'name',
+        'primaryPlatform',
+        'category',
+        'audienceSize',
+        'handle',
+        'createdAt'
+      ]);
       if (allowed.has(sortField)) {
         condensed.sort((a, b) => {
           const av = a[sortField];
           const bv = b[sortField];
+
           if (sortField === 'createdAt') {
             const ta = av ? new Date(av).getTime() : 0;
             const tb = bv ? new Date(bv).getTime() : 0;
@@ -537,6 +574,7 @@ exports.getListByCampaign = async (req, res) => {
       }
     }
 
+    // Pagination
     const pageNum = Math.max(1, parseInt(page, 10));
     const limNum = Math.max(1, parseInt(limit, 10));
     const start = (pageNum - 1) * limNum;

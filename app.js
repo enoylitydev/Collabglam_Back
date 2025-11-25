@@ -27,7 +27,7 @@ const faqsRoutes = require('./routes/faqsRoutes');
 const dashboardRoutes = require('./routes/dashboardRoutes');
 const platformRoutes = require('./routes/platformRoutes');
 const audienceRangeRoutes = require('./routes/audiencerangeRoutes');
-const invitationRoutes = require('./routes/invitationRoutes');
+// const invitationRoutes = require('./routes/invitationRoutes');
 const filtersRoutes = require('./routes/filterRoutes');
 const mediaKitRoutes = require('./routes/mediaKitRoutes');
 const modashRoutes = require('./routes/modashRoutes');
@@ -37,7 +37,7 @@ const unsubscribeRoutes = require('./routes/unsubscribeRoutes');
 const disputeRoutes = require('./routes/disputeRoutes');
 const notificationsRoutes = require('./routes/notificationsRoutes');
 const emailRoutes = require('./routes/emailRoutes');
-
+const Invitationsroutes = require('./routes/Invitationsroutes');
 const unseenMessageNotifier = require('./jobs/unseenMessageNotifier');
 
 // sockets (Socket.IO + native WS)
@@ -56,7 +56,7 @@ app.set('broadcastToRoom', sockets.legacyBroadcastToRoom);
 
 // ====== Express middleware ======
 app.use(cors({
-  origin: process.env.FRONTEND_ORIGIN || 'https://collabglam.com',
+  origin: process.env.FRONTEND_ORIGIN || ['https://collabglam.com','http://localhost:3000'],
   credentials: true
 }));
 
@@ -87,7 +87,7 @@ app.use('/faqs', faqsRoutes);
 app.use('/dash', dashboardRoutes);
 app.use('/platform', platformRoutes);
 app.use('/audienceRange', audienceRangeRoutes);
-app.use('/invitation', invitationRoutes);
+// app.use('/invitation', invitationRoutes);
 app.use('/filters', filtersRoutes);
 app.use('/media-kit', mediaKitRoutes);
 app.use('/modash', modashRoutes);
@@ -97,6 +97,8 @@ app.use('/unsubscribe', unsubscribeRoutes);
 app.use('/dispute', disputeRoutes);
 app.use('/notifications', notificationsRoutes);
 app.use('/emails', emailRoutes);
+app.use('/newinvitations', Invitationsroutes);
+
 
 // Friendly 413 response (must be after body parsers)
 app.use((err, req, res, next) => {
