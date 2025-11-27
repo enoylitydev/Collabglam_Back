@@ -385,7 +385,7 @@ exports.register = async (req, res) => {
     const normalizedEmail = toNormEmail(email);
     const exactCI = new RegExp(`^${escapeRegExp(normalizedEmail)}$`, 'i');
 
-        // Must be verified via VerifyEmail for BRAND role
+    // Must be verified via VerifyEmail for BRAND role
     const emailDoc = await VerifyEmail.findOne({
       email: normalizedEmail,
       role: 'Brand',
@@ -411,7 +411,20 @@ exports.register = async (req, res) => {
     }
 
     // ✅ Generate brand alias email from brand name: brandname@collabglam.cloud
+    // ✅ Generate brand alias email from brand name: brandname@collabglam.cloud
     const brandAliasEmail = EmailThread.generateAliasEmail(name);
+
+    // HARD GUARD: never proceed with a falsy alias
+    if (
+      !brandAliasEmail ||
+      typeof brandAliasEmail !== 'string' ||
+      !brandAliasEmail.includes('@')
+    ) {
+      console.error('Failed to generate brandAliasEmail for name:', name, '=>', brandAliasEmail);
+      return res.status(400).json({
+        message: 'Unable to generate brand alias email. Please choose a different brand name.',
+      });
+    }
 
     // Ensure alias is unique as well
     const aliasExists = await Brand.findOne({ brandAliasEmail }, '_id');
@@ -948,13 +961,25 @@ exports.updateProfile = async (req, res) => {
       }
 
       // Generate new alias from new brand name
+      // Generate new alias from new brand name
       const newAlias = EmailThread.generateAliasEmail(trimmedName);
+
+      if (
+        !newAlias ||
+        typeof newAlias !== 'string' ||
+        !newAlias.includes('@')
+      ) {
+        return res.status(400).json({
+          message: 'Unable to generate brand alias for that name. Please choose a different brand name.',
+        });
+      }
 
       // Ensure alias is unique across brands
       const aliasExists = await Brand.findOne(
         { brandAliasEmail: newAlias, brandId: { $ne: brandId } },
         '_id'
       );
+
       if (aliasExists) {
         return res.status(400).json({
           message: 'Brand name not available, please choose a different name',
