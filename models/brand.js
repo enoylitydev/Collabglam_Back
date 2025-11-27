@@ -58,6 +58,14 @@ const brandSchema = new mongoose.Schema(
     callingId: { type: mongoose.Schema.Types.ObjectId, ref: 'Country', required: true },
 
     email: { type: String, required: true, unique: true, match: [emailRegex, 'Invalid email'] },
+    brandAliasEmail: {
+      type: String,
+      required: true,
+      unique: true,
+      lowercase: true,
+      trim: true,
+    },
+
     createdAt: { type: Date, default: Date.now },
 
     // ---------------- REFERENCES + SNAPSHOTS ----------------
@@ -88,7 +96,7 @@ const brandSchema = new mongoose.Schema(
       },
       match: [/^[a-z0-9._]{1,30}$/i, 'Invalid Instagram handle'],
     },
-    
+
     logoFileId: { type: String, trim: true },    // GridFS file _id as string
     logoFilename: { type: String, trim: true },  // GridFS filename
 
