@@ -532,14 +532,11 @@ exports.sendInfluencerToBrand = async (req, res) => {
   }
 };
 
-/**
- * POST /api/email/campaign-invitation
- */
 exports.sendCampaignInvitation = async (req, res) => {
   try {
     const {
       brandId,
-      campaignId,
+      campaignId, // now OPTIONAL
       influencerId,
       invitationId,
       campaignLink,
@@ -547,14 +544,17 @@ exports.sendCampaignInvitation = async (req, res) => {
       deliverables,
       additionalNotes,
       subject: customSubject,
-      body: customBody, // 👈 text the brand typed in the compose modal
+      body: customBody, // text the brand typed in the compose modal
     } = req.body;
 
-    if (!brandId || !campaignId) {
+    // ✅ Only brandId is strictly required here
+    if (!brandId) {
       return res
         .status(400)
-        .json({ error: 'brandId and campaignId are required.' });
+        .json({ error: 'brandId is required.' });
     }
+
+    // Still require at least influencerId or invitationId
     if (!influencerId && !invitationId) {
       return res.status(400).json({
         error: 'Either influencerId or invitationId is required.',
@@ -564,110 +564,155 @@ exports.sendCampaignInvitation = async (req, res) => {
     const brand = await findBrandByIdOrBrandId(brandId);
     if (!brand) return res.status(404).json({ error: 'Brand not found' });
 
-    const campaign = await findCampaignByIdOrCampaignsId(campaignId);
-    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
-
+    // Resolve influencer + email (works for both normal influencers and invitations)
     const { influencer, influencerName, recipientEmail } =
       await resolveInfluencerAndEmail({ influencerId, invitationId, brand });
 
-    const brandName = brand.name;
-
-    const campaignTitle =
-      campaign.productOrServiceName ||
-      campaign.campaignType ||
-      campaign.brandName ||
-      'Our Campaign';
-
-    const campaignObjective = campaign.goal || '';
-
-    let defaultDeliverables = '';
-    if (Array.isArray(campaign.creativeBrief) && campaign.creativeBrief.length) {
-      defaultDeliverables = campaign.creativeBrief.join(', ');
-    } else if (campaign.creativeBriefText) {
-      defaultDeliverables = campaign.creativeBriefText;
-    } else {
-      defaultDeliverables = 'Content deliverables to be discussed with you.';
-    }
-    const finalDeliverables = deliverables || defaultDeliverables;
-
-    const finalCompensation =
-      compensation ||
-      'Compensation will be discussed based on your standard rates and the campaign scope.';
-
-    let timelineText = 'Flexible / To be discussed';
-    if (
-      campaign.timeline &&
-      campaign.timeline.startDate &&
-      campaign.timeline.endDate
-    ) {
-      const start = new Date(campaign.timeline.startDate);
-      const end = new Date(campaign.timeline.endDate);
-      const fmt = (d) =>
-        d.toLocaleDateString('en-US', {
-          day: '2-digit',
-          month: 'short',
-          year: 'numeric',
-        });
-      timelineText = `${fmt(start)} – ${fmt(end)}`;
-    }
-
-    const notes =
-      additionalNotes || campaign.additionalNotes || campaign.description || '';
-
-    const baseUrl = process.env.CAMPAIGN_BASE_URL || '';
-    const link =
-      campaignLink ||
-      (baseUrl
-        ? `${baseUrl.replace(/\/$/, '')}/campaigns/${campaign.campaignsId}`
-        : '#');
-
-    // 🔹 Build the default campaign invitation email (with all campaign info)
-    const templateResult = buildInvitationEmail({
-      brandName,
-      influencerName,
-      campaignTitle,
-      campaignObjective,
-      deliverables: finalDeliverables,
-      compensation: finalCompensation,
-      timeline: timelineText,
-      additionalNotes: notes,
-      campaignLink: link,
-    });
-
-    const subject = customSubject || templateResult.subject;
-
-    // 🔹 ALWAYS include campaign details.
-    // If brand wrote a custom message, we prepend it above the "Campaign Details" block.
+    let subject = customSubject;
     let htmlBody;
     let textBody;
 
-    if (customBody && customBody.trim()) {
-      const customHtmlBlock = `<p>${customBody
-        .split('\n')
-        .map((line) => line.trim())
-        .join('<br/>')}</p><br/>`;
-
-      const marker =
-        '<h3 style="margin-top:24px;margin-bottom:8px;font-size:16px;color:#111827;">Campaign Details</h3>';
-
-      if (templateResult.htmlBody.includes(marker)) {
-        htmlBody = templateResult.htmlBody.replace(
-          marker,
-          `${customHtmlBlock}${marker}`
-        );
-      } else {
-        // Fallback – just prepend the custom block
-        htmlBody = `${customHtmlBlock}${templateResult.htmlBody}`;
+    /* ────────────────────────────────────────────────────────────── */
+    /* PATH 1: Campaign-based invitation (campaignId present)        */
+    /* ────────────────────────────────────────────────────────────── */
+    if (campaignId) {
+      const campaign = await findCampaignByIdOrCampaignsId(campaignId);
+      if (!campaign) {
+        return res.status(404).json({ error: 'Campaign not found' });
       }
 
-      // Plain text: prepend the custom note and then the template text
-      textBody = `${customBody.trim()}\n\n${templateResult.textBody}`;
+      const brandName = brand.name;
+
+      const campaignTitle =
+        campaign.productOrServiceName ||
+        campaign.campaignType ||
+        campaign.brandName ||
+        'Our Campaign';
+
+      const campaignObjective = campaign.goal || '';
+
+      let defaultDeliverables = '';
+      if (
+        Array.isArray(campaign.creativeBrief) &&
+        campaign.creativeBrief.length
+      ) {
+        defaultDeliverables = campaign.creativeBrief.join(', ');
+      } else if (campaign.creativeBriefText) {
+        defaultDeliverables = campaign.creativeBriefText;
+      } else {
+        defaultDeliverables = 'Content deliverables to be discussed with you.';
+      }
+      const finalDeliverables = deliverables || defaultDeliverables;
+
+      const finalCompensation =
+        compensation ||
+        'Compensation will be discussed based on your standard rates and the campaign scope.';
+
+      let timelineText = 'Flexible / To be discussed';
+      if (
+        campaign.timeline &&
+        campaign.timeline.startDate &&
+        campaign.timeline.endDate
+      ) {
+        const start = new Date(campaign.timeline.startDate);
+        const end = new Date(campaign.timeline.endDate);
+        const fmt = (d) =>
+          d.toLocaleDateString('en-US', {
+            day: '2-digit',
+            month: 'short',
+            year: 'numeric',
+          });
+        timelineText = `${fmt(start)} – ${fmt(end)}`;
+      }
+
+      const notes =
+        additionalNotes ||
+        campaign.additionalNotes ||
+        campaign.description ||
+        '';
+
+      const baseUrl = process.env.CAMPAIGN_BASE_URL || '';
+      const link =
+        campaignLink ||
+        (baseUrl
+          ? `${baseUrl.replace(/\/$/, '')}/campaigns/${campaign.campaignsId}`
+          : '#');
+
+      // Build full campaign invitation email
+      const templateResult = buildInvitationEmail({
+        brandName,
+        influencerName,
+        campaignTitle,
+        campaignObjective,
+        deliverables: finalDeliverables,
+        compensation: finalCompensation,
+        timeline: timelineText,
+        additionalNotes: notes,
+        campaignLink: link,
+      });
+
+      subject = subject || templateResult.subject;
+
+      // If the brand typed custom text, prepend it above "Campaign Details"
+      if (customBody && customBody.trim()) {
+        const customHtmlBlock = `<p>${customBody
+          .split('\n')
+          .map((line) => line.trim())
+          .join('<br/>')}</p><br/>`;
+
+        const marker =
+          '<h3 style="margin-top:24px;margin-bottom:8px;font-size:16px;color:#111827;">Campaign Details</h3>';
+
+        if (templateResult.htmlBody.includes(marker)) {
+          htmlBody = templateResult.htmlBody.replace(
+            marker,
+            `${customHtmlBlock}${marker}`
+          );
+        } else {
+          // Fallback – just prepend the custom block
+          htmlBody = `${customHtmlBlock}${templateResult.htmlBody}`;
+        }
+
+        // Plain text: prepend the custom note + template text
+        textBody = `${customBody.trim()}\n\n${templateResult.textBody}`;
+      } else {
+        // No custom body → just use the full template
+        htmlBody = templateResult.htmlBody;
+        textBody = templateResult.textBody;
+      }
     } else {
-      // No custom body → just use the full template
-      htmlBody = templateResult.htmlBody;
-      textBody = templateResult.textBody;
+      /* ──────────────────────────────────────────────────────────── */
+      /* PATH 2: NO CAMPAIGN (generic collab email)                  */
+      /* ──────────────────────────────────────────────────────────── */
+
+      // Default subject if none provided
+      subject =
+        subject ||
+        `Collaboration opportunity with ${brand.name}`;
+
+      const safeBody =
+        (customBody && customBody.trim()) ||
+        `Hi ${influencerName || 'there'},
+
+${brand.name} would love to collaborate with you on upcoming content.
+
+[Add your brief, deliverables, timelines, and budget details here]
+
+Best,
+${brand.name} team`;
+
+      htmlBody = `<p>${safeBody
+        .split('\n')
+        .map((line) => line.trim())
+        .join('<br/>')}</p>
+        <hr/>
+        <p style="font-size:12px;color:#666;">
+          Sent via ${process.env.PLATFORM_NAME || 'CollabGlam'} – your email is hidden.
+        </p>`;
+      textBody = safeBody;
     }
 
+    // Create / reuse thread + send via SES (same as before)
     const thread = await getOrCreateThread({
       brand,
       influencer,
@@ -714,6 +759,7 @@ exports.sendCampaignInvitation = async (req, res) => {
       brandDisplayAlias: thread.brandDisplayAlias,
       influencerDisplayAlias: thread.influencerDisplayAlias,
       subject,
+      campaignId: campaignId || null,
     });
   } catch (err) {
     console.error('sendCampaignInvitation error:', err);
