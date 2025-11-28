@@ -20,7 +20,6 @@ exports.createInvitation = async (req, res) => {
         .status(400)
         .json({ message: 'An invitation for this influencer and campaign already exists' });
     }
-
     // 2️⃣ Load Brand & Campaign
     const brand    = await Brand.findOne({ brandId });
     const campaign = await Campaign.findOne({ campaignsId: campaignId });

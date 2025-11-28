@@ -15,6 +15,11 @@ router.post('/influencer-to-brand', emailController.sendInfluencerToBrand);
 // Brand → influencer campaign invitation using IDs + template
 router.post('/campaign-invitation', emailController.sendCampaignInvitation);
 
+router.post(
+  '/campaign-invitation/preview',
+  emailController.getCampaignInvitationPreview
+);
+
 // Threads
 router.get('/threads/brand/:brandId', emailController.getThreadsForBrand);
 router.get(
@@ -24,5 +29,11 @@ router.get(
 
 // Messages
 router.get('/messages/:threadId', emailController.getMessagesForThread);
+
+
+router.get(
+  '/influencer/list',
+  emailController.getInfluencerEmailListForBrand
+);
 
 module.exports = router;

@@ -1,6 +1,5 @@
 // models/email.js
 const mongoose = require('mongoose');
-const crypto = require('crypto');
 
 const { Schema } = mongoose;
 
@@ -39,21 +38,20 @@ const emailThreadSchema = new Schema(
     },
 
     /**
-     * TECHNICAL RELAY ADDRESS (UNIQUE PER THREAD)
-     * Example: b-adidas-a1b2c3@collabglam.com
-     * Used as Reply-To and inbound routing for both sides.
-     */
+ * BRAND ALIAS ADDRESS (UNIQUE PER BRAND)
+ * Example: adidas@collabglam.cloud
+ * Used as From + Reply-To and inbound routing.
+ */
     brandAliasEmail: {
       type: String,
       required: true,
-      unique: true,
       lowercase: true,
       trim: true,
     },
 
     /**
      * GLOBAL INFLUENCER ALIAS (SAME FOR EVERYONE)
-     * Example: influencer@collabglam.com
+     * Example: influencer@collabglam.cloud
      * Not unique, only used as visible "from" for influencers.
      */
     influencerAliasEmail: {
@@ -66,8 +64,8 @@ const emailThreadSchema = new Schema(
 
     /**
      * Optional prettier aliases to show in UI
-     * brandDisplayAlias: adidas@collabglam.com
-     * influencerDisplayAlias: influencer@collabglam.com
+     * brandDisplayAlias: adidas@collabglam.cloud
+     * influencerDisplayAlias: influencer@collabglam.cloud
      */
     brandDisplayAlias: { type: String, trim: true },
     influencerDisplayAlias: { type: String, trim: true },
@@ -90,20 +88,15 @@ const emailThreadSchema = new Schema(
 // Only one thread per brand + influencer pair
 emailThreadSchema.index({ brand: 1, influencer: 1 }, { unique: true });
 
-// Static helper on schema to generate alias emails
-emailThreadSchema.statics.generateAliasEmail = function (displayName, prefix) {
-  const slug = slugifyName(displayName);
-  const rand = crypto.randomBytes(3).toString('hex'); // 6 chars
-  const localPart = `${prefix}-${slug}-${rand}`; // e.g. b-adidas-a1b2c3
-  const domain = process.env.EMAIL_RELAY_DOMAIN;
-  return `${localPart}@${domain}`;
-};
-
-emailThreadSchema.statics.generatePrettyAlias = function (displayName) {
-  const slug = slugifyName(displayName);
-  const domain = process.env.EMAIL_RELAY_DOMAIN;
+emailThreadSchema.statics.generateAliasEmail = function (displayName) {
+  const slug = slugifyName(displayName); // e.g. "Adidas Originals" -> "adidasoriginals"
+  const domain = process.env.EMAIL_RELAY_DOMAIN || 'collabglam.cloud';
   return `${slug}@${domain}`;
 };
+
+// alias & display are identical
+emailThreadSchema.statics.generatePrettyAlias =
+  emailThreadSchema.statics.generateAliasEmail;
 
 // ---------------- Email Message Schema ----------------
 // One document per sent email (brand->influencer or influencer->brand)

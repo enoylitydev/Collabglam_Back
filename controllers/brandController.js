@@ -8,6 +8,7 @@ const { uploadToGridFS } = require('../utils/gridfs');
 
 const Brand = require('../models/brand');
 const Influencer = require('../models/influencer'); // needed by requestOtp
+const { EmailThread } = require('../models/email');
 const Country = require('../models/country');
 const Milestone = require('../models/milestone');
 const subscriptionHelper = require('../utils/subscriptionHelper');
@@ -394,10 +395,44 @@ exports.register = async (req, res) => {
       return res.status(400).json({ message: 'Email not verified' });
     }
 
-    // Prevent duplicate registration
+    // Prevent duplicate registration by email
     const existing = await Brand.findOne({ email: exactCI }, '_id');
     if (existing) {
       return res.status(400).json({ message: 'Already registered' });
+    }
+
+    // 🚫 Brand name cannot be same
+    const existingByName = await Brand.findOne(
+      { name: String(name).trim() },
+      '_id'
+    );
+    if (existingByName) {
+      return res.status(400).json({ message: 'Brand name already taken' });
+    }
+
+    // ✅ Generate brand alias email from brand name: brandname@collabglam.cloud
+    // ✅ Generate brand alias email from brand name: brandname@collabglam.cloud
+    const brandAliasEmail = EmailThread.generateAliasEmail(name);
+
+    // HARD GUARD: never proceed with a falsy alias
+    if (
+      !brandAliasEmail ||
+      typeof brandAliasEmail !== 'string' ||
+      !brandAliasEmail.includes('@')
+    ) {
+      console.error('Failed to generate brandAliasEmail for name:', name, '=>', brandAliasEmail);
+      return res.status(400).json({
+        message: 'Unable to generate brand alias email. Please choose a different brand name.',
+      });
+    }
+
+    // Ensure alias is unique as well
+    const aliasExists = await Brand.findOne({ brandAliasEmail }, '_id');
+    if (aliasExists) {
+      // This also protects against slug collisions like "New Brand" vs "NewBrand"
+      return res.status(400).json({
+        message: 'Brand name not available, please choose a different name',
+      });
     }
 
     // Validate country / calling code
@@ -456,6 +491,7 @@ exports.register = async (req, res) => {
     const brand = new Brand({
       name,
       email: normalizedEmail,
+      brandAliasEmail,
       password, // hashed by pre-save hook
       phone,
       country: countryDoc.countryName,
@@ -538,6 +574,7 @@ exports.register = async (req, res) => {
       message: 'Brand registered successfully',
       brandId: brand.brandId,
       subscription: brand.subscription,
+      brandAliasEmail: brand.brandAliasEmail,
     });
   } catch (error) {
     console.error('Error in register:', error);
@@ -545,6 +582,21 @@ exports.register = async (req, res) => {
     if (error?.name === 'ValidationError') {
       const first = Object.values(error.errors)[0];
       return res.status(400).json({ message: first?.message || 'Validation error' });
+    }
+
+    // 🔐 Handle Mongo unique index violations cleanly
+    if (error?.code === 11000 && error?.keyPattern) {
+      if (error.keyPattern.name) {
+        return res.status(400).json({ message: 'Brand name already taken' });
+      }
+      if (error.keyPattern.email) {
+        return res.status(400).json({ message: 'Email already registered' });
+      }
+      if (error.keyPattern.brandAliasEmail) {
+        return res.status(400).json({
+          message: 'Brand alias already in use, please choose a different brand name',
+        });
+      }
     }
 
     return res.status(500).json({ message: 'Internal server error during registration' });
@@ -624,6 +676,7 @@ exports.login = async (req, res) => {
     return res.status(200).json({
       message: 'Login successful',
       brandId: brand.brandId,
+      brandAliasEmail: brand.brandAliasEmail,
       token,
       subscriptionPlanName,          // <- 👈 simple string
       // Or, if you want more:
@@ -876,14 +929,68 @@ exports.updateProfile = async (req, res) => {
     }
 
     // require at least one change
-    if (name == null && phone == null && countryId == null && callingId == null && typeof logoUrl === 'undefined') {
+    if (
+      name == null &&
+      phone == null &&
+      countryId == null &&
+      callingId == null &&
+      typeof logoUrl === 'undefined'
+    ) {
       return res.status(400).json({ message: 'No changes provided' });
     }
 
     const brand = await Brand.findOne({ brandId });
     if (!brand) return res.status(404).json({ message: 'Brand not found' });
 
-    if (name != null) brand.name = String(name).trim();
+    // Track if we changed name / alias to sync threads after save
+    let nameChanged = false;
+
+    if (name != null) {
+      const trimmedName = String(name).trim();
+      if (!trimmedName) {
+        return res.status(400).json({ message: 'Name cannot be empty' });
+      }
+
+      // Ensure no other brand already uses this name
+      const existingByName = await Brand.findOne(
+        { name: trimmedName, brandId: { $ne: brandId } },
+        '_id'
+      );
+      if (existingByName) {
+        return res.status(400).json({ message: 'Brand name already taken' });
+      }
+
+      // Generate new alias from new brand name
+      // Generate new alias from new brand name
+      const newAlias = EmailThread.generateAliasEmail(trimmedName);
+
+      if (
+        !newAlias ||
+        typeof newAlias !== 'string' ||
+        !newAlias.includes('@')
+      ) {
+        return res.status(400).json({
+          message: 'Unable to generate brand alias for that name. Please choose a different brand name.',
+        });
+      }
+
+      // Ensure alias is unique across brands
+      const aliasExists = await Brand.findOne(
+        { brandAliasEmail: newAlias, brandId: { $ne: brandId } },
+        '_id'
+      );
+
+      if (aliasExists) {
+        return res.status(400).json({
+          message: 'Brand name not available, please choose a different name',
+        });
+      }
+
+      brand.name = trimmedName;
+      brand.brandAliasEmail = newAlias;
+      nameChanged = true;
+    }
+
     if (phone != null) brand.phone = String(phone).trim();
 
     if (countryId) {
@@ -905,6 +1012,27 @@ exports.updateProfile = async (req, res) => {
     }
 
     await brand.save();
+
+    // 🔁 If name/alias changed, update all threads for this brand to use the new alias
+    if (nameChanged) {
+      const newAlias = brand.brandAliasEmail;
+      await EmailThread.updateMany(
+        { brand: brand._id },
+        {
+          $set: {
+            brandAliasEmail: newAlias,
+            brandDisplayAlias: newAlias,
+            'brandSnapshot.name': brand.name,
+          },
+        }
+      ).catch((err) => {
+        console.error(
+          'Failed to update EmailThread brandAliasEmail for brandId',
+          brandId,
+          err
+        );
+      });
+    }
 
     const safe = brand.toObject();
     delete safe.password;

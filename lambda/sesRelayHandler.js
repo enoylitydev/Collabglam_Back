@@ -1,24 +1,14 @@
 // lambda/sesRelayHandler.js
-// This file is intended to be used as an AWS Lambda handler for SES inbound emails.
-
 const { SESClient, SendEmailCommand } = require('@aws-sdk/client-ses');
 const { simpleParser } = require('mailparser');
-const AWS = require('aws-sdk');
 const mongoose = require('mongoose');
 
 const { EmailThread, EmailMessage } = require('../models/email');
 const Brand = require('../models/brand');
 const Influencer = require('../models/influencer');
 
-const REGION = process.env.AWS_REGION || 'us-east-1';
-
-// ---------- Configure AWS SDK v2 (S3) with keys if present ----------
-const awsBaseConfig = { region: REGION };
-if (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) {
-  awsBaseConfig.accessKeyId = process.env.AWS_ACCESS_KEY_ID;
-  awsBaseConfig.secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
-}
-AWS.config.update(awsBaseConfig);
+const REGION = process.env.AWS_REGION || 'ap-south-1';
+const RELAY_DOMAIN = process.env.EMAIL_RELAY_DOMAIN;
 
 // ---------- SES client (SDK v3) ----------
 const ses = new SESClient({
@@ -26,15 +16,13 @@ const ses = new SESClient({
   credentials:
     process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY
       ? {
-          accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-          secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-        }
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+      }
       : undefined,
 });
 
-const s3 = new AWS.S3();
-
-// connect to Mongo once
+// connect to Mongo once per container
 let isDbConnected = false;
 async function connectDb() {
   if (isDbConnected) return;
@@ -75,63 +63,122 @@ async function sendViaSES({
   }
 
   const cmd = new SendEmailCommand(params);
-  return ses.send(cmd);
+
+  try {
+    return await ses.send(cmd);
+  } catch (err) {
+    console.error('SES send error (relay lambda):', err);
+
+    const sesError = (err && err.Error) || {};
+    const code = sesError.Code || err.name;
+    const message = sesError.Message || err.message || 'SES send failed';
+
+    if (code === 'MessageRejected' && /not verified/i.test(message)) {
+      let failingEmail = '';
+      const match = message.match(/: ([^ ]+@[^ ]+)/);
+      if (match && match[1]) failingEmail = match[1];
+
+      const friendly = failingEmail
+        ? `AWS SES rejected the relay email because "${failingEmail}" is not verified in region ${REGION}. In SES sandbox mode you must verify both the sender and the recipient email addresses before you can send.`
+        : `AWS SES rejected the relay email because an address is not verified in region ${REGION}. In SES sandbox mode you must verify both the sender and the recipient email addresses.`;
+
+      console.error(friendly);
+      return; // we still keep the message stored in Mongo
+    }
+
+    throw err;
+  }
 }
 
 /**
- * Lambda handler triggered by SES -> S3 rule.
- * Event includes S3 bucket/key with raw email.
+ * Lambda handler triggered by SES → SNS rule.
  */
 exports.handler = async (event) => {
   try {
+    if (!RELAY_DOMAIN) {
+      console.error(
+        'EMAIL_RELAY_DOMAIN is not set in Lambda environment. ' +
+        'Cannot match relay addresses.'
+      );
+      return;
+    }
+
     await connectDb();
 
-    // 1) Get S3 bucket and object key from SES event
     const record = event.Records?.[0];
     if (!record) {
-      console.log('No SNS/S3 record in event');
+      console.log('No SNS record in event');
       return;
     }
 
-    const message = JSON.parse(record.Sns.Message);
-    const receipt = message?.receipt;
-    const mail = message?.mail;
+    let sesNotification;
 
-    if (!receipt || !mail) {
-      console.log('Missing SES receipt/mail in event');
+    // SES → SNS → Lambda (standard)
+    if (record.Sns && record.Sns.Message) {
+      sesNotification = JSON.parse(record.Sns.Message);
+    } else if (record.ses) {
+      // SES → Lambda directly (no SNS) – usually no full raw content
+      sesNotification = record.ses;
+    } else {
+      console.log('Unsupported event format:', JSON.stringify(record));
       return;
     }
 
-    const bucket = process.env.SES_EMAIL_BUCKET || receipt.action?.bucketName;
-    const objectKey = receipt.action?.objectKey;
+    const mail = sesNotification.mail;
+    const receipt = sesNotification.receipt;
 
-    if (!bucket || !objectKey) {
-      console.error('Missing S3 bucket or objectKey for SES email');
+    if (!mail || !receipt) {
+      console.log('Missing SES mail/receipt in notification');
       return;
     }
 
-    // 2) Read raw email from S3
-    const rawEmailObj = await s3
-      .getObject({ Bucket: bucket, Key: objectKey })
-      .promise();
-    const rawEmail = rawEmailObj.Body.toString('utf-8');
+    let rawEmail = sesNotification.content;
+    if (!rawEmail) {
+      console.error(
+        'No raw email content in SES notification. ' +
+        'Make sure the receipt rule uses SNS action that publishes full message content.'
+      );
+      return;
+    }
 
-    // 3) Parse using mailparser
+    // Detect encoding from the receipt.action (SES sets this for SNS action)
+    const encoding =
+      (sesNotification.receipt &&
+        sesNotification.receipt.action &&
+        sesNotification.receipt.action.encoding) ||
+      '';
+
+    if (encoding.toUpperCase() === 'BASE64') {
+      // content is Base64-encoded full RFC822 message
+      rawEmail = Buffer.from(rawEmail, 'base64');
+    }
+
+    // 1) Parse using mailparser (Buffer is fine)
     const parsed = await simpleParser(rawEmail);
 
-    const toAddresses = []
-      .concat(parsed.to?.value || [])
-      .concat(parsed.cc?.value || []);
+    // Collect all potential recipients
+    const toAddresses = [
+      ...(parsed.to?.value || []),
+      ...(parsed.cc?.value || []),
+      ...(mail.destination || []).map((addr) => ({ address: addr })),
+    ];
 
-    // Find collabglam recipient (relay)
+    console.log(
+      'Parsed recipients:',
+      toAddresses.map((a) => a.address)
+    );
+
+    // Find collabglam recipient (relay@RELAY_DOMAIN)
     const relayAddrObj = toAddresses.find(
       (a) =>
         a.address &&
-        a.address.toLowerCase().endsWith(`@${process.env.EMAIL_RELAY_DOMAIN}`)
+        a.address.toLowerCase().endsWith(`@${RELAY_DOMAIN}`)
     );
 
     if (!relayAddrObj) {
-      console.log('No collabglam recipient address found; skipping.');
+      console.log(
+        `No relay recipient @${RELAY_DOMAIN} found in recipients; skipping.`
+      );
       return;
     }
 
@@ -140,12 +187,21 @@ exports.handler = async (event) => {
 
     console.log('Relay email:', relayEmail, 'From:', fromEmail);
 
-    // 4) Find thread by relay email
-    const thread = await EmailThread.findOne({
+    // 2) Find thread by relay email
+    let thread = await EmailThread.findOne({
       brandAliasEmail: relayEmail,
     })
       .populate('brand')
       .populate('influencer');
+
+    if (!thread) {
+      // Fallback: maybe Gmail replied to the pretty alias instead of the technical relay
+      thread = await EmailThread.findOne({
+        brandDisplayAlias: relayEmail,
+      })
+        .populate('brand')
+        .populate('influencer');
+    }
 
     if (!thread) {
       console.log('No EmailThread found for relay email:', relayEmail);
@@ -160,7 +216,7 @@ exports.handler = async (event) => {
       return;
     }
 
-    // 5) Decide direction: Brand -> Influencer or Influencer -> Brand
+    // 3) Decide direction
     let direction;
     let toRealEmail;
     let fromAliasEmail;
@@ -169,24 +225,21 @@ exports.handler = async (event) => {
     let fromUserModel;
 
     if (fromEmail === (brand.email || '').toLowerCase()) {
-      // Brand replied from their Gmail
+      // Brand replying from Gmail
       direction = 'brand_to_influencer';
       toRealEmail = influencer.email;
-      fromAliasEmail =
-        thread.brandDisplayAlias || thread.brandAliasEmail;
-      fromName = `${brand.name} via ${
-        process.env.PLATFORM_NAME || 'CollabGlam'
-      }`;
+      fromAliasEmail = thread.brandDisplayAlias || thread.brandAliasEmail;
+      fromName = `${brand.name} via ${process.env.PLATFORM_NAME || 'CollabGlam'
+        }`;
       fromUser = brand._id;
       fromUserModel = 'Brand';
     } else {
-      // Treat as influencer (any other address)
+      // Treat as influencer
       direction = 'influencer_to_brand';
       toRealEmail = brand.email;
-      fromAliasEmail = thread.influencerAliasEmail; // influencer@collabglam.com
-      fromName = `${thread.influencerSnapshot.name} via ${
-        process.env.PLATFORM_NAME || 'CollabGlam'
-      }`;
+      fromAliasEmail = thread.influencerAliasEmail; // influencer@collabglam.cloud
+      fromName = `${thread.influencerSnapshot.name} via ${process.env.PLATFORM_NAME || 'CollabGlam'
+        }`;
       fromUser = influencer._id;
       fromUserModel = 'Influencer';
     }
@@ -196,7 +249,7 @@ exports.handler = async (event) => {
     const htmlBody =
       parsed.html || `<pre>${parsed.textAsHtml || ''}</pre>`;
 
-    // 6) Save message in DB
+    // 4) Save message in MongoDB
     const messageDoc = await EmailMessage.create({
       thread: thread._id,
       direction,
@@ -212,7 +265,7 @@ exports.handler = async (event) => {
 
     console.log('Created EmailMessage', messageDoc._id.toString());
 
-    // 7) Forward sanitized email to real recipient via SES, keeping same relay
+    // 5) Forward sanitized email to real recipient via SES, keeping same relay
     await sendViaSES({
       fromAlias: fromAliasEmail,
       fromName,
@@ -223,7 +276,7 @@ exports.handler = async (event) => {
       replyTo: thread.brandAliasEmail, // keep same relay
     });
 
-    console.log('Forwarded email to real recipient');
+    console.log('Forwarded email to real recipient', toRealEmail);
   } catch (err) {
     console.error('Error in SES relay handler:', err);
     throw err;
