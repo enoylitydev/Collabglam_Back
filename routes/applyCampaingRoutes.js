@@ -11,7 +11,7 @@ const { verifyToken } = require('../controllers/brandController');
 router.post('/campaign', verifyToken, applyToCampaign);
 
 // list all influencers for a campaign (requires valid token)
-router.post('/list',  verifyToken, getListByCampaign);
+router.post('/list',  getListByCampaign);
 router.post('/approve', verifyToken, approveInfluencer);
 
 module.exports = router;

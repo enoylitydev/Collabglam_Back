@@ -1,11 +1,19 @@
 // models/modash.js
+'use strict';
+
 const mongoose = require('mongoose');
-const { v4: uuidv4 } = require('uuid');
-const UUIDv4Regex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const UUIDv4Regex =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /* -------------------------- Shared sub-schemas --------------------------- */
+
 const weightItemSchema = new mongoose.Schema(
-  { code: String, name: String, weight: Number },
+  {
+    code: String,
+    name: String,
+    weight: Number,
+  },
   { _id: false }
 );
 
@@ -16,9 +24,9 @@ const categoryLinkSchema = new mongoose.Schema(
     subcategoryId: {
       type: String,
       required: true,
-      match: [UUIDv4Regex, 'Invalid subcategoryId (must be UUID v4)']
+      match: [UUIDv4Regex, 'Invalid subcategoryId (must be UUID v4)'],
     },
-    subcategoryName: { type: String, required: true, trim: true }
+    subcategoryName: { type: String, required: true, trim: true },
   },
   { _id: false }
 );
@@ -31,13 +39,17 @@ const userLiteSchema = new mongoose.Schema(
     url: String,
     picture: String,
     followers: Number,
-    engagements: Number
+    engagements: Number,
   },
   { _id: false }
 );
 
 const sponsorSchema = new mongoose.Schema(
-  { domain: String, logo_url: String, name: String },
+  {
+    domain: String,
+    logo_url: String,
+    name: String,
+  },
   { _id: false }
 );
 
@@ -57,7 +69,7 @@ const postSchema = new mongoose.Schema(
     title: String,
     mentions: [String],
     hashtags: [String],
-    sponsors: [sponsorSchema]
+    sponsors: [sponsorSchema],
   },
   { _id: false }
 );
@@ -79,7 +91,7 @@ const audienceSchema = new mongoose.Schema(
     brandAffinity: [{ name: String, weight: Number }],
     audienceReachability: [weightItemSchema],
     audienceTypes: [weightItemSchema],
-    ethnicities: [weightItemSchema]
+    ethnicities: [weightItemSchema],
   },
   { _id: false }
 );
@@ -88,8 +100,7 @@ const audienceSchema = new mongoose.Schema(
 
 const modashSchema = new mongoose.Schema(
   {
-    // Link back to your main influencer (ObjectId reference)
-    // This is for when you want to link a Modash profile to your Influencer collection
+    // Optional link to your main Influencer document
     influencer: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Influencer',
@@ -97,12 +108,11 @@ const modashSchema = new mongoose.Schema(
       index: true,
     },
 
-    // String version of influencer ID (for display/reference purposes)
-    // This can be null/empty for profiles saved without explicit influencer link
+    // String version of influencer ID (for display/reference)
     influencerId: {
       type: String,
       required: false,
-      index: true
+      index: true,
     },
 
     // Provider info
@@ -110,17 +120,17 @@ const modashSchema = new mongoose.Schema(
       type: String,
       enum: ['youtube', 'tiktok', 'instagram'],
       required: true,
-      index: true
-    },
-
-    // CRITICAL: This is the Modash provider's userId (their internal ID)
-    // This is the PRIMARY KEY along with provider
-    userId: {
-      type: String,
-      required: true,  // Changed from optional to required
       index: true,
     },
-    
+
+    // PRIMARY identity (together with provider)
+    userId: {
+      type: String,
+      required: true,
+      index: true,
+    },
+
+    // Profile basics
     username: String,
     fullname: String,
     handle: String,
@@ -145,11 +155,14 @@ const modashSchema = new mongoose.Schema(
     country: String,
     ageGroup: String,
     gender: String,
-    language: { code: String, name: String },
+
+    // language can be string or object
+    language: mongoose.Schema.Types.Mixed,
 
     // Content stats & posts
     statsByContentType: mongoose.Schema.Types.Mixed,
     stats: mongoose.Schema.Types.Mixed,
+
     recentPosts: [postSchema],
     popularPosts: [postSchema],
 
@@ -162,17 +175,18 @@ const modashSchema = new mongoose.Schema(
     totalLikes: Number,
     totalViews: Number,
 
-    // Bio/tags/brand
+    // Bio
     bio: String,
 
-    // Categories (for categorization)
+    // Categories (your own classification)
     categories: { type: [categoryLinkSchema], default: [] },
 
-    hashtags: [{ tag: String, weight: Number }],
-    mentions: [{ tag: String, weight: Number }],
-    brandAffinity: [{ id: Number, name: String }],
+    // Tags / brand affinity
+    hashtags: [mongoose.Schema.Types.Mixed],
+    mentions: [mongoose.Schema.Types.Mixed],
+    brandAffinity: [mongoose.Schema.Types.Mixed],
 
-    // Audience
+    // Audience (typed but flexible)
     audience: audienceSchema,
     audienceCommenters: audienceSchema,
     lookalikes: [userLiteSchema],
@@ -189,91 +203,73 @@ const modashSchema = new mongoose.Schema(
     // Misc extras
     audienceExtra: mongoose.Schema.Types.Mixed,
 
-    // Keep untouched provider payload
-    providerRaw: mongoose.Schema.Types.Mixed
+    // Full raw payload (may be trimmed)
+    providerRaw: mongoose.Schema.Types.Mixed,
   },
   {
-    timestamps: true
+    timestamps: true,
   }
 );
 
 /* ------------------------------ Indexes ---------------------------------- */
 
-// PRIMARY INDEX: userId + provider (this is the main unique constraint)
-// Every document MUST have userId and provider
+// PRIMARY unique constraint: userId + provider
 modashSchema.index(
   { userId: 1, provider: 1 },
   {
     unique: true,
-    name: 'userId_provider_unique'
+    name: 'userId_provider_unique',
   }
 );
 
-// Secondary index for looking up by influencer ObjectId reference
-// This is non-unique because multiple platforms can link to same influencer
-modashSchema.index(
-  { influencer: 1, provider: 1 },
-  {
-    name: 'influencer_provider_lookup'
-  }
-);
-
-// Index for searching by influencerId string (for display purposes)
+// Index for influencer string id (non-unique)
 modashSchema.index(
   { influencerId: 1 },
   {
-    sparse: true,  // Only index documents that have this field
-    name: 'influencerId_lookup'
+    sparse: true,
+    name: 'influencerId_lookup',
   }
 );
 
-// Compound index for common queries
+// Common query helper
 modashSchema.index(
   { provider: 1, username: 1 },
   {
-    name: 'provider_username_lookup'
+    name: 'provider_username_lookup',
   }
 );
 
 /* ------------------------------ Pre-save Hook --------------------------- */
 
-// Validate that userId is always present
-modashSchema.pre('save', function(next) {
+modashSchema.pre('save', function (next) {
   if (!this.userId) {
     return next(new Error('userId is required for ModashProfile'));
   }
   if (!this.provider) {
     return next(new Error('provider is required for ModashProfile'));
   }
-  next();
+  return next();
 });
 
 /* ------------------------------ Instance Methods ------------------------ */
 
-// Helper to check if profile is linked to an influencer
-modashSchema.methods.isLinkedToInfluencer = function() {
+modashSchema.methods.isLinkedToInfluencer = function () {
   return !!(this.influencer || this.influencerId);
 };
 
-// Get a display name for this profile
-modashSchema.methods.getDisplayName = function() {
+modashSchema.methods.getDisplayName = function () {
   return this.fullname || this.username || this.handle || 'Unknown';
 };
 
 /* ------------------------------ Static Methods -------------------------- */
 
-// Find or create by userId and provider
-modashSchema.statics.findByUserIdAndProvider = async function(userId, provider) {
+modashSchema.statics.findByUserIdAndProvider = function (userId, provider) {
   return this.findOne({ userId, provider });
 };
 
-// Find all profiles for a given influencer
-modashSchema.statics.findByInfluencer = async function(influencerId) {
+modashSchema.statics.findByInfluencer = function (influencerId) {
   return this.find({
-    $or: [
-      { influencer: influencerId },
-      { influencerId: String(influencerId) }
-    ]
+    $or: [{ influencer: influencerId }, { influencerId: String(influencerId) }],
   });
 };
 

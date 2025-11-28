@@ -11,6 +11,105 @@ const escapeRegex = (s = '') => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
  * POST /admin/login
  * body: { email, password }
  */
+
+const MissingEmail = require('../models/MissingEmail');
+const { fetch, Agent } = require('undici');
+
+
+// --- YouTube API bits (extracted) ---
+const YT_API_KEY    = process.env.YOUTUBE_API_KEY;          // required
+const YT_TIMEOUT_MS = Number(process.env.YOUTUBE_TIMEOUT_MS || 12000);
+const YT_BASE       = 'https://www.googleapis.com/youtube/v3/channels';
+
+const ytAgent = new Agent({
+  keepAliveTimeout: (Number(process.env.KEEP_ALIVE_SECONDS || 60)) * 1000,
+  keepAliveMaxTimeout: (Number(process.env.KEEP_ALIVE_SECONDS || 60)) * 1000,
+});
+
+// shared regex for validation
+const EMAIL_RX  = /^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$/;
+const HANDLE_RX = /^@[A-Za-z0-9._\-]+$/;
+
+function normalizeHandle(h) {
+  if (!h) return null;
+  const t = String(h).trim();
+  const withAt = t.startsWith('@') ? t : `@${t}`;
+  return withAt.toLowerCase();
+}
+
+function labelFromWikiUrl(url) {
+  try {
+    const last = decodeURIComponent(String(url).split('/').pop() || '');
+    return last.replace(/_/g, ' ');
+  } catch {
+    return url;
+  }
+}
+
+async function fetchYouTubeChannelByHandle(ytHandle) {
+  if (!YT_API_KEY) {
+    throw new Error('Missing YOUTUBE_API_KEY environment variable.');
+  }
+  if (!ytHandle) {
+    throw new Error('Missing YouTube handle.');
+  }
+
+  const forHandle = normalizeHandle(ytHandle);
+  const params = new URLSearchParams({
+    part: 'snippet,statistics,topicDetails',
+    forHandle,
+    key: YT_API_KEY
+  });
+
+  const ac = new AbortController();
+  const timeout = setTimeout(
+    () => ac.abort(new Error('YouTube API timeout')),
+    YT_TIMEOUT_MS
+  );
+
+  try {
+    const r = await fetch(`${YT_BASE}?${params.toString()}`, {
+      method: 'GET',
+      dispatcher: ytAgent,
+      signal: ac.signal
+    });
+
+    if (!r.ok) {
+      const txt = await r.text().catch(() => '');
+      throw new Error(`YouTube API ${r.status}: ${txt || r.statusText}`);
+    }
+
+    const data = await r.json();
+    const item = data?.items?.[0];
+    if (!item) return null;
+
+    const { id: channelId, snippet = {}, statistics = {}, topicDetails = {} } = item;
+    const hidden = !!statistics.hiddenSubscriberCount;
+    const topicCategories = Array.isArray(topicDetails.topicCategories)
+      ? topicDetails.topicCategories
+      : [];
+
+    return {
+      channelId,
+      title: snippet.title || '',
+      handle: forHandle,
+      urlByHandle: `https://www.youtube.com/${forHandle}`,
+      urlById: channelId ? `https://www.youtube.com/channel/${channelId}` : null,
+      description: snippet.description || '',
+      country: snippet.country || null,
+      subscriberCount: hidden ? null : Number(statistics.subscriberCount ?? 0),
+      videoCount: Number(statistics.videoCount ?? 0),
+      viewCount: Number(statistics.viewCount ?? 0),
+      topicCategories,
+      topicCategoryLabels: topicCategories.map(labelFromWikiUrl),
+      fetchedAt: new Date()
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+
 exports.login = async (req, res) => {
     const { email, password } = req.body;
     if (!email || !password)
@@ -514,5 +613,258 @@ exports.adminGetInfluencerList = async (req, res) => {
   } catch (err) {
     console.error('Error in adminGetInfluencerList:', err);
     return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+
+exports.adminAddYouTubeEmail = async (req, res) => {
+  try {
+    const { email, handle, createdByAdminId } = req.body || {};
+
+    if (!email || !handle) {
+      return res
+        .status(400)
+        .json({ message: 'Both email and handle are required.' });
+    }
+
+    const normalizedEmail = String(email).trim().toLowerCase();
+    let normalizedHandle = normalizeHandle(handle);
+
+    if (!EMAIL_RX.test(normalizedEmail)) {
+      return res.status(400).json({ message: 'Invalid email address.' });
+    }
+
+    if (!HANDLE_RX.test(normalizedHandle)) {
+      return res.status(400).json({
+        message:
+          'Invalid handle. It must start with "@" and contain letters, numbers, ".", "_" or "-".'
+      });
+    }
+
+    // Fetch YouTube data
+    const youtubeData = await fetchYouTubeChannelByHandle(normalizedHandle);
+    if (!youtubeData) {
+      return res.status(404).json({
+        message: `No YouTube channel found for handle ${normalizedHandle}.`
+      });
+    }
+
+    // Upsert into MissingEmail (one record per handle)
+    const doc = await MissingEmail.findOneAndUpdate(
+      { handle: normalizedHandle },
+      {
+        email: normalizedEmail,
+        handle: normalizedHandle,
+        platform: 'youtube',
+        youtube: youtubeData,
+        ...(createdByAdminId ? { createdByAdminId } : {})
+      },
+      {
+        new: true,
+        upsert: true,
+        setDefaultsOnInsert: true
+      }
+    ).lean();
+
+    return res.status(200).json({
+      message: 'YouTube contact saved/updated successfully.',
+      data: doc
+    });
+  } catch (err) {
+    console.error('Error in adminAddYouTubeEmail:', err);
+    return res
+      .status(500)
+      .json({ message: 'Internal server error while saving YouTube contact.' });
+  }
+};
+
+
+exports.listMissingEmail = async (req, res) => {
+  const body = req.body || {};
+
+  // Pagination
+  const page  = Math.max(1, parseInt(body.page  ?? '1', 10));
+  const limit = Math.min(200, Math.max(1, parseInt(body.limit ?? '50', 10)));
+
+  // Optional filters
+  const rawSearch         = typeof body.search === 'string' ? body.search.trim() : '';
+  const rawEmail          = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+  const rawHandle         = typeof body.handle === 'string' ? body.handle.trim() : '';
+  const rawCreatedByAdmin = typeof body.createdByAdminId === 'string' ? body.createdByAdminId.trim() : '';
+
+  const query = {};
+
+  // Email filter (exact)
+  if (rawEmail) {
+    query.email = rawEmail;
+  }
+
+  // Handle filter (normalize to lowercase @handle, exact)
+  if (rawHandle) {
+    const handle = (rawHandle.startsWith('@') ? rawHandle : `@${rawHandle}`).toLowerCase();
+    if (!HANDLE_RX.test(handle)) {
+      return res.status(400).json({ status: 'error', message: 'Invalid handle format in filter' });
+    }
+    query.handle = handle;
+  }
+
+  // createdByAdminId filter (exact)
+  if (rawCreatedByAdmin) {
+    query.createdByAdminId = rawCreatedByAdmin;
+  }
+
+  // Base fetch
+  const [total, docs] = await Promise.all([
+    MissingEmail.countDocuments(query),
+    MissingEmail.find(query)
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .select({
+        _id: 0,
+        missingEmailId: 1,
+        email: 1,
+        handle: 1,
+        platform: 1,
+        youtube: 1,
+        createdByAdminId: 1,
+        createdAt: 1,
+        updatedAt: 1
+      })
+      .lean()
+  ]);
+
+  // Optional universal search across email/handle/id/adminId
+  let items = docs;
+  if (rawSearch) {
+    const rx = new RegExp(escapeRegex(rawSearch), 'i');
+    items = items.filter(r =>
+      rx.test(r.email || '') ||
+      rx.test(r.handle || '') ||
+      rx.test(r.missingEmailId || '') ||
+      rx.test(r.createdByAdminId || '')
+    );
+  }
+
+  return res.json({
+    page,
+    limit,
+    total,
+    hasNext: page * limit < total,
+    data: items
+  });
+};
+
+
+exports.updateMissingEmail = async (req, res) => {
+  const missingEmailId = (req.body?.missingEmailId || '').trim();
+  const newEmailRaw    = (req.body?.email || '').trim().toLowerCase();
+
+  if (!missingEmailId) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'missingEmailId is required'
+    });
+  }
+
+  if (!newEmailRaw) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'email is required'
+    });
+  }
+
+  if (!EMAIL_RX.test(newEmailRaw)) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'Invalid email address'
+    });
+  }
+
+  // Find by missingEmailId
+  const doc = await MissingEmail.findOne({ missingEmailId });
+  if (!doc) {
+    return res.status(404).json({
+      status: 'error',
+      message: 'MissingEmail record not found'
+    });
+  }
+
+  doc.email = newEmailRaw;
+
+  await doc.save();
+
+  return res.json({
+    status: 'success',
+    message: 'Email updated successfully.',
+    data: {
+      missingEmailId: doc.missingEmailId,
+      email: doc.email,
+      handle: doc.handle,
+      platform: doc.platform,
+      youtube: doc.youtube || null,
+      createdByAdminId: doc.createdByAdminId || null,
+      createdAt: doc.createdAt,
+      updatedAt: doc.updatedAt
+    }
+  });
+};
+
+
+exports.checkMissingEmailByHandle = async (req, res) => {
+  try {
+    const rawHandle   = (req.body?.handle || '').trim();
+    const rawPlatform = (req.body?.platform || '').trim().toLowerCase();
+
+    if (!rawHandle) {
+      return res.status(400).json({
+        status: 0,
+        message: 'handle is required'
+      });
+    }
+
+    const handle = normalizeHandle(rawHandle);
+    if (!HANDLE_RX.test(handle)) {
+      return res.status(400).json({
+        status: 0,
+        message:
+          'Invalid handle. It must start with "@" and contain letters, numbers, ".", "_" or "-".'
+      });
+    }
+
+    // MissingEmail currently only supports YouTube
+    const platform = rawPlatform || 'youtube';
+    if (platform !== 'youtube') {
+      return res.status(400).json({
+        status: 0,
+        message: 'Invalid platform. MissingEmail only supports "youtube".'
+      });
+    }
+
+    const doc = await MissingEmail.findOne({ handle, platform }).lean();
+
+    if (!doc) {
+      // Not found
+      return res.json({
+        status: 0,
+        handle,
+        email: null,
+        platform
+      });
+    }
+
+    // Found
+    return res.json({
+      status: 1,
+      handle: doc.handle,
+      email: doc.email,
+      platform: doc.platform
+    });
+  } catch (err) {
+    console.error('Error in checkMissingEmailByHandle:', err);
+    return res.status(500).json({
+      status: 0,
+      message: 'Internal server error while checking missing email.'
+    });
   }
 };

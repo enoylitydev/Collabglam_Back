@@ -1,47 +1,49 @@
-const express   = require('express');
-const cors      = require('cors');
-const mongoose  = require('mongoose');
-const { GridFSBucket, ObjectId } = require('mongodb');
-const http      = require('http');
-const path      = require('path');
+const express = require('express');
+const cors = require('cors');
+const mongoose = require('mongoose');
+
+const GridFSBucket = mongoose.mongo.GridFSBucket;
+const { Types } = mongoose;
+const http = require('http');
+const path = require('path');
 
 // routes
-const influencerRoutes    = require('./routes/influencerRoutes');
-const countryRoutes       = require('./routes/countryRoutes');
-const brandRoutes         = require('./routes/brandRoutes');
-const campaignRoutes      = require('./routes/campaignRoutes');
-const categoryRoutes      = require('./routes/categoryRoutes');
-const audienceRoutes      = require('./routes/audienceRoutes');
+const influencerRoutes = require('./routes/influencerRoutes');
+const countryRoutes = require('./routes/countryRoutes');
+const brandRoutes = require('./routes/brandRoutes');
+const campaignRoutes = require('./routes/campaignRoutes');
+const categoryRoutes = require('./routes/categoryRoutes');
+const audienceRoutes = require('./routes/audienceRoutes');
 const applyCampaingRoutes = require('./routes/applyCampaingRoutes');
-const contractRoutes      = require('./routes/contractRoutes');
-const milestoneRoutes     = require('./routes/milestoneRoutes');
-const subscriptionRoutes  = require('./routes/subscriptionRoutes');
-const paymentRoutes       = require('./routes/paymentRoutes');
-const chatRoutes          = require('./routes/chatRoutes');
-const adminRoutes         = require('./routes/adminRoutes');
-const policyRoutes        = require('./routes/policyRoutes');
-const contactRoutes       = require('./routes/contactRoutes');
-const faqsRoutes          = require('./routes/faqsRoutes');
-const dashboardRoutes     = require('./routes/dashboardRoutes');
-const platformRoutes      = require('./routes/platformRoutes');
+const contractRoutes = require('./routes/contractRoutes');
+const milestoneRoutes = require('./routes/milestoneRoutes');
+const subscriptionRoutes = require('./routes/subscriptionRoutes');
+const paymentRoutes = require('./routes/paymentRoutes');
+const chatRoutes = require('./routes/chatRoutes');
+const adminRoutes = require('./routes/adminRoutes');
+const policyRoutes = require('./routes/policyRoutes');
+const contactRoutes = require('./routes/contactRoutes');
+const faqsRoutes = require('./routes/faqsRoutes');
+const dashboardRoutes = require('./routes/dashboardRoutes');
+const platformRoutes = require('./routes/platformRoutes');
 const audienceRangeRoutes = require('./routes/audiencerangeRoutes');
-const invitationRoutes    = require('./routes/invitationRoutes');
-const filtersRoutes       = require('./routes/filterRoutes');
-const mediaKitRoutes      = require('./routes/mediaKitRoutes');
-const modashRoutes        = require('./routes/modashRoutes');
-const languageRoutes      = require('./routes/languageRoutes');
-const businessRoutes      = require('./routes/businessRoutes');
-const unsubscribeRoutes   = require('./routes/unsubscribeRoutes');
-const disputeRoutes       = require('./routes/disputeRoutes');
+// const invitationRoutes = require('./routes/invitationRoutes');
+const filtersRoutes = require('./routes/filterRoutes');
+const mediaKitRoutes = require('./routes/mediaKitRoutes');
+const modashRoutes = require('./routes/modashRoutes');
+const languageRoutes = require('./routes/languageRoutes');
+const businessRoutes = require('./routes/businessRoutes');
+const unsubscribeRoutes = require('./routes/unsubscribeRoutes');
+const disputeRoutes = require('./routes/disputeRoutes');
 const notificationsRoutes = require('./routes/notificationsRoutes');
 const emailRoutes = require('./routes/emailRoutes');
-
+const Invitationsroutes = require('./routes/Invitationsroutes');
 const unseenMessageNotifier = require('./jobs/unseenMessageNotifier');
 
 // sockets (Socket.IO + native WS)
 const sockets = require('./sockets');
 
-const app    = express();
+const app = express();
 const server = http.createServer(app);
 
 // ====== Realtime setup (Socket.IO + native WS on /ws) ======
@@ -54,7 +56,7 @@ app.set('broadcastToRoom', sockets.legacyBroadcastToRoom);
 
 // ====== Express middleware ======
 app.use(cors({
-  origin: process.env.FRONTEND_ORIGIN || 'https://collabglam.com',
+  origin: process.env.FRONTEND_ORIGIN || ['https://collabglam.com','http://localhost:3000'],
   credentials: true
 }));
 
@@ -85,7 +87,7 @@ app.use('/faqs', faqsRoutes);
 app.use('/dash', dashboardRoutes);
 app.use('/platform', platformRoutes);
 app.use('/audienceRange', audienceRangeRoutes);
-app.use('/invitation', invitationRoutes);
+// app.use('/invitation', invitationRoutes);
 app.use('/filters', filtersRoutes);
 app.use('/media-kit', mediaKitRoutes);
 app.use('/modash', modashRoutes);
@@ -95,6 +97,8 @@ app.use('/unsubscribe', unsubscribeRoutes);
 app.use('/dispute', disputeRoutes);
 app.use('/notifications', notificationsRoutes);
 app.use('/emails', emailRoutes);
+app.use('/newinvitations', Invitationsroutes);
+
 
 // Friendly 413 response (must be after body parsers)
 app.use((err, req, res, next) => {
@@ -154,7 +158,7 @@ mongoose.connect(process.env.MONGODB_URI)
         const id = req.params.id;
         let _id;
         try {
-          _id = new ObjectId(id);
+          _id = new Types.ObjectId(id);   // or: new mongoose.Types.ObjectId(id)
         } catch {
           return res.status(400).json({ message: 'Invalid file id.' });
         }

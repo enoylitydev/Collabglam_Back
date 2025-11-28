@@ -259,117 +259,169 @@ async function findMatchingInfluencers({ subIds = [], catNumIds = [] }) {
 exports.createCampaign = (req, res) => {
   upload(req, res, async (err) => {
     if (err instanceof multer.MulterError) {
-      console.error('Multer Error:', err);
+      console.error("Multer Error:", err);
       return res.status(400).json({ message: err.message });
     }
     if (err) {
-      console.error('Upload Error:', err);
-      return res.status(500).json({ message: 'Error uploading files.' });
+      console.error("Upload Error:", err);
+      return res.status(500).json({ message: "Error uploading files." });
     }
 
     try {
       let {
+        _id, // 🔹 NEW: when present, we will promote/update that draft
         brandId,
         productOrServiceName,
-        description = '',
+        description = "",
         targetAudience,
         categories, // [{categoryId, subcategoryId}]
         goal,
+        campaignType, // optional
         creativeBriefText,
         budget = 0,
         timeline,
-        additionalNotes = ''
+        additionalNotes = "",
       } = req.body;
 
-      if (!brandId) return res.status(400).json({ message: 'brandId is required.' });
+      if (!brandId)
+        return res.status(400).json({ message: "brandId is required." });
       if (!productOrServiceName || !goal) {
-        return res.status(400).json({ message: 'productOrServiceName and goal are required.' });
+        return res
+          .status(400)
+          .json({ message: "productOrServiceName and goal are required." });
       }
 
-// Brand & plan
-const brand = await Brand.findOne({ brandId });
-if (!brand) return res.status(404).json({ message: 'Brand not found.' });
+      // Brand & plan
+      const brand = await Brand.findOne({ brandId });
+      if (!brand)
+        return res.status(404).json({ message: "Brand not found." });
 
-const plan = await SubscriptionPlan.findOne({ planId: brand.subscription.planId }).lean();
-if (!plan) return res.status(500).json({ message: 'Subscription plan not found.' });
+      const plan = await SubscriptionPlan.findOne({
+        planId: brand.subscription.planId,
+      }).lean();
+      if (!plan)
+        return res
+          .status(500)
+          .json({ message: "Subscription plan not found." });
 
-// Enforce ACTIVE CAMPAIGNS LIMIT (concurrent)
-const campFeat = getFeature.getFeature(brand.subscription, 'active_campaigns_limit');
-const campLimit = readLimit(campFeat); // 0 => unlimited / enterprise
+      // Enforce ACTIVE CAMPAIGNS LIMIT (concurrent)
+      const campFeat = getFeature.getFeature(
+        brand.subscription,
+        "active_campaigns_limit"
+      );
+      const campLimit = readLimit(campFeat); // 0 => unlimited / enterprise
 
-if (campLimit > 0) {
-  const currentActive = await Campaign.countDocuments({ brandId, isActive: 1 });
-  if (currentActive >= campLimit) {
-    return res.status(403).json({
-      message: `You have reached your active campaign limit (${campLimit}).`
-    });
-  }
-}
+      if (campLimit > 0) {
+        const currentActive = await Campaign.countDocuments({
+          brandId,
+          isActive: 1,
+        });
+        if (currentActive >= campLimit) {
+          return res.status(403).json({
+            message: `You have reached your active campaign limit (${campLimit}).`,
+          });
+        }
+      }
 
-
-
-      // targetAudience
-      let audienceData = { age: { MinAge: 0, MaxAge: 0 }, gender: 2, locations: [] };
+      // ---------- targetAudience ----------
+      let audienceData = {
+        age: { MinAge: 0, MaxAge: 0 },
+        gender: 2,
+        locations: [],
+      };
       if (targetAudience) {
         let ta = targetAudience;
-        if (typeof ta === 'string') {
-          try { ta = JSON.parse(ta); } catch { return res.status(400).json({ message: 'Invalid JSON in targetAudience.' }); }
+        if (typeof ta === "string") {
+          try {
+            ta = JSON.parse(ta);
+          } catch {
+            return res
+              .status(400)
+              .json({ message: "Invalid JSON in targetAudience." });
+          }
         }
-        const { age, gender, locations } = ta;
-        if (age?.MinAge != null) audienceData.age.MinAge = Number(age.MinAge) || 0;
-        if (age?.MaxAge != null) audienceData.age.MaxAge = Number(age.MaxAge) || 0;
+        const { age, gender, locations } = ta || {};
+        if (age?.MinAge != null)
+          audienceData.age.MinAge = Number(age.MinAge) || 0;
+        if (age?.MaxAge != null)
+          audienceData.age.MaxAge = Number(age.MaxAge) || 0;
         if ([0, 1, 2].includes(gender)) audienceData.gender = gender;
 
         if (Array.isArray(locations)) {
           for (const countryId of locations) {
             if (!mongoose.Types.ObjectId.isValid(countryId)) {
-              return res.status(400).json({ message: `Invalid countryId: ${countryId}` });
+              return res
+                .status(400)
+                .json({ message: `Invalid countryId: ${countryId}` });
             }
             const country = await Country.findById(countryId);
-            if (!country) return res.status(404).json({ message: `Country not found: ${countryId}` });
-            audienceData.locations.push({ countryId: country._id, countryName: country.countryName });
+            if (!country) {
+              return res
+                .status(404)
+                .json({ message: `Country not found: ${countryId}` });
+            }
+            audienceData.locations.push({
+              countryId: country._id,
+              countryName: country.countryName,
+            });
           }
         }
       }
 
-      // categories
+      // ---------- categories ----------
       let categoriesData = [];
-      try { categoriesData = await normalizeCategoriesPayload(categories); }
-      catch (e) { return res.status(400).json({ message: e.message || 'Invalid categories payload.' }); }
+      try {
+        categoriesData = await normalizeCategoriesPayload(categories);
+      } catch (e) {
+        return res.status(400).json({
+          message: e.message || "Invalid categories payload.",
+        });
+      }
 
-      // timeline
+      // ---------- timeline ----------
       let tlData = {};
       if (timeline) {
         let tl = timeline;
-        if (typeof tl === 'string') {
-          try { tl = JSON.parse(tl); } catch { return res.status(400).json({ message: 'Invalid JSON in timeline.' }); }
+        if (typeof tl === "string") {
+          try {
+            tl = JSON.parse(tl);
+          } catch {
+            return res
+              .status(400)
+              .json({ message: "Invalid JSON in timeline." });
+          }
         }
         if (tl.startDate) {
-          const sd = new Date(tl.startDate); if (!isNaN(sd)) tlData.startDate = sd;
+          const sd = new Date(tl.startDate);
+          if (!isNaN(sd)) tlData.startDate = sd;
         }
         if (tl.endDate) {
-          const ed = new Date(tl.endDate); if (!isNaN(ed)) tlData.endDate = ed;
+          const ed = new Date(tl.endDate);
+          if (!isNaN(ed)) tlData.endDate = ed;
         }
       }
 
       const isActiveFlag = computeIsActive(tlData);
 
-      // files → GridFS
+      // ---------- files → GridFS ----------
       const imagesUploaded = await uploadToGridFS(req.files.image || [], {
-        prefix: 'campaign_image',
-        metadata: { kind: 'campaign_image', brandId },
-        req
+        prefix: "campaign_image",
+        metadata: { kind: "campaign_image", brandId },
+        req,
       });
-      const creativeUploaded = await uploadToGridFS(req.files.creativeBrief || [], {
-        prefix: 'campaign_brief',
-        metadata: { kind: 'campaign_brief', brandId },
-        req
-      });
-      const images = imagesUploaded.map((f) => f.filename);
-      const creativePDFs = creativeUploaded.map((f) => f.filename);
+      const creativeUploaded = await uploadToGridFS(
+        req.files.creativeBrief || [],
+        {
+          prefix: "campaign_brief",
+          metadata: { kind: "campaign_brief", brandId },
+          req,
+        }
+      );
+      const newImages = imagesUploaded.map((f) => f.filename);
+      const newCreativePDFs = creativeUploaded.map((f) => f.filename);
 
-      // save
-      const newCampaign = new Campaign({
+      // ---------- shared base data ----------
+      const baseData = {
         brandId,
         brandName: brand.name,
         productOrServiceName,
@@ -377,55 +429,125 @@ if (campLimit > 0) {
         targetAudience: audienceData,
         categories: categoriesData,
         goal,
+        campaignType: campaignType || "",
         creativeBriefText,
         budget,
         timeline: tlData,
-        images,
-        creativeBrief: creativePDFs,
         additionalNotes,
-        isActive: isActiveFlag
-      });
+        isActive: isActiveFlag,
+        isDraft: 0, // 🔹 mark as final campaign
+      };
 
-      await newCampaign.save();
+      let campaignDoc;
 
+      // ==========================================
+      // CASE 1: _id provided → promote that DRAFT
+      // ==========================================
+      if (_id) {
+        const existingDraft = await Campaign.findOne({
+          _id,
+          brandId,
+          isDraft: 1,
+        });
+
+        if (!existingDraft) {
+          return res.status(404).json({
+            message: "Draft campaign not found for this brand.",
+          });
+        }
+
+        // overwrite main fields from baseData
+        Object.assign(existingDraft, baseData);
+
+        // Only overwrite files if new ones are uploaded
+        if (newImages.length) {
+          existingDraft.images = newImages;
+        }
+        if (newCreativePDFs.length) {
+          existingDraft.creativeBrief = newCreativePDFs;
+        }
+
+        campaignDoc = await existingDraft.save();
+      }
+      // ==========================================
+      // CASE 2: no _id → create a fresh campaign
+      // ==========================================
+      else {
+        const newCampaign = new Campaign({
+          ...baseData,
+          images: newImages,
+          creativeBrief: newCreativePDFs,
+        });
+
+        campaignDoc = await newCampaign.save();
+      }
 
       // ==== Notifications to matching influencers ====
       try {
-        const subIds = Array.from(new Set((categoriesData || []).map(c => String(c.subcategoryId))));
-        const catNumIds = Array.from(new Set((categoriesData || []).map(c => Number(c.categoryId)).filter(Number.isFinite)));
+        const subIds = Array.from(
+          new Set(
+            (campaignDoc.categories || []).map((c) =>
+              String(c.subcategoryId)
+            )
+          )
+        );
+        const catNumIds = Array.from(
+          new Set(
+            (campaignDoc.categories || [])
+              .map((c) => Number(c.categoryId))
+              .filter(Number.isFinite)
+          )
+        );
 
         if (subIds.length || catNumIds.length) {
-          const influencers = await findMatchingInfluencers({ subIds, catNumIds });
+          const influencers = await findMatchingInfluencers({
+            subIds,
+            catNumIds,
+          });
 
           if (Array.isArray(influencers) && influencers.length) {
-            const campaignIdForUrl = newCampaign.campaignsId || String(newCampaign._id);
+            const campaignIdForUrl =
+              campaignDoc.campaignsId || String(campaignDoc._id);
             const actionPath = `/influencer/dashboard/view-campaign?id=${campaignIdForUrl}`;
-            const title = 'New campaign matches your profile';
-            const message = `${newCampaign.brandName} posted "${newCampaign.productOrServiceName}".`;
+            const title = "New campaign matches your profile";
+            const message = `${campaignDoc.brandName} posted "${campaignDoc.productOrServiceName}".`;
 
             await Promise.all(
               influencers.map((inf) =>
                 createAndEmit({
                   influencerId: String(inf.influencerId),
-                  type: 'campaign.match',
+                  type: "campaign.match",
                   title,
                   message,
-                  entityType: 'campaign',
+                  entityType: "campaign",
                   entityId: String(campaignIdForUrl),
-                  actionPath
-                }).catch(e => console.warn('notify influencer failed', inf.influencerId, e.message))
+                  actionPath,
+                }).catch((e) =>
+                  console.warn(
+                    "notify influencer failed",
+                    inf.influencerId,
+                    e.message
+                  )
+                )
               )
             );
           }
         }
       } catch (notifErr) {
-        console.warn('createCampaign: notification flow failed (non-fatal)', notifErr.message);
+        console.warn(
+          "createCampaign: notification flow failed (non-fatal)",
+          notifErr.message
+        );
       }
 
-      return res.status(201).json({ message: 'Campaign created successfully.' });
+      return res
+        .status(201)
+        .json({ message: "Campaign created successfully.", campaign: campaignDoc });
     } catch (error) {
-      console.error('Error in createCampaign:', error);
-      return res.status(500).json({ message: 'Internal server error while creating campaign.' });
+      console.error("Error in createCampaign:", error);
+      return res.status(500).json({
+        message: "Internal server error while creating campaign.",
+      });
     }
   });
 };
@@ -1384,5 +1506,266 @@ exports.getCampaignSummary = async (req, res) => {
   } catch (error) {
     console.error('Error in getCampaignSummary:', error);
     return res.status(500).json({ message: 'Internal server error while fetching campaign summary.' });
+  }
+};
+
+exports.saveDraftCampaign = (req, res) => {
+  upload(req, res, async (err) => {
+    if (err instanceof multer.MulterError) {
+      console.error("Multer Error (draft):", err);
+      return res.status(400).json({ message: err.message });
+    }
+    if (err) {
+      console.error("Upload Error (draft):", err);
+      return res.status(500).json({ message: "Error uploading files." });
+    }
+
+    try {
+      let {
+        _id,                 // 🔹 optional draft _id for updating
+        brandId,
+        productOrServiceName,
+        description = "",
+        targetAudience,
+        categories,          // [{ categoryId, subcategoryId }]
+        goal,
+        campaignType,        // optional, same as createCampaign
+        creativeBriefText,
+        budget = 0,
+        timeline,
+        additionalNotes = "",
+      } = req.body;
+
+      // 🔹 For new drafts brandId is required (and we still use it for updates)
+      if (!brandId) {
+        return res.status(400).json({ message: "brandId is required." });
+      }
+
+      // For drafts we still enforce basic fields
+      if (!productOrServiceName || !goal) {
+        return res.status(400).json({
+          message: "productOrServiceName and goal are required even for drafts.",
+        });
+      }
+
+      // Brand (for brandName)
+      const brand = await Brand.findOne({ brandId });
+      if (!brand) {
+        return res.status(404).json({ message: "Brand not found." });
+      }
+
+      // ---------- targetAudience ----------
+      let audienceData = {
+        age: { MinAge: 0, MaxAge: 0 },
+        gender: 2,
+        locations: [],
+      };
+
+      if (targetAudience) {
+        let ta = targetAudience;
+        if (typeof ta === "string") {
+          try {
+            ta = JSON.parse(ta);
+          } catch {
+            return res
+              .status(400)
+              .json({ message: "Invalid JSON in targetAudience." });
+          }
+        }
+
+        const { age, gender, locations } = ta || {};
+        if (age?.MinAge != null) audienceData.age.MinAge = Number(age.MinAge) || 0;
+        if (age?.MaxAge != null) audienceData.age.MaxAge = Number(age.MaxAge) || 0;
+        if ([0, 1, 2].includes(gender)) audienceData.gender = gender;
+
+        if (Array.isArray(locations)) {
+          for (const countryId of locations) {
+            if (!mongoose.Types.ObjectId.isValid(countryId)) {
+              return res
+                .status(400)
+                .json({ message: `Invalid countryId: ${countryId}` });
+            }
+            const country = await Country.findById(countryId);
+            if (!country) {
+              return res
+                .status(404)
+                .json({ message: `Country not found: ${countryId}` });
+            }
+            audienceData.locations.push({
+              countryId: country._id,
+              countryName: country.countryName,
+            });
+          }
+        }
+      }
+
+      // ---------- categories ----------
+      let categoriesData = [];
+      try {
+        categoriesData = await normalizeCategoriesPayload(categories);
+      } catch (e) {
+        return res
+          .status(400)
+          .json({ message: e.message || "Invalid categories payload." });
+      }
+
+      // ---------- timeline ----------
+      let tlData = {};
+      if (timeline) {
+        let tl = timeline;
+        if (typeof tl === "string") {
+          try {
+            tl = JSON.parse(tl);
+          } catch {
+            return res
+              .status(400)
+              .json({ message: "Invalid JSON in timeline." });
+          }
+        }
+        if (tl.startDate) {
+          const sd = new Date(tl.startDate);
+          if (!isNaN(sd)) tlData.startDate = sd;
+        }
+        if (tl.endDate) {
+          const ed = new Date(tl.endDate);
+          if (!isNaN(ed)) tlData.endDate = ed;
+        }
+      }
+
+      // Drafts are always inactive
+      const isActiveFlag = 0;
+
+      // ---------- files → GridFS ----------
+      const imagesUploaded = await uploadToGridFS(req.files.image || [], {
+        prefix: "campaign_image",
+        metadata: { kind: "campaign_image", brandId },
+        req,
+      });
+      const creativeUploaded = await uploadToGridFS(
+        req.files.creativeBrief || [],
+        {
+          prefix: "campaign_brief",
+          metadata: { kind: "campaign_brief", brandId },
+          req,
+        }
+      );
+
+      const newImages = imagesUploaded.map((f) => f.filename);
+      const newCreativePDFs = creativeUploaded.map((f) => f.filename);
+
+      // ---------- base data used for both create/update ----------
+      const baseData = {
+        brandId,
+        brandName: brand.name,
+        productOrServiceName,
+        description,
+        targetAudience: audienceData,
+        categories: categoriesData,
+        goal,
+        campaignType: campaignType || "",
+        creativeBriefText,
+        budget,
+        timeline: tlData,
+        additionalNotes,
+        isActive: isActiveFlag,
+        isDraft: 1,
+      };
+
+      // ==========================================
+      // NEW BEHAVIOUR:
+      // If _id given → update only that draft
+      // If no _id     → create new draft
+      // ==========================================
+      if (_id) {
+        if (!mongoose.Types.ObjectId.isValid(_id)) {
+          return res.status(400).json({ message: "Invalid draft _id." });
+        }
+
+        const existingDraft = await Campaign.findOne({
+          _id,
+          isDraft: 1,
+        });
+
+        if (!existingDraft) {
+          return res
+            .status(404)
+            .json({ message: "Draft not found for given _id." });
+        }
+
+        // (Optional safety) brand must match
+        if (existingDraft.brandId !== brandId) {
+          return res.status(403).json({
+            message: "You cannot update a draft that belongs to another brand.",
+          });
+        }
+
+        // update existing draft
+        Object.assign(existingDraft, baseData);
+
+        // Only overwrite files if new ones are uploaded
+        if (newImages.length) {
+          existingDraft.images = newImages;
+        }
+        if (newCreativePDFs.length) {
+          existingDraft.creativeBrief = newCreativePDFs;
+        }
+
+        await existingDraft.save();
+
+        return res.status(200).json({
+          message: "Campaign draft updated successfully.",
+          campaign: existingDraft.toObject(),
+        });
+      }
+
+      // No _id → create a new draft
+      const newDraft = new Campaign({
+        ...baseData,
+        images: newImages,
+        creativeBrief: newCreativePDFs,
+      });
+
+      await newDraft.save();
+
+      return res.status(201).json({
+        message: "Campaign draft saved successfully.",
+        campaign: newDraft,
+      });
+    } catch (error) {
+      console.error("Error in saveDraftCampaign:", error);
+      return res
+        .status(500)
+        .json({ message: "Internal server error while saving draft." });
+    }
+  });
+};
+
+exports.getDraftCampaignByBrand = async (req, res) => {
+  try {
+    const { brandId } = req.query;
+
+    if (!brandId) {
+      return res
+        .status(400)
+        .json({ message: "brandId is required as a query param." });
+    }
+
+    const draft = await Campaign.findOne({
+      brandId,
+      isDraft: 1,          // ✅ only drafts
+    })
+      .sort({ updatedAt: -1 })
+      .lean();
+
+    if (!draft) {
+      return res.status(201).json({ message: "No draft found for this brand." });
+    }
+
+    return res.status(200).json(draft);
+  } catch (error) {
+    console.error("Error in getDraftCampaignByBrand:", error);
+    return res
+      .status(500)
+      .json({ message: "Internal server error while fetching draft." });
   }
 };

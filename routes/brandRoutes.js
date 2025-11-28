@@ -18,14 +18,12 @@ const {
   verifyEmailUpdate,
   getMetaOptions,
   uploadLogoMiddleware,
-  uploadLogo
 } = require('../controllers/brandController');
 
 const { searchInfluencers } = require('../controllers/influencerController');
 
 // POST /brand/register → register a new brand
-router.post('/register', register);
-router.post('/uploadLogo', uploadLogoMiddleware, uploadLogo);
+router.post('/register', uploadLogoMiddleware, register);
 router.post('/requestOtp', requestOtp);
 router.post('/verifyOtp', verifyOtp);
 
@@ -54,13 +52,13 @@ router.post(
   searchInfluencers
 );
 
-router.post('/update',verifyToken,updateProfile);
+router.post('/update', verifyToken, updateProfile);
 
-router.post('/requestEmailUpdate',verifyToken,requestEmailUpdate);
+router.post('/requestEmailUpdate', verifyToken, requestEmailUpdate);
 
-router.post('/verifyEmailUpdate',verifyToken,verifyEmailUpdate);
+router.post('/verifyEmailUpdate', verifyToken, verifyEmailUpdate);
 
-router.get('/metaOptions',getMetaOptions);
+router.get('/metaOptions', getMetaOptions);
 
 
 module.exports = router;

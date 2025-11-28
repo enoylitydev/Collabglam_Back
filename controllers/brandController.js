@@ -200,11 +200,19 @@ exports.uploadLogo = async (req, res) => {
 
     const [saved] = await uploadToGridFS(req.file, {
       prefix: 'brand_logo',
-      metadata: { kind: 'brand_logo' },
+      metadata: {
+        kind: 'brand_logo',
+        email: req.body?.email || undefined,
+      },
       req
     });
 
-    return res.status(201).json({ message: 'Logo uploaded', url: saved.url, filename: saved.filename });
+    return res.status(201).json({
+      message: 'Logo uploaded',
+      fileId: saved.id,        // <-- GridFS _id as string
+      filename: saved.filename, // <-- GridFS filename
+      url: saved.url,          // optional, for immediate preview in frontend
+    });
   } catch (err) {
     console.error('uploadLogo error:', err);
     return res.status(500).json({ message: 'Internal server error' });
@@ -350,11 +358,13 @@ exports.register = async (req, res) => {
       // optionals
       website,
       instagramHandle,
-      logoUrl,
       companySize,
       referralCode,
       isVerifiedRepresentative // required: must be true
     } = req.body;
+
+    // 💾 logo file from multipart/form-data (via uploadLogoMiddleware)
+    const logoFile = req.file;
 
     // required checks
     if (!name || !email || !password || !phone || !countryId || !callingId) {
@@ -367,7 +377,7 @@ exports.register = async (req, res) => {
     if (!categoryDoc) {
       return res.status(400).json({ message: 'Invalid or missing brand category' });
     }
-    if (isVerifiedRepresentative !== true) {
+    if (isVerifiedRepresentative !== "true") {
       return res.status(400).json({ message: 'You must confirm you are an official representative of this brand' });
     }
 
@@ -401,7 +411,6 @@ exports.register = async (req, res) => {
 
     // Normalize optionals
     const websiteNorm = normalizeUrl(website);
-    const logoUrlNorm = normalizeUrl(logoUrl);
     const instaNorm = normalizeInsta(instagramHandle);
 
     // Validate enums if provided
@@ -418,6 +427,29 @@ exports.register = async (req, res) => {
         return res.status(400).json({ message: 'Invalid business type' });
       }
       businessTypeName = btDoc.name;
+    }
+
+    // 🔁 Upload logo to GridFS (if provided)
+    let logoFileId;
+    let logoFilename;
+
+    if (logoFile) {
+      try {
+        const [saved] = await uploadToGridFS(logoFile, {
+          prefix: 'brand_logo',
+          metadata: {
+            kind: 'brand_logo',
+            email: normalizedEmail,
+          },
+          req,
+        });
+
+        logoFileId = saved.id;
+        logoFilename = saved.filename;
+      } catch (e) {
+        console.error('Brand register: logo upload failed:', e?.message || e);
+        return res.status(500).json({ message: 'Failed to store logo' });
+      }
     }
 
     // Create brand
@@ -439,7 +471,8 @@ exports.register = async (req, res) => {
       // optionals
       website: websiteNorm,
       instagramHandle: instaNorm,
-      logoUrl: logoUrlNorm,
+      logoFileId,
+      logoFilename,
       companySize: companySize ? String(companySize) : undefined,
       referralCode: referralCode ? String(referralCode).trim() : undefined,
       isVerifiedRepresentative: true,
@@ -475,37 +508,31 @@ exports.register = async (req, res) => {
       brand.subscriptionExpired = false;
     }
 
-
-
     await brand.save();
 
     // Clean up verification record
     await VerifyEmail.deleteOne({ email: normalizedEmail, role: 'Brand' });
 
-    // --- NEW: Trigger Welcome Email API Call (Non-blocking) ---
+    // --- Welcome Email API (non-blocking) ---
     const emailPayload = {
       email: normalizedEmail,
       name: name,
       userType: 'brand',
     };
 
-    // IMPORTANT: Ensure 'fetch' is available and WELCOME_EMAIL_API_URL is the correct, full URL
     fetch(WELCOME_EMAIL_API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(emailPayload),
     })
       .then(response => {
-        // Log a warning if the email API request failed (status != 2xx)
         if (!response.ok) {
           console.warn(`Welcome email API responded with non-2xx status: ${response.status} for ${normalizedEmail}`);
         }
       })
       .catch(error => {
-        // Log the error but do not throw, as registration is already complete.
         console.error(`Failed to trigger welcome email API for ${normalizedEmail}:`, error.message);
       });
-    // ------------------------------------------------------------
 
     return res.status(201).json({
       message: 'Brand registered successfully',
@@ -515,7 +542,6 @@ exports.register = async (req, res) => {
   } catch (error) {
     console.error('Error in register:', error);
 
-    // Friendly validation surfacing
     if (error?.name === 'ValidationError') {
       const first = Object.values(error.errors)[0];
       return res.status(400).json({ message: first?.message || 'Validation error' });
