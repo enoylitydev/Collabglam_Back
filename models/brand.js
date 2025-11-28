@@ -60,8 +60,6 @@ const brandSchema = new mongoose.Schema(
     email: { type: String, required: true, unique: true, match: [emailRegex, 'Invalid email'] },
     brandAliasEmail: {
       type: String,
-      required: true,
-      unique: true,
       lowercase: true,
       trim: true,
     },
@@ -129,5 +127,16 @@ brandSchema.pre('save', async function (next) {
 brandSchema.methods.comparePassword = function (candidate) {
   return bcrypt.compare(candidate, this.password);
 };
+
+brandSchema.index(
+  { brandAliasEmail: 1 },
+  {
+    name: 'brandAliasEmail_1',
+    unique: true,
+    partialFilterExpression: {
+      brandAliasEmail: { $type: 'string' },
+    },
+  }
+);
 
 module.exports = mongoose.model('Brand', brandSchema);
