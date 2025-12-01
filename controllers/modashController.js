@@ -7,6 +7,7 @@ const { fetch } = require('undici');
 const ModashProfile = require('../models/modash');
 const Influencer = require('../models/influencer'); // kept for future use
 const { ensureBrandQuota } = require('../utils/quota');
+const BrandProfileView = require('../models/brandProfileView');
 
 /* -------------------------------------------------------------------------- */
 /*                              Config & constants                            */
@@ -563,6 +564,55 @@ function dedupeSearchItems(items) {
   return Array.from(map.values());
 }
 
+async function recordBrandProfileView({
+  brandId,
+  platform,
+  userId,
+  influencerId,
+  periodKey,
+  at,
+}) {
+  if (!brandId || !platform || !userId || !periodKey) return;
+
+  const now = at || new Date();
+
+  const filter = { brandId, platform, userId, periodKey };
+
+  // Fields that only need to be set when the doc is first created
+  const setOnInsert = {
+    brandId,
+    platform,
+    userId,
+    periodKey,
+    firstViewedAt: now,
+  };
+
+  // Fields we always want to touch
+  const update = {
+    $setOnInsert: setOnInsert,
+    $set: {
+      lastViewedAt: now,
+    },
+  };
+
+  // Only put influencerId in ONE operator to avoid conflicts
+  if (influencerId) {
+    update.$set.influencerId = influencerId;
+  }
+
+  try {
+    await BrandProfileView.findOneAndUpdate(filter, update, {
+      upsert: true,
+      new: true,
+    });
+  } catch (err) {
+    console.error(
+      '[recordBrandProfileView] Failed to record profile view:',
+      err
+    );
+  }
+}
+
 /* -------------------------------------------------------------------------- */
 /*                          /api/modash/users                                 */
 /* -------------------------------------------------------------------------- */
@@ -913,20 +963,50 @@ async function frontendReport(req, res) {
       return res.status(400).json({ error: 'userId is required' });
     }
 
-    // Quota enforcement
+    // ---------------------------------------------------------
+    // 0) Compute monthly periodKey & check if already viewed
+    // ---------------------------------------------------------
+    const now = new Date();
+    const periodKey = `${now.getUTCFullYear()}-${String(
+      now.getUTCMonth() + 1
+    ).padStart(2, '0')}`;
+
+    let alreadyViewedThisPeriod = false;
     try {
-      await ensureBrandQuota(brandId, 'profile_views_per_month', 1);
+      const existingView = await BrandProfileView.findOne({
+        brandId,
+        platform,
+        userId,
+        periodKey,
+      }).lean();
+      alreadyViewedThisPeriod = !!existingView;
     } catch (e) {
-      if (e.code === 'QUOTA_EXCEEDED') {
-        return res.status(403).json({
-          error: 'You have reached your monthly profile view limit.',
-          meta: e.meta,
-        });
-      }
-      throw e;
+      console.error(
+        '[frontendReport] Failed to check BrandProfileView:',
+        e.message
+      );
     }
 
+    // ---------------------------------------------------------
+    // Quota enforcement – only for FIRST view this month
+    // ---------------------------------------------------------
+    if (!alreadyViewedThisPeriod) {
+      try {
+        await ensureBrandQuota(brandId, 'profile_views_per_month', 1);
+      } catch (e) {
+        if (e.code === 'QUOTA_EXCEEDED') {
+          return res.status(403).json({
+            error: 'You have reached your monthly profile view limit.',
+            meta: e.meta,
+          });
+        }
+        throw e;
+      }
+    }
+
+    // ---------------------------------------------------------
     // 1) Cache
+    // ---------------------------------------------------------
     if (!forceFresh) {
       try {
         const cached = await findCachedReport({
@@ -945,6 +1025,17 @@ async function frontendReport(req, res) {
               out._lastFetchedAt = d.toISOString();
             }
           }
+
+          // record that this brand viewed this profile this month
+          await recordBrandProfileView({
+            brandId,
+            platform,
+            userId,
+            influencerId,
+            periodKey,
+            at: now,
+          });
+
           return res.json(out);
         }
       } catch (cacheErr) {
@@ -955,7 +1046,9 @@ async function frontendReport(req, res) {
       }
     }
 
-    // 2) Fresh
+    // ---------------------------------------------------------
+    // 2) Fresh from Modash
+    // ---------------------------------------------------------
     console.log(
       `[frontendReport] Fetching fresh report from Modash API for ${platform}/${userId}`
     );
@@ -988,7 +1081,9 @@ async function frontendReport(req, res) {
 
     const fetchedAt = new Date();
 
-    // 3) Save
+    // ---------------------------------------------------------
+    // 3) Save normalized copy in ModashProfile cache (existing logic)
+    // ---------------------------------------------------------
     try {
       console.log(
         '[frontendReport] Normalizing and saving report to database'
@@ -1010,9 +1105,20 @@ async function frontendReport(req, res) {
       );
     }
 
-    // 4) Return
+    // ---------------------------------------------------------
+    // 4) Return + mark profile as viewed for this month
+    // ---------------------------------------------------------
     const out = Object.assign({}, reportJSON, {
       _lastFetchedAt: fetchedAt.toISOString(),
+    });
+
+    await recordBrandProfileView({
+      brandId,
+      platform,
+      userId,
+      influencerId,
+      periodKey,
+      at: fetchedAt,
     });
 
     return res.json(out);
@@ -1022,6 +1128,7 @@ async function frontendReport(req, res) {
     return res.status(500).json({ error: raw || 'Internal error' });
   }
 }
+
 
 /* -------------------------------------------------------------------------- */
 /*                       Legacy resolveProfile + search                       */

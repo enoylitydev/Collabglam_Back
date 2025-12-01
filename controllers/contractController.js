@@ -1442,7 +1442,7 @@ exports.influencerConfirm = async (req, res) => {
       message: `${contract.influencerName || "Influencer"} accepted the contract.`,
       entityType: "contract",
       entityId: String(contract.contractId),
-      actionPath: `/brand/contracts/${contract.contractId}`,
+      actionPath: `/brand/created-campaign/applied-inf?id=${contract.campaignId}&infId=${contract.influencerId}`,
     });
 
     // 🔔 self receipt for influencer (accepted)

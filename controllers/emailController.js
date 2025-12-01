@@ -6,6 +6,7 @@ const { EmailThread, EmailMessage, EmailTemplate } = require('../models/email');
 const Invitation = require('../models/NewInvitations');
 const MissingEmail = require('../models/MissingEmail');
 const Campaign = require('../models/campaign');
+const ChatRoom = require('../models/chat');  
 const { buildInvitationEmail } = require('../template/invitationTemplate');
 
 // ---------- SES CLIENT (uses AWS keys if provided) ----------
@@ -62,6 +63,23 @@ async function findCampaignByIdOrCampaignsId(id) {
     }
   }
   return campaign;
+}
+
+const HANDLE_RX = /^@[A-Za-z0-9._\-]+$/;
+const PLATFORM_MAP = new Map([
+  ['youtube', 'youtube'], ['yt', 'youtube'],
+  ['instagram', 'instagram'], ['ig', 'instagram'],
+  ['tiktok', 'tiktok'], ['tt', 'tiktok'],
+]);
+
+function normalizeHandle(h) {
+  if (!h) return '';
+  const t = String(h).trim().toLowerCase();
+  return t.startsWith('@') ? t : `@${t}`;
+}
+
+function sortParticipants(a, b) {
+  return a.userId.localeCompare(b.userId);
 }
 
 /**
@@ -1056,5 +1074,142 @@ exports.getCampaignInvitationPreview = async (req, res) => {
     return res
       .status(status)
       .json({ error: err.message || 'Internal server error' });
+  }
+};
+
+exports.handleEmailInvitation = async (req, res) => {
+  try {
+    const rawEmail     = (req.body?.email     || '').trim().toLowerCase();
+    const rawBrandId   = (req.body?.brandId   || '').trim();
+    const rawCampaignId= (req.body?.campaignId|| '').trim();
+    const rawHandle    = (req.body?.handle    || '').trim();
+    const rawPlatform  = (req.body?.platform  || '').trim();
+
+    if (!rawEmail) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'email is required',
+      });
+    }
+
+    if (!rawBrandId) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'brandId is required',
+      });
+    }
+
+    const email = rawEmail;
+
+    // 1) Brand (for brandName in response)
+    const brand = await Brand.findOne({ brandId: rawBrandId }, 'brandId name').lean();
+    if (!brand) {
+      return res.status(404).json({
+        status: 'error',
+        message: 'Brand not found for given brandId',
+      });
+    }
+    const brandName = brand.name || rawBrandId;
+
+    // 2) See if an influencer account exists with this email
+    const influencer = await Influencer.findOne({ email }).lean();
+
+    if (influencer && influencer.influencerId) {
+      const influencerId = influencer.influencerId;
+      const influencerName =
+        influencer.name ||
+        influencer.fullname ||
+        influencer.email ||
+        email;
+
+      // 🔎 Look for existing chat room between this brand and influencer
+      let room = await ChatRoom.findOne({
+        'participants.userId': { $all: [rawBrandId, influencerId] },
+        'participants.2': { $exists: false }, // ensure only 2 participants
+      });
+
+      // 🏗️ If no room exists, create one (same pattern as chatController.createRoom)
+      if (!room) {
+        const participants = [
+          { userId: rawBrandId,   name: brandName,       role: 'brand' },
+          { userId: influencerId, name: influencerName,  role: 'influencer' },
+        ].sort(sortParticipants);
+
+        room = await ChatRoom.create({ participants });
+      }
+
+      // ✅ Frontend: redirect to /brand/messages/<roomId>
+      return res.json({
+        message: 'Existing influencer found, redirect to chat room.',
+        isExistingInfluencer: true,
+        influencerId,
+        influencerName,
+        brandName,
+        roomId: room.roomId,
+      });
+    }
+
+    // 3) No influencer account → ensure we have an Invitation for this creator
+    //    (so /brand/emails can use invitationId)
+
+    // We expect handle + platform in body for this case
+    if (!rawHandle || !rawPlatform) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'handle and platform are required when influencer is not signed up',
+      });
+    }
+
+    const handle = normalizeHandle(rawHandle);
+    if (!HANDLE_RX.test(handle)) {
+      return res.status(400).json({
+        status: 'error',
+        message:
+          'Invalid handle. It must start with "@" and contain letters, numbers, ".", "_" or "-"',
+      });
+    }
+
+    const platform = PLATFORM_MAP.get(rawPlatform.toLowerCase());
+    if (!platform) {
+      return res.status(400).json({
+        status: 'error',
+        message:
+          'Invalid platform. Use: youtube|instagram|tiktok (aliases: yt, ig, tt)',
+      });
+    }
+
+    let invitation = await Invitation.findOne({
+      brandId: rawBrandId,
+      handle,
+      platform,
+    });
+
+    if (!invitation) {
+      // create new invitation with status=invited
+      invitation = await Invitation.create({
+        brandId: rawBrandId,
+        handle,
+        platform,
+        campaignId: rawCampaignId || null,
+        status: 'invited',
+      });
+    } else if (rawCampaignId && invitation.campaignId !== rawCampaignId) {
+      // update campaignId if provided
+      invitation.campaignId = rawCampaignId;
+      await invitation.save();
+    }
+
+    return res.json({
+      message: 'Email invitation ready for this creator.',
+      isExistingInfluencer: false,
+      brandName,
+      invitationId: invitation.invitationId,
+    });
+  } catch (err) {
+    console.error('Error in /emails/invitation:', err);
+    return res.status(500).json({
+      status: 'error',
+      message: 'Internal server error',
+    });
   }
 };

@@ -618,66 +618,68 @@ exports.adminGetInfluencerList = async (req, res) => {
 
 
 exports.adminAddYouTubeEmail = async (req, res) => {
-  try {
-    const { email, handle, createdByAdminId } = req.body || {};
+  const rawHandle = (req.body?.handle || '').trim();
+  const email     = (req.body?.email  || '').trim();
+  const platform  = 'youtube'; // or derive / validate like you already do
 
-    if (!email || !handle) {
-      return res
-        .status(400)
-        .json({ message: 'Both email and handle are required.' });
-    }
-
-    const normalizedEmail = String(email).trim().toLowerCase();
-    let normalizedHandle = normalizeHandle(handle);
-
-    if (!EMAIL_RX.test(normalizedEmail)) {
-      return res.status(400).json({ message: 'Invalid email address.' });
-    }
-
-    if (!HANDLE_RX.test(normalizedHandle)) {
-      return res.status(400).json({
-        message:
-          'Invalid handle. It must start with "@" and contain letters, numbers, ".", "_" or "-".'
-      });
-    }
-
-    // Fetch YouTube data
-    const youtubeData = await fetchYouTubeChannelByHandle(normalizedHandle);
-    if (!youtubeData) {
-      return res.status(404).json({
-        message: `No YouTube channel found for handle ${normalizedHandle}.`
-      });
-    }
-
-    // Upsert into MissingEmail (one record per handle)
-    const doc = await MissingEmail.findOneAndUpdate(
-      { handle: normalizedHandle },
-      {
-        email: normalizedEmail,
-        handle: normalizedHandle,
-        platform: 'youtube',
-        youtube: youtubeData,
-        ...(createdByAdminId ? { createdByAdminId } : {})
-      },
-      {
-        new: true,
-        upsert: true,
-        setDefaultsOnInsert: true
-      }
-    ).lean();
-
-    return res.status(200).json({
-      message: 'YouTube contact saved/updated successfully.',
-      data: doc
-    });
-  } catch (err) {
-    console.error('Error in adminAddYouTubeEmail:', err);
-    return res
-      .status(500)
-      .json({ message: 'Internal server error while saving YouTube contact.' });
+  if (!rawHandle || !email) {
+    return res.status(400).json({ status: 'error', message: 'handle and email are required' });
   }
-};
 
+  const handle = rawHandle.startsWith('@')
+    ? rawHandle.toLowerCase()
+    : `@${rawHandle.toLowerCase()}`;
+
+  // 1) Upsert MissingEmail
+  let me = await MissingEmail.findOne({ handle, platform });
+  const isExisting = !!me;
+
+  if (!me) {
+    me = await MissingEmail.create({
+      missingEmailId: crypto.randomUUID(), // or your uuidv4
+      handle,
+      platform,
+      email,
+      createdByAdminId: req.user?.adminId || null,
+    });
+  } else {
+    me.email = email;
+    await me.save();
+  }
+
+  // 2) (optional) Upsert Missing record & set isAvailable=1
+  let missing = await Missing.findOne({ handle, platform });
+  if (missing) {
+    if (missing.isAvailable !== 1) {
+      missing.isAvailable = 1;
+      await missing.save();
+    }
+  } else {
+    missing = await Missing.create({
+      missingId: crypto.randomUUID(),
+      handle,
+      platform,
+      isAvailable: 1,
+      note: null,
+      brandId: null, // or however you use it now
+    });
+  }
+
+  return res.json({
+    status: isExisting ? 'exists' : 'saved',
+    message: isExisting
+      ? 'Email updated for existing handle.'
+      : 'Email saved successfully.',
+    data: {
+      missingEmailId: me.missingEmailId, // 👈 THIS is what the frontend expects
+      email: me.email,
+      handle: me.handle,
+      platform: me.platform,
+      createdAt: me.createdAt,
+      updatedAt: me.updatedAt,
+    },
+  });
+};
 
 exports.listMissingEmail = async (req, res) => {
   const body = req.body || {};

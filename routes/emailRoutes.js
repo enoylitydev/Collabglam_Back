@@ -36,4 +36,5 @@ router.get(
   emailController.getInfluencerEmailListForBrand
 );
 
+router.post('/invitation', emailController.handleEmailInvitation);
 module.exports = router;

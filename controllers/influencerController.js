@@ -753,59 +753,58 @@ exports.registerInfluencer = async (req, res) => {
     await inf.save();
 
     // 🔹 7) Persist Modash profile data in separate Modash collection
-    // 🔹 7) Persist Modash profile data in separate Modash collection
-try {
-  await Promise.all(
-    profiles.map(async (prof) => {
-      // Derive a stable userId for the Modash doc
-      const raw = prof.providerRaw || {};
-      const profileRoot = raw.profile || raw;
-      const nestedProf = profileRoot.profile || profileRoot;
+    try {
+      await Promise.all(
+        profiles.map(async (prof) => {
+          // Derive a stable userId for the Modash doc
+          const raw = prof.providerRaw || {};
+          const profileRoot = raw.profile || raw;
+          const nestedProf = profileRoot.profile || profileRoot;
 
-      const userId =
-        prof.userId ||
-        prof.secUid ||
-        prof.username ||
-        raw.userId ||
-        profileRoot.userId ||
-        nestedProf.userId;
+          const userId =
+            prof.userId ||
+            prof.secUid ||
+            prof.username ||
+            raw.userId ||
+            profileRoot.userId ||
+            nestedProf.userId;
 
-      if (!userId) {
-        console.warn(
-          '[registerInfluencer] Skipping Modash link because no userId/secUid/username found',
-          { provider: prof.provider }
-        );
-        return;
-      }
-
-      await Modash.findOneAndUpdate(
-        // IMPORTANT: match by canonical key (respects unique index userId+provider)
-        { provider: prof.provider, userId },
-        {
-          $set: {
-            // link this Modash profile to the newly created influencer
-            influencer: inf._id,
-            influencerId: inf.influencerId,
-
-            // ensure userId is stored even if it was only in providerRaw
-            userId,
-
-            // rest of Modash payload (handle, followers, url, categories, providerRaw, etc.)
-            ...prof
+          if (!userId) {
+            console.warn(
+              '[registerInfluencer] Skipping Modash link because no userId/secUid/username found',
+              { provider: prof.provider }
+            );
+            return;
           }
-        },
-        {
-          upsert: true,
-          new: true,
-          setDefaultsOnInsert: true
-        }
+
+          await Modash.findOneAndUpdate(
+            // IMPORTANT: match by canonical key (respects unique index userId+provider)
+            { provider: prof.provider, userId },
+            {
+              $set: {
+                // link this Modash profile to the newly created influencer
+                influencer: inf._id,
+                influencerId: inf.influencerId,
+
+                // ensure userId is stored even if it was only in providerRaw
+                userId,
+
+                // rest of Modash payload (handle, followers, url, categories, providerRaw, etc.)
+                ...prof
+              }
+            },
+            {
+              upsert: true,
+              new: true,
+              setDefaultsOnInsert: true
+            }
+          );
+        })
       );
-    })
-  );
-} catch (modashErr) {
-  // Don't block registration if Modash sync fails
-  console.error('Error saving Modash profiles for influencer:', modashErr);
-}
+    } catch (modashErr) {
+      // Don't block registration if Modash sync fails
+      console.error('Error saving Modash profiles for influencer:', modashErr);
+    }
 
     // Clean up verification record
     await VerifyEmail.deleteOne({ email: normalizedEmail, role: 'Influencer' });
