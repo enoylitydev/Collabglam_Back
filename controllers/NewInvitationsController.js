@@ -150,102 +150,108 @@ exports.createInvitation = async (req, res) => {
  * body: { handle, platform, status: "invited" | "available", missingEmailId? }
  */
 exports.updateInvitationStatus = async (req, res) => {
-  const rawHandle         = (req.body?.handle || '').trim();
-  const rawPlatform       = (req.body?.platform || '').trim().toLowerCase();
-  const rawStatus         = (req.body?.status || '').trim().toLowerCase();
-  const rawMissingEmailId = (req.body?.missingEmailId || '').trim(); // 🔥 NEW
+  try {
+    const rawHandle         = (req.body?.handle || '').trim();
+    const rawPlatformInput  = (req.body?.platform || '').trim().toLowerCase();
+    const rawStatus         = (req.body?.status || '').trim().toLowerCase();
+    const rawMissingEmailId = (req.body?.missingEmailId || '').trim();
+    const rawBrandId        = (req.body?.brandId || '').trim(); // optional, if you ever send it
 
-  // validate handle
-  if (!rawHandle) {
-    return res.status(400).json({
-      status: 'error',
-      message: 'handle is required',
-    });
-  }
-  const handle = normalizeHandle(rawHandle);
-  if (!HANDLE_RX.test(handle)) {
-    return res.status(400).json({
-      status: 'error',
-      message:
-        'Invalid handle format. It must start with "@" and contain letters, numbers, ".", "_" or "-"',
-    });
-  }
-
-  // validate platform
-  if (!rawPlatform || !PLATFORM_ENUM.has(rawPlatform)) {
-    return res.status(400).json({
-      status: 'error',
-      message: 'Invalid platform. Use "youtube", "instagram" or "tiktok".',
-    });
-  }
-
-  // validate status
-  if (!STATUS_ENUM.has(rawStatus)) {
-    return res.status(400).json({
-      status: 'error',
-      message: 'Invalid status. Use "invited" or "available".',
-    });
-  }
-
-  // base query (optionally you can add brandId here)
-  const query = { handle, platform: rawPlatform };
-
-  const doc = await Invitation.findOne(query);
-  if (!doc) {
-    return res.status(404).json({
-      status: 'error',
-      message: 'Invitation not found for given handle & platform.',
-    });
-  }
-
-  // 🔥 If missingEmailId was provided, validate and attach it
-  if (rawMissingEmailId) {
-    const me = await MissingEmail.findOne(
-      { missingEmailId: rawMissingEmailId },
-      'missingEmailId handle platform'
-    ).lean();
-
-    if (!me) {
+    // 1) Validate handle
+    if (!rawHandle) {
       return res.status(400).json({
         status: 'error',
-        message: 'Invalid missingEmailId. No MissingEmail record found.',
+        message: 'handle is required',
+      });
+    }
+    const handle = normalizeHandle(rawHandle);
+    if (!HANDLE_RX.test(handle)) {
+      return res.status(400).json({
+        status: 'error',
+        message:
+          'Invalid handle format. It must start with "@" and contain letters, numbers, ".", "_" or "-"',
       });
     }
 
-    // Optional: sanity check that handle & platform match (same creator)
-    /*
-    if (me.handle.toLowerCase() !== handle) {
+    // 2) Normalize + validate platform (support yt/ig/tt aliases)
+    const platform = PLATFORM_MAP.get(rawPlatformInput);
+    if (!platform || !PLATFORM_ENUM.has(platform)) {
       return res.status(400).json({
         status: 'error',
-        message: 'missingEmailId does not belong to this handle.',
+        message: 'Invalid platform. Use "youtube", "instagram" or "tiktok".',
       });
     }
-    */
 
-    doc.missingEmailId = me.missingEmailId;
+    // 3) Validate status
+    if (!STATUS_ENUM.has(rawStatus)) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Invalid status. Use "invited" or "available".',
+      });
+    }
+
+    // 4) Build query: handle + platform (+ optional brandId if provided)
+    const query = { handle, platform };
+    if (rawBrandId) {
+      query.brandId = rawBrandId;
+    }
+
+    const doc = await Invitation.findOne(query);
+    if (!doc) {
+      return res.status(404).json({
+        status: 'error',
+        message: 'Invitation not found for given handle & platform.',
+      });
+    }
+
+    // 5) If missingEmailId was provided, validate & link it
+    if (rawMissingEmailId) {
+      const me = await MissingEmail.findOne(
+        { missingEmailId: rawMissingEmailId },
+        'missingEmailId handle platform'
+      ).lean();
+
+      if (!me) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Invalid missingEmailId. No MissingEmail record found.',
+        });
+      }
+
+      // Optional sanity checks if you want to be strict:
+      // if (me.handle.toLowerCase() !== handle) { ... }
+      // if (me.platform !== 'youtube') { ... }
+
+      doc.missingEmailId = me.missingEmailId;
+    }
+
+    // 6) Update status
+    doc.status = rawStatus;
+    await doc.save();
+
+    return res.json({
+      status: 'success',
+      message: 'Invitation status updated.',
+      data: {
+        invitationId: doc.invitationId,
+        handle: doc.handle,
+        platform: doc.platform,
+        brandId: doc.brandId,
+        campaignId: doc.campaignId || null,
+        status: doc.status,
+        missingEmailId: doc.missingEmailId || null,
+        createdAt: doc.createdAt,
+        updatedAt: doc.updatedAt,
+      },
+    });
+  } catch (err) {
+    console.error('Error in updateInvitationStatus:', err);
+    return res.status(500).json({
+      status: 'error',
+      message: 'Internal server error',
+    });
   }
-
-  // update status
-  doc.status = rawStatus;
-  await doc.save();
-
-  return res.json({
-    status: 'success',
-    message: 'Invitation status updated.',
-    data: {
-      invitationId: doc.invitationId,
-      handle: doc.handle,
-      platform: doc.platform,
-      brandId: doc.brandId,
-      campaignId: doc.campaignId || null,      // 🔥 expose campaignId
-      status: doc.status,
-      missingEmailId: doc.missingEmailId || null,  // 🔥 return link
-      createdAt: doc.createdAt,
-      updatedAt: doc.updatedAt,
-    },
-  });
 };
-
 
 exports.listInvitations = async (req, res) => {
   const body = req.body || {};

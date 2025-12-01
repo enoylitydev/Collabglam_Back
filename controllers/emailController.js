@@ -6,8 +6,9 @@ const { EmailThread, EmailMessage, EmailTemplate } = require('../models/email');
 const Invitation = require('../models/NewInvitations');
 const MissingEmail = require('../models/MissingEmail');
 const Campaign = require('../models/campaign');
-const ChatRoom = require('../models/chat');  
+const ChatRoom = require('../models/chat');
 const { buildInvitationEmail } = require('../template/invitationTemplate');
+const { v4: uuidv4 } = require('uuid');
 
 // ---------- SES CLIENT (uses AWS keys if provided) ----------
 const ses = new SESClient({
@@ -17,9 +18,9 @@ const ses = new SESClient({
   credentials:
     process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY
       ? {
-          accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-          secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-        }
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+      }
       : undefined,
 });
 
@@ -406,9 +407,8 @@ exports.sendBrandToInfluencer = async (req, res) => {
     const fromAliasPretty = thread.brandDisplayAlias || thread.brandAliasEmail;
     const relayAlias = thread.brandAliasEmail;
 
-    const fromName = `${brand.name} via ${
-      process.env.PLATFORM_NAME || 'CollabGlam'
-    }`;
+    const fromName = `${brand.name} via ${process.env.PLATFORM_NAME || 'CollabGlam'
+      }`;
 
     const htmlBody = `<p>${body.replace(/\n/g, '<br/>')}</p>
       <hr/>
@@ -500,9 +500,8 @@ exports.sendInfluencerToBrand = async (req, res) => {
     const globalInfluencerAlias = thread.influencerAliasEmail; // influencer@collabglam.cloud
     const relayAlias = thread.brandAliasEmail;
 
-    const fromName = `${influencer.name || 'Influencer'} via ${
-      process.env.PLATFORM_NAME || 'CollabGlam'
-    }`;
+    const fromName = `${influencer.name || 'Influencer'} via ${process.env.PLATFORM_NAME || 'CollabGlam'
+      }`;
 
     const htmlBody = `<p>${body.replace(/\n/g, '<br/>')}</p>
       <hr/>
@@ -740,9 +739,8 @@ ${brand.name} team`;
     const fromAliasPretty = thread.brandDisplayAlias || thread.brandAliasEmail;
     const relayAlias = thread.brandAliasEmail;
 
-    const fromName = `${brand.name} via ${
-      process.env.PLATFORM_NAME || 'CollabGlam'
-    }`;
+    const fromName = `${brand.name} via ${process.env.PLATFORM_NAME || 'CollabGlam'
+      }`;
 
     await sendViaSES({
       fromAlias: fromAliasPretty,
@@ -854,7 +852,9 @@ exports.getInfluencerEmailListForBrand = async (req, res) => {
     const { brandId } = req.query;
 
     if (!brandId) {
-      return res.status(400).json({ error: 'brandId query param is required.' });
+      return res
+        .status(400)
+        .json({ error: 'brandId query param is required.' });
     }
 
     const brand = await findBrandByIdOrBrandId(brandId);
@@ -865,10 +865,9 @@ exports.getInfluencerEmailListForBrand = async (req, res) => {
     // NewInvitation stores brandId as a string (usually brand.brandId)
     const brandKey = brand.brandId || String(brand._id);
 
-    // Only invitations for this brand and in "invited" status
+    // 🔥 1) Remove status filter → return ALL invitations for this brand
     const invitations = await Invitation.find({
       brandId: brandKey,
-      status: 'available',
     }).lean();
 
     if (!invitations.length) {
@@ -876,7 +875,6 @@ exports.getInfluencerEmailListForBrand = async (req, res) => {
     }
 
     const influencers = [];
-    const seenEmails = new Set();
 
     for (const inv of invitations) {
       try {
@@ -894,9 +892,8 @@ exports.getInfluencerEmailListForBrand = async (req, res) => {
         }
 
         const email = recipientEmail.toLowerCase();
-        if (seenEmails.has(email)) continue;
-        seenEmails.add(email);
 
+        // 🔥 2) NO dedupe → one entry per invitation
         influencers.push({
           _id: influencer._id,
           influencerId: influencer.influencerId,
@@ -908,6 +905,8 @@ exports.getInfluencerEmailListForBrand = async (req, res) => {
           handle: inv.handle,
           platform: inv.platform,
           invitationId: inv.invitationId,
+          status: inv.status,      // optional, useful in UI
+          campaignId: inv.campaignId || null,
         });
       } catch (err) {
         const status = err?.statusCode || err?.status;
@@ -929,18 +928,14 @@ exports.getInfluencerEmailListForBrand = async (req, res) => {
           inv.invitationId,
           err
         );
-        return res
-          .status(500)
-          .json({ error: 'Internal server error' });
+        return res.status(500).json({ error: 'Internal server error' });
       }
     }
 
     return res.status(200).json({ influencers });
   } catch (err) {
     console.error('getInfluencerEmailListForBrand error:', err);
-    return res
-      .status(500)
-      .json({ error: 'Internal server error' });
+    return res.status(500).json({ error: 'Internal server error' });
   }
 };
 
@@ -1079,19 +1074,19 @@ exports.getCampaignInvitationPreview = async (req, res) => {
 
 exports.handleEmailInvitation = async (req, res) => {
   try {
-    const rawEmail     = (req.body?.email     || '').trim().toLowerCase();
-    const rawBrandId   = (req.body?.brandId   || '').trim();
-    const rawCampaignId= (req.body?.campaignId|| '').trim();
-    const rawHandle    = (req.body?.handle    || '').trim();
-    const rawPlatform  = (req.body?.platform  || '').trim();
+    const rawEmail = (req.body?.email || '').trim().toLowerCase();
+    const rawBrandId = (req.body?.brandId || '').trim();
+    const rawCampaignId = (req.body?.campaignId || '').trim();
+    const rawHandle = (req.body?.handle || '').trim();
+    const rawPlatform = (req.body?.platform || '').trim();
 
+    // 1) Basic validation
     if (!rawEmail) {
       return res.status(400).json({
         status: 'error',
         message: 'email is required',
       });
     }
-
     if (!rawBrandId) {
       return res.status(400).json({
         status: 'error',
@@ -1101,20 +1096,28 @@ exports.handleEmailInvitation = async (req, res) => {
 
     const email = rawEmail;
 
-    // 1) Brand (for brandName in response)
-    const brand = await Brand.findOne({ brandId: rawBrandId }, 'brandId name').lean();
+    // 2) Load brand for response context
+    const brand = await Brand.findOne(
+      { brandId: rawBrandId },
+      'brandId name'
+    ).lean();
+
     if (!brand) {
       return res.status(404).json({
         status: 'error',
         message: 'Brand not found for given brandId',
       });
     }
+
     const brandName = brand.name || rawBrandId;
 
-    // 2) See if an influencer account exists with this email
+    // 3) Check if influencer already exists by email
     const influencer = await Influencer.findOne({ email }).lean();
 
-    if (influencer && influencer.influencerId) {
+    // ─────────────────────────────────────────────
+    // CASE A: Existing influencer → ensure chat room
+    // ─────────────────────────────────────────────
+    if (influencer && influencer.influencerId && influencer.otpVerified) {
       const influencerId = influencer.influencerId;
       const influencerName =
         influencer.name ||
@@ -1122,24 +1125,66 @@ exports.handleEmailInvitation = async (req, res) => {
         influencer.email ||
         email;
 
-      // 🔎 Look for existing chat room between this brand and influencer
+      // Look for an existing 1:1 room between this brand & influencer
       let room = await ChatRoom.findOne({
         'participants.userId': { $all: [rawBrandId, influencerId] },
         'participants.2': { $exists: false }, // ensure only 2 participants
       });
 
-      // 🏗️ If no room exists, create one (same pattern as chatController.createRoom)
       if (!room) {
         const participants = [
-          { userId: rawBrandId,   name: brandName,       role: 'brand' },
-          { userId: influencerId, name: influencerName,  role: 'influencer' },
-        ].sort(sortParticipants);
+          { userId: rawBrandId, name: brandName, role: 'brand' },
+          { userId: influencerId, name: influencerName, role: 'influencer' },
+        ].sort((a, b) => (a.userId > b.userId ? 1 : -1)); // same sortParticipants logic
 
-        room = await ChatRoom.create({ participants });
+        try {
+          // IMPORTANT:
+          // If you keep a UNIQUE index on messages.messageId,
+          // either:
+          //  - fix the index as discussed (drop unique or partial unique), OR
+          //  - always create with at least one message with a unique messageId.
+          //
+          // If messages are optional, you can simply do:
+          //   room = await ChatRoom.create({ participants });
+          //
+          // If you want to avoid the null-messageId conflict, use a system message:
+          room = await ChatRoom.create({ participants });
+        } catch (err) {
+          // Handle race conditions / duplicate-key on messages.messageId gracefully
+          if (
+            err &&
+            err.code === 11000 &&
+            err.keyPattern &&
+            err.keyPattern['messages.messageId']
+          ) {
+            // Another process may have created the room or a message concurrently.
+            // Try to fetch the room again:
+            room = await ChatRoom.findOne({
+              'participants.userId': { $all: [rawBrandId, influencerId] },
+              'participants.2': { $exists: false },
+            });
+
+            if (!room) {
+              // Still no room – bubble the error so you can see it in logs
+              console.error('Duplicate key on messages.messageId and no room found:', err);
+              return res.status(500).json({
+                status: 'error',
+                message: 'Failed to create chat room (messages index conflict).',
+              });
+            }
+          } else {
+            console.error('Error creating chat room:', err);
+            return res.status(500).json({
+              status: 'error',
+              message: 'Failed to create chat room.',
+            });
+          }
+        }
       }
 
-      // ✅ Frontend: redirect to /brand/messages/<roomId>
+      // Success: existing influencer + chat room ready
       return res.json({
+        status: 'success',
         message: 'Existing influencer found, redirect to chat room.',
         isExistingInfluencer: true,
         influencerId,
@@ -1149,10 +1194,11 @@ exports.handleEmailInvitation = async (req, res) => {
       });
     }
 
-    // 3) No influencer account → ensure we have an Invitation for this creator
-    //    (so /brand/emails can use invitationId)
+    // ─────────────────────────────────────────────
+    // CASE B: No influencer account → prepare email invitation
+    // ─────────────────────────────────────────────
 
-    // We expect handle + platform in body for this case
+    // We now require handle + platform so we can tie an Invitation
     if (!rawHandle || !rawPlatform) {
       return res.status(400).json({
         status: 'error',
@@ -1160,6 +1206,7 @@ exports.handleEmailInvitation = async (req, res) => {
       });
     }
 
+    // Normalize handle
     const handle = normalizeHandle(rawHandle);
     if (!HANDLE_RX.test(handle)) {
       return res.status(400).json({
@@ -1169,6 +1216,7 @@ exports.handleEmailInvitation = async (req, res) => {
       });
     }
 
+    // Normalize platform with aliases
     const platform = PLATFORM_MAP.get(rawPlatform.toLowerCase());
     if (!platform) {
       return res.status(400).json({
@@ -1178,6 +1226,7 @@ exports.handleEmailInvitation = async (req, res) => {
       });
     }
 
+    // Find or create Invitation for (brandId, handle, platform)
     let invitation = await Invitation.findOne({
       brandId: rawBrandId,
       handle,
@@ -1185,7 +1234,7 @@ exports.handleEmailInvitation = async (req, res) => {
     });
 
     if (!invitation) {
-      // create new invitation with status=invited
+      // No invitation yet → create with status "invited"
       invitation = await Invitation.create({
         brandId: rawBrandId,
         handle,
@@ -1194,12 +1243,13 @@ exports.handleEmailInvitation = async (req, res) => {
         status: 'invited',
       });
     } else if (rawCampaignId && invitation.campaignId !== rawCampaignId) {
-      // update campaignId if provided
+      // Update existing invitation's campaignId if needed
       invitation.campaignId = rawCampaignId;
       await invitation.save();
     }
 
     return res.json({
+      status: 'success',
       message: 'Email invitation ready for this creator.',
       isExistingInfluencer: false,
       brandName,

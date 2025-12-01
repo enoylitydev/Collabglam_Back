@@ -616,27 +616,30 @@ exports.adminGetInfluencerList = async (req, res) => {
   }
 };
 
-
 exports.adminAddYouTubeEmail = async (req, res) => {
   const rawHandle = (req.body?.handle || '').trim();
   const email     = (req.body?.email  || '').trim();
-  const platform  = 'youtube'; // or derive / validate like you already do
+  const platform  = 'youtube'; // fixed
 
   if (!rawHandle || !email) {
-    return res.status(400).json({ status: 'error', message: 'handle and email are required' });
+    return res.status(400).json({
+      status: 'error',
+      message: 'handle and email are required',
+    });
   }
 
   const handle = rawHandle.startsWith('@')
     ? rawHandle.toLowerCase()
     : `@${rawHandle.toLowerCase()}`;
 
-  // 1) Upsert MissingEmail
+  // 1) Upsert MissingEmail in THIS DB
   let me = await MissingEmail.findOne({ handle, platform });
   const isExisting = !!me;
 
   if (!me) {
     me = await MissingEmail.create({
-      missingEmailId: crypto.randomUUID(), // or your uuidv4
+      // you can omit missingEmailId, schema default(uuidv4) will handle it
+      // missingEmailId: crypto.randomUUID(),
       handle,
       platform,
       email,
@@ -647,23 +650,7 @@ exports.adminAddYouTubeEmail = async (req, res) => {
     await me.save();
   }
 
-  // 2) (optional) Upsert Missing record & set isAvailable=1
-  let missing = await Missing.findOne({ handle, platform });
-  if (missing) {
-    if (missing.isAvailable !== 1) {
-      missing.isAvailable = 1;
-      await missing.save();
-    }
-  } else {
-    missing = await Missing.create({
-      missingId: crypto.randomUUID(),
-      handle,
-      platform,
-      isAvailable: 1,
-      note: null,
-      brandId: null, // or however you use it now
-    });
-  }
+  // 🔥 NO Missing logic here – that's in another DB / API.
 
   return res.json({
     status: isExisting ? 'exists' : 'saved',
@@ -671,7 +658,7 @@ exports.adminAddYouTubeEmail = async (req, res) => {
       ? 'Email updated for existing handle.'
       : 'Email saved successfully.',
     data: {
-      missingEmailId: me.missingEmailId, // 👈 THIS is what the frontend expects
+      missingEmailId: me.missingEmailId,  // frontend will use this
       email: me.email,
       handle: me.handle,
       platform: me.platform,
