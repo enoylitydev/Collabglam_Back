@@ -1263,3 +1263,296 @@ exports.handleEmailInvitation = async (req, res) => {
     });
   }
 };
+
+async function sendCampaignInvitationInternal(payload = {}) {
+  const {
+    brandId,
+    campaignId, // OPTIONAL
+    influencerId,
+    invitationId,
+    campaignLink,
+    compensation,
+    deliverables,
+    additionalNotes,
+    subject: customSubject,
+    body: customBody, // text the brand typed in the compose modal
+  } = payload;
+
+  // ✅ Only brandId is strictly required here
+  if (!brandId) {
+    const err = new Error('brandId is required.');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  // Still require at least influencerId or invitationId
+  if (!influencerId && !invitationId) {
+    const err = new Error('Either influencerId or invitationId is required.');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const brand = await findBrandByIdOrBrandId(brandId);
+  if (!brand) {
+    const err = new Error('Brand not found');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  // Resolve influencer + email (works for both normal influencers and invitations)
+  const { influencer, influencerName, recipientEmail } =
+    await resolveInfluencerAndEmail({ influencerId, invitationId, brand });
+
+  let subject = customSubject;
+  let htmlBody;
+  let textBody;
+
+  /* ────────────────────────────────────────────── */
+  /* PATH 1: Campaign-based invitation             */
+  /* ────────────────────────────────────────────── */
+  if (campaignId) {
+    const campaign = await findCampaignByIdOrCampaignsId(campaignId);
+    if (!campaign) {
+      const err = new Error('Campaign not found');
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const brandName = brand.name;
+
+    const campaignTitle =
+      campaign.productOrServiceName ||
+      campaign.campaignType ||
+      campaign.brandName ||
+      'Our Campaign';
+
+    const campaignObjective = campaign.goal || '';
+
+    let defaultDeliverables = '';
+    if (
+      Array.isArray(campaign.creativeBrief) &&
+      campaign.creativeBrief.length
+    ) {
+      defaultDeliverables = campaign.creativeBrief.join(', ');
+    } else if (campaign.creativeBriefText) {
+      defaultDeliverables = campaign.creativeBriefText;
+    } else {
+      defaultDeliverables = 'Content deliverables to be discussed with you.';
+    }
+    const finalDeliverables = deliverables || defaultDeliverables;
+
+    const finalCompensation =
+      compensation ||
+      'Compensation will be discussed based on your standard rates and the campaign scope.';
+
+    let timelineText = 'Flexible / To be discussed';
+    if (
+      campaign.timeline &&
+      campaign.timeline.startDate &&
+      campaign.timeline.endDate
+    ) {
+      const start = new Date(campaign.timeline.startDate);
+      const end = new Date(campaign.timeline.endDate);
+      const fmt = (d) =>
+        d.toLocaleDateString('en-US', {
+          day: '2-digit',
+          month: 'short',
+          year: 'numeric',
+        });
+      timelineText = `${fmt(start)} – ${fmt(end)}`;
+    }
+
+    const notes =
+      additionalNotes ||
+      campaign.additionalNotes ||
+      campaign.description ||
+      '';
+
+    const baseUrl = process.env.CAMPAIGN_BASE_URL || '';
+    const link =
+      campaignLink ||
+      (baseUrl
+        ? `${baseUrl.replace(/\/$/, '')}/campaigns/${campaign.campaignsId}`
+        : '#');
+
+    // Build full campaign invitation email
+    const templateResult = buildInvitationEmail({
+      brandName,
+      influencerName,
+      campaignTitle,
+      campaignObjective,
+      deliverables: finalDeliverables,
+      compensation: finalCompensation,
+      timeline: timelineText,
+      additionalNotes: notes,
+      campaignLink: link,
+    });
+
+    subject = subject || templateResult.subject;
+
+    // If the brand typed custom text, prepend it above "Campaign Details"
+    if (customBody && customBody.trim()) {
+      const customHtmlBlock = `<p>${customBody
+        .split('\n')
+        .map((line) => line.trim())
+        .join('<br/>')}</p><br/>`;
+
+      const marker =
+        '<h3 style="margin-top:24px;margin-bottom:8px;font-size:16px;color:#111827;">Campaign Details</h3>';
+
+      if (templateResult.htmlBody.includes(marker)) {
+        htmlBody = templateResult.htmlBody.replace(
+          marker,
+          `${customHtmlBlock}${marker}`
+        );
+      } else {
+        // Fallback – just prepend the custom block
+        htmlBody = `${customHtmlBlock}${templateResult.htmlBody}`;
+      }
+
+      // Plain text: prepend the custom note + template text
+      textBody = `${customBody.trim()}\n\n${templateResult.textBody}`;
+    } else {
+      // No custom body → just use the full template
+      htmlBody = templateResult.htmlBody;
+      textBody = templateResult.textBody;
+    }
+  } else {
+    /* ──────────────────────────────────────────── */
+    /* PATH 2: NO CAMPAIGN (generic collab email)  */
+    /* ──────────────────────────────────────────── */
+
+    // Subject: custom if provided, else a nice default
+    subject =
+      subject ||
+      `Collaboration opportunity with ${brand.name}`;
+
+    // If brand wrote a custom body in the compose modal, use it as-is
+    // (apart from footer), to avoid surprising them.
+    if (customBody && customBody.trim()) {
+      const safeBody = customBody.trim();
+
+      htmlBody = `<p>${safeBody
+        .split('\n')
+        .map((line) => line.trim())
+        .join('<br/>')}</p>
+        <hr/>
+        <p style="font-size:12px;color:#666;">
+          Sent via ${process.env.PLATFORM_NAME || 'CollabGlam'} – your email is hidden.
+        </p>`;
+
+      textBody = safeBody;
+    } else {
+      // Auto-generate a clean, generic collab email using optional fields
+      const lines = [];
+
+      lines.push(`Hi ${influencerName || 'there'},`);
+      lines.push('');
+      lines.push(
+        `${brand.name} would love to explore a collaboration with you on upcoming content.`
+      );
+
+      const deliverablesText = Array.isArray(deliverables)
+        ? deliverables.join(', ')
+        : (deliverables || '');
+
+      const compText = compensation || '';
+      const notesText = additionalNotes || '';
+      const linkText = campaignLink || '';
+
+      if (deliverablesText) {
+        lines.push('');
+        lines.push('Here’s what we have in mind:');
+        lines.push(deliverablesText);
+      }
+
+      if (compText) {
+        lines.push('');
+        lines.push(`Compensation: ${compText}`);
+      }
+
+      if (linkText) {
+        lines.push('');
+        lines.push(`You can find more details here: ${linkText}`);
+      }
+
+      if (notesText) {
+        lines.push('');
+        lines.push(notesText);
+      }
+
+      lines.push('');
+      lines.push(
+        'If this sounds interesting, just hit reply and we can go over the details together.'
+      );
+      lines.push('');
+      lines.push('Best,');
+      lines.push(`${brand.name} team`);
+
+      const safeBody = lines.join('\n');
+
+      htmlBody = `<p>${safeBody
+        .split('\n')
+        .map((line) => line.trim())
+        .join('<br/>')}</p>
+        <hr/>
+        <p style="font-size:12px;color:#666;">
+          Sent via ${process.env.PLATFORM_NAME || 'CollabGlam'} – your email is hidden.
+        </p>`;
+
+      textBody = safeBody;
+    }
+  }
+
+  // Create / reuse thread + send via SES
+  const thread = await getOrCreateThread({
+    brand,
+    influencer,
+    createdBy: 'brand',
+  });
+
+  const fromAliasPretty = thread.brandDisplayAlias || thread.brandAliasEmail;
+  const relayAlias = thread.brandAliasEmail;
+
+  const fromName = `${brand.name} via ${process.env.PLATFORM_NAME || 'CollabGlam'
+    }`;
+
+  await sendViaSES({
+    fromAlias: fromAliasPretty,
+    fromName,
+    toRealEmail: recipientEmail,
+    subject,
+    htmlBody,
+    textBody,
+    replyTo: relayAlias,
+  });
+
+  const messageDoc = await EmailMessage.create({
+    thread: thread._id,
+    direction: 'brand_to_influencer',
+    fromUser: brand._id,
+    fromUserModel: 'Brand',
+    fromAliasEmail: fromAliasPretty,
+    toRealEmail: recipientEmail,
+    subject,
+    htmlBody,
+    textBody,
+    template: null,
+  });
+
+  return {
+    success: true,
+    threadId: thread._id,
+    messageId: messageDoc._id,
+    recipientEmail,
+    brandAliasEmail: thread.brandAliasEmail,
+    influencerAliasEmail: thread.influencerAliasEmail,
+    brandDisplayAlias: thread.brandDisplayAlias,
+    influencerDisplayAlias: thread.influencerDisplayAlias,
+    subject,
+    campaignId: campaignId || null,
+  };
+}
+
+// export internal helper so other controllers (admin) can use it
+exports._sendCampaignInvitationInternal = sendCampaignInvitationInternal;

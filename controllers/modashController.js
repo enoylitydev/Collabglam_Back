@@ -140,7 +140,7 @@ async function modashRequest({ method, path, query, body }) {
       if (!res.ok) {
         const err = new Error(
           (json && (json.message || json.error)) ||
-            `Modash ${res.status} ${res.statusText}`
+          `Modash ${res.status} ${res.statusText}`
         );
         err.status = res.status;
         err.response = json || undefined;
@@ -477,10 +477,10 @@ function normalizeSearchItem(item, platform) {
   const userId =
     cleanStr(
       (item && item.userId) ||
-        (src && src.userId) ||
-        (src && src.id) ||
-        (src && src.channelId) ||
-        (src && src.profileId)
+      (src && src.userId) ||
+      (src && src.id) ||
+      (src && src.channelId) ||
+      (src && src.profileId)
     ) || undefined;
 
   return {
@@ -497,25 +497,25 @@ function normalizeSearchItem(item, platform) {
     followers:
       toNum(
         src &&
-          (src.followers ||
-            src.followerCount ||
-            (src.stats && src.stats.followers))
+        (src.followers ||
+          src.followerCount ||
+          (src.stats && src.stats.followers))
       ) || 0,
     engagementRate: toNum(
       src &&
-        (src.engagementRate ||
-          (src.stats && src.stats.engagementRate))
+      (src.engagementRate ||
+        (src.stats && src.stats.engagementRate))
     ) || 0,
     engagements: toNum(
       src &&
-        (src.engagements ||
-          (src.stats && (src.stats.avgEngagements || src.stats.avgLikes)))
+      (src.engagements ||
+        (src.stats && (src.stats.avgEngagements || src.stats.avgLikes)))
     ),
     averageViews: toNum(
       src &&
-        (src.averageViews ||
-          (src.stats && src.stats.avgViews) ||
-          src.avgViews)
+      (src.averageViews ||
+        (src.stats && src.stats.avgViews) ||
+        src.avgViews)
     ),
     picture:
       (src &&
@@ -680,27 +680,76 @@ async function frontendUsers(req, res) {
         });
 
         const users = Array.isArray(data && data.users) ? data.users : [];
+
         for (const raw of users) {
-          const username = raw.username || raw.handle || '';
-          const u = {
-            platform: p,
-            userId: raw.userId,
-            username,
-            handle: raw.handle,
-            fullname: raw.fullname,
-            followers: raw.followers,
-            isVerified: !!raw.isVerified,
-            picture: raw.picture,
-            url:
+          // Try to reuse any URL that Modash gives us
+          const rawUrl = cleanStr(
+            raw.url || raw.channelUrl || raw.profileUrl || ''
+          );
+
+          // Derive handle from Modash data or from URL
+          const handleFromUrl = extractYouTubeHandleFromUrl(rawUrl);
+          const baseHandle = cleanStr(
+            raw.handle ||
+            raw.username ||
+            handleFromUrl ||
+            ''
+          );
+          const username = baseHandle.replace(/^@/, ''); // normalized handle
+          const handle = username;
+
+          // Engagement metrics (will be undefined if Modash /users doesn't provide them;
+          // Express/JSON will simply omit undefined keys)
+          const engagementRate = toNum(
+            raw.engagementRate ||
+              (raw.stats && raw.stats.engagementRate)
+          );
+
+          const engagements = toNum(
+            raw.engagements ||
+              (raw.stats &&
+                (raw.stats.avgEngagements || raw.stats.avgLikes))
+          );
+
+          const averageViews = toNum(
+            raw.averageViews ||
+              (raw.stats && raw.stats.avgViews)
+          );
+
+          // Final URL: prefer Modash URL, otherwise build from handle
+          let url = rawUrl;
+          if (!url && username) {
+            url =
               p === 'instagram'
                 ? `https://instagram.com/${username}`
                 : p === 'tiktok'
                 ? `https://www.tiktok.com/@${username}`
-                : `https://www.youtube.com/@${username}`,
+                : `https://www.youtube.com/@${username}`;
+          }
+
+          const u = {
+            platform: p,
+            userId: raw.userId,
+            username,                  // always our normalized handle
+            handle,                    // same as username for frontend
+            fullname: raw.fullname,
+            followers: toNum(raw.followers),
+            engagementRate,            // NEW
+            engagements,               // NEW (avg engagements / likes)
+            averageViews,              // NEW
+            isVerified: !!raw.isVerified,
+            isPrivate: !!raw.isPrivate,
+            picture: raw.picture,
+            url: url || undefined,     // avoid "https://www.youtube.com/@"
           };
 
+          // If we still don't have username OR URL, skip this broken item
+          if (!u.username && !u.url) {
+            continue;
+          }
+
           const s = scoreForQuery(u, q);
-          collected.push(Object.assign({ __score: s }, u));
+          collected.push({ ...u, __score: s });
         }
       }
     }
@@ -745,11 +794,7 @@ async function frontendUsers(req, res) {
       });
     }
 
-    const safeResults = results.map((r) => {
-      const clone = Object.assign({}, r);
-      delete clone.__score;
-      return clone;
-    });
+    const safeResults = results.map(({ __score, ...rest }) => rest);
 
     return res.json({ results: safeResults });
   } catch (err) {

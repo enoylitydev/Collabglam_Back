@@ -307,8 +307,6 @@ exports.listInvitations = async (req, res) => {
   }
 
   // status filter (optional)
-  //  - "invited" or "available" → filter
-  //  - "all" or empty → no filter (show *both* invited + available)
   if (rawStatus && rawStatus !== 'all') {
     if (!STATUS_ENUM.has(rawStatus)) {
       return res.status(400).json({
