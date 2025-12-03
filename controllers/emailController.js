@@ -116,9 +116,14 @@ async function getOrCreateThread({ brand, influencer, createdBy }) {
     }
   }
 
-  // Global influencer alias (same for all)
-  const influencerGlobalAlias = `influencer@${process.env.EMAIL_RELAY_DOMAIN || 'collabglam.cloud'}`;
+  // config/email.js (or top of emailController.js)
+  const RELAY_DOMAIN = process.env.EMAIL_RELAY_DOMAIN;
+  if (!RELAY_DOMAIN) {
+    throw new Error('EMAIL_RELAY_DOMAIN is not set');
+  }
 
+  // in getOrCreateThread:
+  const influencerGlobalAlias = `influencer@${RELAY_DOMAIN}`;
   thread = await EmailThread.create({
     brand: brand._id,
     influencer: influencer._id,
