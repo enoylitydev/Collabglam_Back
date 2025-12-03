@@ -12,7 +12,7 @@ const { v4: uuidv4 } = require('uuid');
 
 // ---------- SES CLIENT (uses AWS keys if provided) ----------
 const ses = new SESClient({
-  region: process.env.AWS_REGION || 'ap-south-1',
+  region: process.env.AWS_REGION || 'ap-east-1',
   // If running on Lambda/EC2 with IAM role, you can omit credentials.
   // Here we *optionally* wire env keys for local/dev.
   credentials:
