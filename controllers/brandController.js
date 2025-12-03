@@ -410,8 +410,8 @@ exports.register = async (req, res) => {
       return res.status(400).json({ message: 'Brand name already taken' });
     }
 
-    // ✅ Generate brand alias email from brand name: brandname@collabglam.cloud
-    // ✅ Generate brand alias email from brand name: brandname@collabglam.cloud
+    // ✅ Generate brand alias email from brand name: brandname@collabglam.com
+    // ✅ Generate brand alias email from brand name: brandname@collabglam.com
     const brandAliasEmail = EmailThread.generateAliasEmail(name);
 
     // HARD GUARD: never proceed with a falsy alias
