@@ -90,7 +90,7 @@ emailThreadSchema.index({ brand: 1, influencer: 1 }, { unique: true });
 
 emailThreadSchema.statics.generateAliasEmail = function (displayName) {
   const slug = slugifyName(displayName); // e.g. "Adidas Originals" -> "adidasoriginals"
-  const domain = process.env.EMAIL_RELAY_DOMAIN || 'collabglam.com';
+  const domain = process.env.EMAIL_RELAY_DOMAIN || 'mail.collabglam.com';
   return `${slug}@${domain}`;
 };
 
