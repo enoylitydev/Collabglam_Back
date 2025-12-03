@@ -8,7 +8,8 @@ const ApplyCampaign = require('../models/applyCampaign');
 const Contract = require('../models/contract');
 const {
   handleSendDisputeCreated,
-  handleSendDisputeResolved
+  handleSendDisputeResolved,
+  handleSendDisputeAgainstYou
 } = require('../emails/disputeEmailController');
 
 // ---- STATUS CONFIG & HELPERS ----
@@ -58,6 +59,24 @@ function normalizeStatusInput(raw, { allowZeroAll = false } = {}) {
   if (ALLOWED_STATUSES.has(s)) return s;
 
   return null;
+}
+
+/**
+ * Build search $or array for campaign searching.
+ */
+function buildSearchOr(term) {
+  const or = [
+    { brandName: { $regex: term, $options: 'i' } },
+    { productOrServiceName: { $regex: term, $options: 'i' } },
+    { description: { $regex: term, $options: 'i' } },
+    { 'categories.subcategoryName': { $regex: term, $options: 'i' } },
+    { 'categories.categoryName': { $regex: term, $options: 'i' } }
+  ];
+  const num = Number(term);
+  if (!isNaN(num)) {
+    or.push({ budget: { $lte: num } });
+  }
+  return or;
 }
 
 // ----------------- ID / MODEL HELPERS -----------------
@@ -157,7 +176,7 @@ exports.brandCreateDispute = async (req, res) => {
       return res.status(404).json({ message: 'Brand not found' });
     }
 
-    // optionally, ensure influencer exists
+    // ensure influencer exists
     const influencer = await Influencer.findOne({
       influencerId: String(influencerId)
     }).lean();
@@ -167,8 +186,9 @@ exports.brandCreateDispute = async (req, res) => {
 
     // validate campaign belongs to this brand (if provided)
     let linkedCampaignId = null;
+    let camp = null;
     if (campaignId) {
-      const camp = await Campaign.findOne({
+      camp = await Campaign.findOne({
         campaignsId: campaignId,
         brandId: String(brandId)
       }).lean();
@@ -193,6 +213,19 @@ exports.brandCreateDispute = async (req, res) => {
         userName: brand.name,
         ticketId: dispute.disputeId,
         category: dispute.subject
+      });
+    }
+
+    // Notify influencer that a dispute has been raised against them
+    if (influencer.email) {
+      await handleSendDisputeAgainstYou({
+        email: influencer.email,
+        userName: influencer.name,
+        ticketId: dispute.disputeId,
+        category: dispute.subject,
+        raisedBy: brand.name,
+        raisedByRole: 'Brand',
+        campaignName: linkedCampaignId ? (camp?.productOrServiceName || '') : ''
       });
     }
 
@@ -253,33 +286,95 @@ exports.brandList = async (req, res) => {
     const total = await Dispute.countDocuments(filter);
     const rows = await Dispute.find(filter)
       .select(
-        'disputeId subject description status campaignId brandId influencerId assignedTo comments createdAt updatedAt'
+        'disputeId subject description status campaignId brandId influencerId assignedTo comments createdAt updatedAt createdBy'
       )
       .sort({ createdAt: -1 })
       .skip((p - 1) * l)
       .limit(l)
       .lean();
 
-    // Enrich with campaign name
+    // Add quick "who raised it" info
+    const rowsWithRole = rows.map(r => ({
+      ...r,
+      raisedByRole: r.createdBy?.role || null,
+      raisedById: r.createdBy?.id || null
+    }));
+
+    // Enrich with influencer name + campaign name + raisedBy/raisedAgainst
     try {
-      const campaignIds = Array.from(
-        new Set(rows.map(r => r.campaignId).filter(Boolean))
+      const influencerIds = Array.from(
+        new Set(rowsWithRole.map(r => r.influencerId).filter(Boolean))
       ).map(String);
 
-      const campaigns = campaignIds.length
-        ? await Campaign.find({ campaignsId: { $in: campaignIds } })
-            .select('campaignsId productOrServiceName')
-            .lean()
-        : [];
+      const campaignIds = Array.from(
+        new Set(rowsWithRole.map(r => r.campaignId).filter(Boolean))
+      ).map(String);
 
+      const [influencers, campaigns] = await Promise.all([
+        influencerIds.length
+          ? Influencer.find({ influencerId: { $in: influencerIds } })
+              .select('influencerId name')
+              .lean()
+          : [],
+        campaignIds.length
+          ? Campaign.find({ campaignsId: { $in: campaignIds } })
+              .select('campaignsId productOrServiceName')
+              .lean()
+          : []
+      ]);
+
+      const infMap = new Map(
+        (influencers || []).map(i => [String(i.influencerId), i.name])
+      );
       const cmap = new Map(
         (campaigns || []).map(c => [String(c.campaignsId), c.productOrServiceName])
       );
 
-      const enriched = rows.map(r => ({
-        ...r,
-        campaignName: r.campaignId ? cmap.get(String(r.campaignId)) || null : null
-      }));
+      const enriched = rowsWithRole.map(r => {
+        const campaignName = r.campaignId
+          ? cmap.get(String(r.campaignId)) || null
+          : null;
+
+        const role = r.raisedByRole;
+        let raisedBy = null;
+        let raisedAgainst = null;
+
+        if (role === 'Brand') {
+          // Brand (viewer) raised it
+          raisedBy = {
+            role: 'Brand',
+            id: r.brandId,
+            name: brand.name || null
+          };
+          raisedAgainst = {
+            role: 'Influencer',
+            id: r.influencerId,
+            name: infMap.get(String(r.influencerId)) || null
+          };
+        } else if (role === 'Influencer') {
+          // Influencer raised it against this brand
+          raisedBy = {
+            role: 'Influencer',
+            id: r.influencerId,
+            name: infMap.get(String(r.influencerId)) || null
+          };
+          raisedAgainst = {
+            role: 'Brand',
+            id: r.brandId,
+            name: brand.name || null
+          };
+        }
+
+        const viewerIsRaiser = role === 'Brand';
+
+        return {
+          ...r,
+          campaignName,
+          raisedBy,
+          raisedAgainst,
+          viewerIsRaiser
+        };
+      });
 
       return res.status(200).json({
         page: p,
@@ -288,13 +383,15 @@ exports.brandList = async (req, res) => {
         totalPages: Math.ceil(total / l),
         disputes: enriched
       });
-    } catch {
+    } catch (e) {
+      console.error('Error enriching brandList:', e);
+      // Fallback: still return raisedByRole info
       return res.status(200).json({
         page: p,
         limit: l,
         total,
         totalPages: Math.ceil(total / l),
-        disputes: rows
+        disputes: rowsWithRole
       });
     }
   } catch (err) {
@@ -326,20 +423,59 @@ exports.brandGetById = async (req, res) => {
       return res.status(403).json({ message: 'Forbidden' });
     }
 
-    // Enrich with campaign name
+    // Enrich with campaign name + who raised against whom
     try {
-      if (d.campaignId) {
-        const c = await Campaign.findOne({
-          campaignsId: d.campaignId
-        })
-          .select('campaignsId productOrServiceName')
-          .lean();
-        d.campaignName = c?.productOrServiceName || null;
+      const [campaign, influencer] = await Promise.all([
+        d.campaignId
+          ? Campaign.findOne({ campaignsId: d.campaignId })
+              .select('campaignsId productOrServiceName')
+              .lean()
+          : null,
+        d.influencerId
+          ? Influencer.findOne({ influencerId: d.influencerId })
+              .select('influencerId name')
+              .lean()
+          : null
+      ]);
+
+      d.campaignName = campaign?.productOrServiceName || null;
+
+      const influencerName = influencer?.name || null;
+      const raisedByRole = d.createdBy?.role || null;
+
+      if (raisedByRole === 'Brand') {
+        d.raisedBy = {
+          role: 'Brand',
+          id: d.brandId,
+          name: brand.name || null
+        };
+        d.raisedAgainst = {
+          role: 'Influencer',
+          id: d.influencerId,
+          name: influencerName
+        };
+      } else if (raisedByRole === 'Influencer') {
+        d.raisedBy = {
+          role: 'Influencer',
+          id: d.influencerId,
+          name: influencerName
+        };
+        d.raisedAgainst = {
+          role: 'Brand',
+          id: d.brandId,
+          name: brand.name || null
+        };
       } else {
-        d.campaignName = null;
+        d.raisedBy = null;
+        d.raisedAgainst = null;
       }
-    } catch {
-      d.campaignName = null;
+
+      d.raisedByRole = raisedByRole;
+      d.raisedById = d.createdBy?.id || null;
+      d.viewerIsRaiser = raisedByRole === 'Brand';
+    } catch (e) {
+      console.error('Error enriching brandGetById:', e);
+      d.campaignName = d.campaignName || null;
     }
 
     return res.status(200).json({ dispute: d });
@@ -439,8 +575,9 @@ exports.influencerCreateDispute = async (req, res) => {
 
     // validate campaign belongs to that brand (if provided)
     let linkedCampaignId = null;
+    let camp = null;
     if (campaignId) {
-      const camp = await Campaign.findOne({
+      camp = await Campaign.findOne({
         campaignsId: campaignId,
         brandId: String(brandId)
       }).lean();
@@ -468,6 +605,19 @@ exports.influencerCreateDispute = async (req, res) => {
       });
     }
 
+    // Notify brand that a dispute has been raised against them
+    if (brand.email) {
+      await handleSendDisputeAgainstYou({
+        email: brand.email,
+        userName: brand.name,
+        ticketId: dispute.disputeId,
+        category: dispute.subject,
+        raisedBy: influencer.name,
+        raisedByRole: 'Influencer',
+        campaignName: linkedCampaignId ? (camp?.productOrServiceName || '') : ''
+      });
+    }
+
     return res
       .status(201)
       .json({ message: 'Dispute created', disputeId: dispute.disputeId });
@@ -486,7 +636,7 @@ exports.influencerList = async (req, res) => {
       limit = 10,
       status,
       search = '',
-      appliedBy
+      appliedBy // optional: "brand" | "influencer"
     } = req.body || {};
 
     if (!influencerId) {
@@ -503,6 +653,7 @@ exports.influencerList = async (req, res) => {
     const p = Math.max(1, parseInt(page, 10) || 1);
     const l = Math.min(100, Math.max(1, parseInt(limit, 10) || 10));
 
+    // Base filter: all disputes where this influencer is involved
     const filter = {
       influencerId: String(influencerId)
     };
@@ -517,48 +668,115 @@ exports.influencerList = async (req, res) => {
       filter.$or = [{ subject: re }, { description: re }];
     }
 
+    // Optional filter by who raised the dispute
     if (appliedBy && typeof appliedBy === 'string') {
       const role = String(appliedBy).toLowerCase();
-      if (role === 'brand') filter['createdBy.role'] = 'Brand';
-      if (role === 'influencer') filter['createdBy.role'] = 'Influencer';
-    }
 
-    // If no appliedBy specified → only disputes created by this influencer
-    if (!appliedBy) {
-      filter['createdBy.role'] = 'Influencer';
-      filter['createdBy.id'] = String(influencerId);
+      if (role === 'brand') {
+        // Raised against me (by brand)
+        filter['createdBy.role'] = 'Brand';
+      }
+
+      if (role === 'influencer') {
+        // Raised by me
+        filter['createdBy.role'] = 'Influencer';
+        filter['createdBy.id'] = String(influencerId);
+      }
     }
+    // If no appliedBy → influencer sees all disputes involving them (both directions)
 
     const total = await Dispute.countDocuments(filter);
     const rows = await Dispute.find(filter)
       .select(
-        'disputeId subject description status campaignId brandId influencerId assignedTo comments createdAt updatedAt'
+        'disputeId subject description status campaignId brandId influencerId assignedTo comments createdAt updatedAt createdBy'
       )
       .sort({ createdAt: -1 })
       .skip((p - 1) * l)
       .limit(l)
       .lean();
 
-    // Enrich with campaign name
+    // Add quick "who raised it" info
+    const rowsWithRole = rows.map(r => ({
+      ...r,
+      raisedByRole: r.createdBy?.role || null,
+      raisedById: r.createdBy?.id || null
+    }));
+
+    // Enrich with brand name + campaign name + raisedBy/raisedAgainst
     try {
-      const campaignIds = Array.from(
-        new Set(rows.map(r => r.campaignId).filter(Boolean))
+      const brandIds = Array.from(
+        new Set(rowsWithRole.map(r => r.brandId).filter(Boolean))
       ).map(String);
 
-      const campaigns = campaignIds.length
-        ? await Campaign.find({ campaignsId: { $in: campaignIds } })
-            .select('campaignsId productOrServiceName')
-            .lean()
-        : [];
+      const campaignIds = Array.from(
+        new Set(rowsWithRole.map(r => r.campaignId).filter(Boolean))
+      ).map(String);
 
+      const [brands, campaigns] = await Promise.all([
+        brandIds.length
+          ? Brand.find({ brandId: { $in: brandIds } })
+              .select('brandId name')
+              .lean()
+          : [],
+        campaignIds.length
+          ? Campaign.find({ campaignsId: { $in: campaignIds } })
+              .select('campaignsId productOrServiceName')
+              .lean()
+          : []
+      ]);
+
+      const brandMap = new Map(
+        (brands || []).map(b => [String(b.brandId), b.name])
+      );
       const cmap = new Map(
         (campaigns || []).map(c => [String(c.campaignsId), c.productOrServiceName])
       );
 
-      const enriched = rows.map(r => ({
-        ...r,
-        campaignName: r.campaignId ? cmap.get(String(r.campaignId)) || null : null
-      }));
+      const enriched = rowsWithRole.map(r => {
+        const campaignName = r.campaignId
+          ? cmap.get(String(r.campaignId)) || null
+          : null;
+
+        const role = r.raisedByRole;
+        let raisedBy = null;
+        let raisedAgainst = null;
+
+        if (role === 'Influencer') {
+          // Influencer (viewer) raised it
+          raisedBy = {
+            role: 'Influencer',
+            id: r.influencerId,
+            name: influencer.name || null
+          };
+          raisedAgainst = {
+            role: 'Brand',
+            id: r.brandId,
+            name: brandMap.get(String(r.brandId)) || null
+          };
+        } else if (role === 'Brand') {
+          // Brand raised it against this influencer
+          raisedBy = {
+            role: 'Brand',
+            id: r.brandId,
+            name: brandMap.get(String(r.brandId)) || null
+          };
+          raisedAgainst = {
+            role: 'Influencer',
+            id: r.influencerId,
+            name: influencer.name || null
+          };
+        }
+
+        const viewerIsRaiser = role === 'Influencer';
+
+        return {
+          ...r,
+          campaignName,
+          raisedBy,
+          raisedAgainst,
+          viewerIsRaiser
+        };
+      });
 
       return res.status(200).json({
         page: p,
@@ -567,13 +785,15 @@ exports.influencerList = async (req, res) => {
         totalPages: Math.ceil(total / l),
         disputes: enriched
       });
-    } catch {
+    } catch (e) {
+      console.error('Error enriching influencerList:', e);
+      // Fallback: still return raisedByRole info
       return res.status(200).json({
         page: p,
         limit: l,
         total,
         totalPages: Math.ceil(total / l),
-        disputes: rows
+        disputes: rowsWithRole
       });
     }
   } catch (err) {
@@ -609,20 +829,59 @@ exports.influencerGetById = async (req, res) => {
       return res.status(403).json({ message: 'Forbidden' });
     }
 
-    // Enrich with campaign name
+    // Enrich with campaign name + who raised against whom
     try {
-      if (d.campaignId) {
-        const c = await Campaign.findOne({
-          campaignsId: d.campaignId
-        })
-          .select('campaignsId productOrServiceName')
-          .lean();
-        d.campaignName = c?.productOrServiceName || null;
+      const [campaign, brand] = await Promise.all([
+        d.campaignId
+          ? Campaign.findOne({ campaignsId: d.campaignId })
+              .select('campaignsId productOrServiceName')
+              .lean()
+          : null,
+        d.brandId
+          ? Brand.findOne({ brandId: d.brandId })
+              .select('brandId name')
+              .lean()
+          : null
+      ]);
+
+      d.campaignName = campaign?.productOrServiceName || null;
+
+      const brandName = brand?.name || null;
+      const raisedByRole = d.createdBy?.role || null;
+
+      if (raisedByRole === 'Influencer') {
+        d.raisedBy = {
+          role: 'Influencer',
+          id: d.influencerId,
+          name: influencer.name || null
+        };
+        d.raisedAgainst = {
+          role: 'Brand',
+          id: d.brandId,
+          name: brandName
+        };
+      } else if (raisedByRole === 'Brand') {
+        d.raisedBy = {
+          role: 'Brand',
+          id: d.brandId,
+          name: brandName
+        };
+        d.raisedAgainst = {
+          role: 'Influencer',
+          id: d.influencerId,
+          name: influencer.name || null
+        };
       } else {
-        d.campaignName = null;
+        d.raisedBy = null;
+        d.raisedAgainst = null;
       }
-    } catch {
-      d.campaignName = null;
+
+      d.raisedByRole = raisedByRole;
+      d.raisedById = d.createdBy?.id || null;
+      d.viewerIsRaiser = raisedByRole === 'Influencer';
+    } catch (e) {
+      console.error('Error enriching influencerGetById:', e);
+      d.campaignName = d.campaignName || null;
     }
 
     return res.status(200).json({ dispute: d });
@@ -720,12 +979,44 @@ exports.adminGetById = async (req, res) => {
           ? Campaign.findOne({ campaignsId: d.campaignId })
               .select('campaignsId productOrServiceName')
               .lean()
-          : null,
+          : null
       ]);
 
       d.brandName = b?.name || null;
       d.influencerName = inf?.name || null;
       d.campaignName = camp?.productOrServiceName || null;
+
+      const raisedByRole = d.createdBy?.role || null;
+
+      if (raisedByRole === 'Brand') {
+        d.raisedBy = {
+          role: 'Brand',
+          id: d.brandId,
+          name: b?.name || null
+        };
+        d.raisedAgainst = {
+          role: 'Influencer',
+          id: d.influencerId,
+          name: inf?.name || null
+        };
+      } else if (raisedByRole === 'Influencer') {
+        d.raisedBy = {
+          role: 'Influencer',
+          id: d.influencerId,
+          name: inf?.name || null
+        };
+        d.raisedAgainst = {
+          role: 'Brand',
+          id: d.brandId,
+          name: b?.name || null
+        };
+      } else {
+        d.raisedBy = null;
+        d.raisedAgainst = null;
+      }
+
+      d.raisedByRole = raisedByRole;
+      d.raisedById = d.createdBy?.id || null;
     } catch (e) {
       console.error('Error enriching adminGetById:', e);
       d.brandName = d.brandName || null;
@@ -879,14 +1170,19 @@ exports.adminList = async (req, res) => {
         (campaigns || []).map(c => [String(c.campaignsId), c.productOrServiceName])
       );
 
-      const enriched = rows.map(r => ({
-        ...r,
-        brandName: brandMap.get(String(r.brandId)) || null,
-        influencerName: infMap.get(String(r.influencerId)) || null,
-        campaignName: r.campaignId
-          ? campMap.get(String(r.campaignId)) || null
-          : null
-      }));
+      const enriched = rows.map(r => {
+        const raisedByRole = r.createdBy?.role || null;
+        return {
+          ...r,
+          brandName: brandMap.get(String(r.brandId)) || null,
+          influencerName: infMap.get(String(r.influencerId)) || null,
+          campaignName: r.campaignId
+            ? campMap.get(String(r.campaignId)) || null
+            : null,
+          raisedByRole,
+          raisedById: r.createdBy?.id || null
+        };
+      });
 
       return res.status(200).json({
         page: p,
@@ -895,7 +1191,8 @@ exports.adminList = async (req, res) => {
         totalPages: Math.ceil(total / l),
         disputes: enriched
       });
-    } catch {
+    } catch (e) {
+      console.error('Error enriching adminList:', e);
       return res.status(200).json({
         page: p,
         limit: l,
@@ -1029,6 +1326,7 @@ exports.adminAssign = async (req, res) => {
   }
 };
 
+// Influencer campaigns for dispute creation
 exports.influencerCampaignsForDispute = async (req, res) => {
   const { influencerId, search, page = 1, limit = 10 } = req.body || {};
 
@@ -1095,7 +1393,7 @@ exports.influencerCampaignsForDispute = async (req, res) => {
 
     if (typeof search === 'string' && search.trim()) {
       const term = search.trim();
-      filter.$or = buildSearchOr(term); // reuses your existing helper
+      filter.$or = buildSearchOr(term);
     }
 
     // Only fetch the minimal fields we need
@@ -1124,28 +1422,30 @@ exports.influencerCampaignsForDispute = async (req, res) => {
       const key = String(c.campaignsId);
       const contract = contractMap.get(key);
 
+      const isRejected = contract ? contract.isRejected : 0;
       const isContracted = contract && !contract.isRejected ? 1 : 0;
       const isAccepted = contract && contract.isAccepted ? 1 : 0;
 
       return {
-        // 🔹 campaign identity
+        // campaign identity
         campaignId: c.campaignsId,
         campaignName: c.productOrServiceName,
 
-        // 🔹 brand info
+        // brand info
         brandId: c.brandId,
         brandName: c.brandName,
 
-        // 🔹 campaign state
+        // campaign state
         isActive: typeof c.isActive === 'number' ? c.isActive : 0,
         applicantCount: c.applicantCount ?? 0,
-        hasApplied: c.hasApplied ?? 1, // by definition they applied
+        hasApplied: 1, // by definition they applied
         isDraft: c.isDraft ?? 0,
         createdAt: c.createdAt,
 
-        // 🔹 contract state
+        // contract state
         isContracted,
         isAccepted,
+        isRejected,
         contractId: contract ? contract.contractId : null,
         contractStatus: contract ? contract.status : null
       };
