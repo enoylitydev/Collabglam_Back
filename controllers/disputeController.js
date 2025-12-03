@@ -6,6 +6,7 @@ const Brand = require('../models/brand');
 const Influencer = require('../models/influencer');
 const ApplyCampaign = require('../models/applyCampaign');
 const Contract = require('../models/contract');
+
 const {
   handleSendDisputeCreated,
   handleSendDisputeResolved,
@@ -14,35 +15,23 @@ const {
 
 // ---- STATUS CONFIG & HELPERS ----
 
-/**
- * Order is important: numeric mapping:
- * 1 → open
- * 2 → in_review
- * 3 → awaiting_user
- * 4 → resolved
- * 5 → rejected
- */
 const STATUS_ORDER = ['open', 'in_review', 'awaiting_user', 'resolved', 'rejected'];
 const ALLOWED_STATUSES = new Set(STATUS_ORDER);
 
 /**
- * Normalize a status input that may be:
- * - number / numeric string:
- *    0 → "__ALL__" (if allowZeroAll = true, for listing)
- *    1–5 → mapped to STATUS_ORDER
- * - direct string like "open", "resolved", etc.
- *
- * @param {any} raw
- * @param {{ allowZeroAll?: boolean }} options
- * @returns {string | null | "__ALL__"}
+ * Escape a string so it can be safely used inside new RegExp(...)
  */
+function escapeRegex(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function normalizeStatusInput(raw, { allowZeroAll = false } = {}) {
   if (raw === undefined || raw === null || raw === '') return null;
 
   const s = String(raw).trim();
   if (!s) return null;
 
-  // numeric mapping first
+  // numeric mapping
   const num = Number(s);
   if (!Number.isNaN(num)) {
     if (num === 0) {
@@ -62,20 +51,39 @@ function normalizeStatusInput(raw, { allowZeroAll = false } = {}) {
 }
 
 /**
- * Build search $or array for campaign searching.
+ * Sanitize user-supplied attachments into the canonical shape.
+ */
+function sanitizeAttachments(attachments) {
+  if (!Array.isArray(attachments)) return [];
+  return attachments
+    .filter(a => a && a.url)
+    .map(a => ({
+      url: a.url,
+      originalName: a.originalName || null,
+      mimeType: a.mimeType || null,
+      size: typeof a.size === 'number' ? a.size : undefined
+    }));
+}
+
+/**
+ * Build safe $or for campaign text search (influencerCampaignsForDispute).
  */
 function buildSearchOr(term) {
+  const safe = escapeRegex(term);
+
   const or = [
-    { brandName: { $regex: term, $options: 'i' } },
-    { productOrServiceName: { $regex: term, $options: 'i' } },
-    { description: { $regex: term, $options: 'i' } },
-    { 'categories.subcategoryName': { $regex: term, $options: 'i' } },
-    { 'categories.categoryName': { $regex: term, $options: 'i' } }
+    { brandName: { $regex: safe, $options: 'i' } },
+    { productOrServiceName: { $regex: safe, $options: 'i' } },
+    { description: { $regex: safe, $options: 'i' } },
+    { 'categories.subcategoryName': { $regex: safe, $options: 'i' } },
+    { 'categories.categoryName': { $regex: safe, $options: 'i' } }
   ];
+
   const num = Number(term);
   if (!isNaN(num)) {
     or.push({ budget: { $lte: num } });
   }
+
   return or;
 }
 
@@ -161,7 +169,8 @@ exports.brandCreateDispute = async (req, res) => {
       campaignId,
       influencerId,
       subject,
-      description = ''
+      description = '',
+      attachments = []
     } = req.body || {};
 
     if (!brandId || !influencerId || !subject) {
@@ -195,13 +204,16 @@ exports.brandCreateDispute = async (req, res) => {
       if (camp) linkedCampaignId = String(campaignId);
     }
 
+    const sanitizedAttachments = sanitizeAttachments(attachments);
+
     const dispute = new Dispute({
       campaignId: linkedCampaignId, // may be null
       brandId: String(brandId),
       influencerId: String(influencerId),
       subject: String(subject).trim(),
       description: String(description || ''),
-      createdBy: { id: String(brandId), role: 'Brand' }
+      createdBy: { id: String(brandId), role: 'Brand' },
+      attachments: sanitizedAttachments
     });
 
     await dispute.save();
@@ -246,7 +258,7 @@ exports.brandList = async (req, res) => {
       page = 1,
       limit = 10,
       status,
-      search = '',
+      search,
       appliedBy // "brand" | "influencer" optional
     } = req.body || {};
 
@@ -272,11 +284,19 @@ exports.brandList = async (req, res) => {
       filter.status = normalizedStatus;
     }
 
-    if (search && String(search).trim()) {
-      const re = new RegExp(String(search).trim(), 'i');
-      filter.$or = [{ subject: re }, { description: re }];
+    // backend search: subject / description / disputeId
+    const searchTerm = typeof search === 'string' ? search.trim() : '';
+    if (searchTerm) {
+      const pattern = escapeRegex(searchTerm);
+      const re = new RegExp(pattern, 'i');
+      filter.$or = [
+        { subject: re },
+        { description: re },
+        { disputeId: re }
+      ];
     }
 
+    // who raised it (direction filter)
     if (appliedBy && typeof appliedBy === 'string') {
       const role = String(appliedBy).toLowerCase();
       if (role === 'brand') filter['createdBy.role'] = 'Brand';
@@ -286,7 +306,7 @@ exports.brandList = async (req, res) => {
     const total = await Dispute.countDocuments(filter);
     const rows = await Dispute.find(filter)
       .select(
-        'disputeId subject description status campaignId brandId influencerId assignedTo comments createdAt updatedAt createdBy'
+        'disputeId subject description status campaignId brandId influencerId assignedTo attachments comments createdAt updatedAt createdBy'
       )
       .sort({ createdAt: -1 })
       .skip((p - 1) * l)
@@ -515,16 +535,7 @@ exports.brandAddComment = async (req, res) => {
         .json({ message: 'Cannot comment on a finalized dispute' });
     }
 
-    const sanitized = Array.isArray(attachments)
-      ? attachments
-          .filter(a => a && a.url)
-          .map(a => ({
-            url: a.url,
-            originalName: a.originalName || null,
-            mimeType: a.mimeType || null,
-            size: typeof a.size === 'number' ? a.size : undefined
-          }))
-      : [];
+    const sanitized = sanitizeAttachments(attachments);
 
     d.comments.push({
       authorRole: 'Brand',
@@ -552,7 +563,8 @@ exports.influencerCreateDispute = async (req, res) => {
       campaignId,
       brandId,
       subject,
-      description = ''
+      description = '',
+      attachments = []
     } = req.body || {};
 
     if (!influencerId || !brandId || !subject) {
@@ -584,13 +596,16 @@ exports.influencerCreateDispute = async (req, res) => {
       if (camp) linkedCampaignId = String(campaignId);
     }
 
+    const sanitizedAttachments = sanitizeAttachments(attachments);
+
     const dispute = new Dispute({
       campaignId: linkedCampaignId,
       brandId: String(brandId),
       influencerId: String(influencerId),
       subject: String(subject).trim(),
       description: String(description || ''),
-      createdBy: { id: String(influencerId), role: 'Influencer' }
+      createdBy: { id: String(influencerId), role: 'Influencer' },
+      attachments: sanitizedAttachments
     });
 
     await dispute.save();
@@ -635,7 +650,7 @@ exports.influencerList = async (req, res) => {
       page = 1,
       limit = 10,
       status,
-      search = '',
+      search,
       appliedBy // optional: "brand" | "influencer"
     } = req.body || {};
 
@@ -663,9 +678,16 @@ exports.influencerList = async (req, res) => {
       filter.status = normalizedStatus;
     }
 
-    if (search && String(search).trim()) {
-      const re = new RegExp(String(search).trim(), 'i');
-      filter.$or = [{ subject: re }, { description: re }];
+    // backend search: subject / description / disputeId
+    const searchTerm = typeof search === 'string' ? search.trim() : '';
+    if (searchTerm) {
+      const pattern = escapeRegex(searchTerm);
+      const re = new RegExp(pattern, 'i');
+      filter.$or = [
+        { subject: re },
+        { description: re },
+        { disputeId: re }
+      ];
     }
 
     // Optional filter by who raised the dispute
@@ -688,7 +710,7 @@ exports.influencerList = async (req, res) => {
     const total = await Dispute.countDocuments(filter);
     const rows = await Dispute.find(filter)
       .select(
-        'disputeId subject description status campaignId brandId influencerId assignedTo comments createdAt updatedAt createdBy'
+        'disputeId subject description status campaignId brandId influencerId assignedTo attachments comments createdAt updatedAt createdBy'
       )
       .sort({ createdAt: -1 })
       .skip((p - 1) * l)
@@ -925,16 +947,7 @@ exports.influencerAddComment = async (req, res) => {
         .json({ message: 'Cannot comment on a finalized dispute' });
     }
 
-    const sanitized = Array.isArray(attachments)
-      ? attachments
-          .filter(a => a && a.url)
-          .map(a => ({
-            url: a.url,
-            originalName: a.originalName || null,
-            mimeType: a.mimeType || null,
-            size: typeof a.size === 'number' ? a.size : undefined
-          }))
-      : [];
+    const sanitized = sanitizeAttachments(attachments);
 
     d.comments.push({
       authorRole: 'Influencer',
@@ -1057,16 +1070,7 @@ exports.adminAddComment = async (req, res) => {
           .lean()
       : null;
 
-    const sanitized = Array.isArray(attachments)
-      ? attachments
-          .filter(a => a && a.url)
-          .map(a => ({
-            url: a.url,
-            originalName: a.originalName || null,
-            mimeType: a.mimeType || null,
-            size: typeof a.size === 'number' ? a.size : undefined
-          }))
-      : [];
+    const sanitized = sanitizeAttachments(attachments);
 
     d.comments.push({
       authorRole: 'Admin',
@@ -1094,7 +1098,7 @@ exports.adminList = async (req, res) => {
       campaignId,
       brandId,
       influencerId,
-      search = '',
+      search,
       appliedBy
     } = req.body || {};
 
@@ -1112,9 +1116,16 @@ exports.adminList = async (req, res) => {
     if (brandId) filter.brandId = String(brandId);
     if (influencerId) filter.influencerId = String(influencerId);
 
-    if (search && String(search).trim()) {
-      const re = new RegExp(String(search).trim(), 'i');
-      filter.$or = [{ subject: re }, { description: re }];
+    // backend search: subject / description / disputeId
+    const searchTerm = typeof search === 'string' ? search.trim() : '';
+    if (searchTerm) {
+      const pattern = escapeRegex(searchTerm);
+      const re = new RegExp(pattern, 'i');
+      filter.$or = [
+        { subject: re },
+        { description: re },
+        { disputeId: re }
+      ];
     }
 
     if (appliedBy && typeof appliedBy === 'string') {

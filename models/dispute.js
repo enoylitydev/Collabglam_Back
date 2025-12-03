@@ -5,8 +5,8 @@ const { v4: uuidv4 } = require('uuid');
 const ID_PREFIX = 'ds';
 const ID_DIGITS = 6;
 
-async function generateShortDisputeId() {
-  const DisputeModel = mongoose.model('Dispute');
+// Generate a short incremental disputeId like "ds000001"
+async function generateShortDisputeId(DisputeModel) {
   const last = await DisputeModel.findOne().sort({ createdAt: -1 }).lean();
 
   if (!last || !last.disputeId) {
@@ -89,6 +89,10 @@ const disputeSchema = new mongoose.Schema(
       name: { type: String, default: null }
     },
 
+    // Top-level attachments added when dispute is created / updated
+    attachments: { type: [attachmentSchema], default: [] },
+
+    // Conversation / timeline
     comments: { type: [commentSchema], default: [] }
   },
   { timestamps: true }
@@ -96,9 +100,11 @@ const disputeSchema = new mongoose.Schema(
 
 disputeSchema.pre('validate', async function preValidate() {
   if (this.disputeId) return;
-  this.disputeId = await generateShortDisputeId();
+  const DisputeModel = this.constructor;
+  this.disputeId = await generateShortDisputeId(DisputeModel);
 });
 
+// Helpful indexes
 disputeSchema.index({ brandId: 1, createdAt: -1 });
 disputeSchema.index({ influencerId: 1, createdAt: -1 });
 disputeSchema.index({ campaignId: 1, createdAt: -1 });

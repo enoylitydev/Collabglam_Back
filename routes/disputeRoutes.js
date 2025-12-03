@@ -34,7 +34,7 @@ router.post('/influencer/create', verifyToken, influencerCreateDispute);
 router.post('/influencer/list', verifyToken, influencerList);
 router.get('/influencer/:id', verifyToken, influencerGetById);
 router.post('/influencer/:id/comment', verifyToken, influencerAddComment);
-router.post('/influencer/applied',verifyToken, influencerCampaignsForDispute);
+router.post('/influencer/applied', verifyToken, influencerCampaignsForDispute);
 
 // -------- Admin endpoints (no auth required per project request) --------
 router.post('/admin/list', adminList);
