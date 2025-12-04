@@ -60,7 +60,7 @@ app.use(cors({
   credentials: true
 }));
 
-const JSON_LIMIT = process.env.JSON_LIMIT || '8mb';
+const JSON_LIMIT = process.env.JSON_LIMIT || '30mb';
 app.use(express.json({ limit: JSON_LIMIT }));
 app.use(express.urlencoded({ extended: true, limit: JSON_LIMIT, parameterLimit: 100000 }));
 
