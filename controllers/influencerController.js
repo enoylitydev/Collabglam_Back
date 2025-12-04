@@ -1078,70 +1078,140 @@ exports.getCampaignsByInfluencer = async (req, res) => {
       search = '',
       sortBy = 'createdAt',
       sortOrder = 'desc'
-    } = req.body;
+    } = req.body || {};
 
     if (!influencerId) {
       return res.status(400).json({ message: 'influencerId is required' });
     }
 
+    // 🔹 Get influencer (for name, etc.)
+    const influencer = await Influencer.findOne(
+      { influencerId },
+      'name email influencerId'
+    ).lean();
+
+    if (!influencer) {
+      return res.status(404).json({ message: 'Influencer not found' });
+    }
+
+    const influencerName = influencer.name || '';
+
+    // 1) Find all ApplyCampaign docs where this influencer has applied or is approved
     const applyDocs = await ApplyCampaign.find({
       $or: [
         { 'applicants.influencerId': influencerId },
         { 'approved.influencerId': influencerId }
       ]
-    });
+    }).lean();
 
     if (!applyDocs.length) {
       return res.status(200).json({
         total: 0,
-        page: Number(page),
+        page: Number(page) || 1,
         pages: 0,
+        influencer: {
+          influencerId: influencer.influencerId,
+          name: influencerName,
+          email: influencer.email || ''
+        },
         campaigns: []
       });
     }
 
-    const campaignIds = applyDocs.map(doc => doc.campaignId);
+    // 2) Collect distinct campaignIds from ApplyCampaign
+    const campaignIds = [
+      ...new Set(
+        applyDocs
+          .map(doc => doc.campaignId)
+          .filter(Boolean)
+      )
+    ];
 
-    const filter = { campaignId: { $in: campaignIds } };
+    // 3) Build Campaign filter.
+    // NOTE: Campaign schema uses "campaignsId", so we match that to ApplyCampaign.campaignId
+    const filter = {
+      campaignsId: { $in: campaignIds },
+      // uncomment this if you want to hide drafts:
+      // isDraft: 0
+    };
 
-    if (search.trim()) {
+    if (search && String(search).trim()) {
+      const s = String(search).trim();
       filter.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { description: { $regex: search, $options: 'i' } }
+        { productOrServiceName: { $regex: s, $options: 'i' } },
+        { brandName: { $regex: s, $options: 'i' } },
+        { description: { $regex: s, $options: 'i' } }
       ];
     }
 
-    const skip = (Math.max(page, 1) - 1) * Math.max(limit, 1);
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const limitNum = Math.max(parseInt(limit, 10) || 10, 1);
+    const skip = (pageNum - 1) * limitNum;
     const sortDirection = sortOrder === 'asc' ? 1 : -1;
 
+    // 4) Fetch campaigns
     const total = await Campaign.countDocuments(filter);
     const campaigns = await Campaign.find(filter)
       .sort({ [sortBy]: sortDirection })
       .skip(skip)
-      .limit(limit);
+      .limit(limitNum)
+      .lean();
 
+    // 5) Map to response & compute status per campaign
     const result = campaigns.map(campaign => {
-      const related = applyDocs.find(
-        d => d.campaignId === campaign.campaignId
-      );
+      // Match ApplyCampaign doc for this campaign
+      const related = applyDocs.find(d => d.campaignId === campaign.campaignsId);
 
       let status = 'pending';
       if (related?.approved?.some(a => a.influencerId === influencerId)) {
         status = 'approved';
       }
 
+      const campaignName = campaign.productOrServiceName || '';
+
       return {
-        id: campaign.campaignId,
-        name: campaign.name,
+        // IDs
+        id: campaign.campaignsId,
+        campaignId: campaign.campaignsId,
+
+        // Names
+        campaignName,                          // ✅ explicit campaign name
+        name: campaignName,                    // ✅ alias (backward compatible)
+        brandName: campaign.brandName || '',
+        influencerId,
+        influencerName,                        // ✅ influencer name
+
+        // Core info
+        description: campaign.description || '',
+        goal: campaign.goal || '',
+        campaignType: campaign.campaignType || '',
+        budget: campaign.budget || 0,
+        targetAudience: campaign.targetAudience || null,
+        categories: campaign.categories || [],
+        timeline: campaign.timeline || {},
+        images: campaign.images || [],
+        additionalNotes: campaign.additionalNotes || '',
+
+        // Status
         appliedDate: related?.createdAt || campaign.createdAt,
-        status
+        status,
+        isActive: campaign.isActive,
+        isDraft: campaign.isDraft,
+
+        // Meta
+        createdAt: campaign.createdAt
       };
     });
 
     return res.status(200).json({
       total,
-      page: Number(page),
-      pages: Math.ceil(total / limit),
+      page: pageNum,
+      pages: Math.ceil(total / limitNum),
+      influencer: {
+        influencerId: influencer.influencerId,
+        name: influencerName,
+        email: influencer.email || ''
+      },
       campaigns: result
     });
   } catch (error) {
