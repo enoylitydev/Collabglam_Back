@@ -1079,6 +1079,15 @@ exports.getCampaignInvitationPreview = async (req, res) => {
 
 exports.handleEmailInvitation = async (req, res) => {
   try {
+    // Optional extras that can come from the frontend
+    const {
+      compensation,
+      deliverables,
+      additionalNotes,
+      subject: customSubject,
+      body: customBody,
+    } = req.body;
+
     const rawEmail = (req.body?.email || '').trim().toLowerCase();
     const rawBrandId = (req.body?.brandId || '').trim();
     const rawCampaignId = (req.body?.campaignId || '').trim();
@@ -1140,41 +1149,32 @@ exports.handleEmailInvitation = async (req, res) => {
         const participants = [
           { userId: rawBrandId, name: brandName, role: 'brand' },
           { userId: influencerId, name: influencerName, role: 'influencer' },
-        ].sort((a, b) => (a.userId > b.userId ? 1 : -1)); // same sortParticipants logic
+        ].sort((a, b) => (a.userId > b.userId ? 1 : -1));
 
         try {
-          // IMPORTANT:
-          // If you keep a UNIQUE index on messages.messageId,
-          // either:
-          //  - fix the index as discussed (drop unique or partial unique), OR
-          //  - always create with at least one message with a unique messageId.
-          //
-          // If messages are optional, you can simply do:
-          //   room = await ChatRoom.create({ participants });
-          //
-          // If you want to avoid the null-messageId conflict, use a system message:
           room = await ChatRoom.create({ participants });
         } catch (err) {
-          // Handle race conditions / duplicate-key on messages.messageId gracefully
           if (
             err &&
             err.code === 11000 &&
             err.keyPattern &&
             err.keyPattern['messages.messageId']
           ) {
-            // Another process may have created the room or a message concurrently.
-            // Try to fetch the room again:
+            // Race condition: room/message created in parallel → fetch again
             room = await ChatRoom.findOne({
               'participants.userId': { $all: [rawBrandId, influencerId] },
               'participants.2': { $exists: false },
             });
 
             if (!room) {
-              // Still no room – bubble the error so you can see it in logs
-              console.error('Duplicate key on messages.messageId and no room found:', err);
+              console.error(
+                'Duplicate key on messages.messageId and no room found:',
+                err
+              );
               return res.status(500).json({
                 status: 'error',
-                message: 'Failed to create chat room (messages index conflict).',
+                message:
+                  'Failed to create chat room (messages index conflict).',
               });
             }
           } else {
@@ -1200,14 +1200,15 @@ exports.handleEmailInvitation = async (req, res) => {
     }
 
     // ─────────────────────────────────────────────
-    // CASE B: No influencer account → prepare email invitation
+    // CASE B: No influencer account → create Invitation + send email
     // ─────────────────────────────────────────────
 
     // We now require handle + platform so we can tie an Invitation
     if (!rawHandle || !rawPlatform) {
       return res.status(400).json({
         status: 'error',
-        message: 'handle and platform are required when influencer is not signed up',
+        message:
+          'handle and platform are required when influencer is not signed up',
       });
     }
 
@@ -1231,40 +1232,121 @@ exports.handleEmailInvitation = async (req, res) => {
       });
     }
 
-    // Find or create Invitation for (brandId, handle, platform)
+    // 🔥 1) Ensure we have a MissingEmail record for this creator
+    let missing = await MissingEmail.findOne({ email });
+    if (!missing) {
+      // fallback by handle (may already exist with no email)
+      missing = await MissingEmail.findOne({ handle });
+    }
+
+    if (!missing) {
+      // Create a new MissingEmail entry with this email + handle
+      missing = await MissingEmail.create({
+        email,
+        handle,
+        platform,
+        // brandId is optional – only include if your MissingEmail schema has it
+        brandId: rawBrandId,
+      });
+    } else {
+      // Update existing record with the latest email / handle / platform
+      let changed = false;
+
+      if (email && email !== missing.email) {
+        missing.email = email;
+        changed = true;
+      }
+      if (handle && handle !== missing.handle) {
+        missing.handle = handle;
+        changed = true;
+      }
+      if (platform && platform !== missing.platform) {
+        missing.platform = platform;
+        changed = true;
+      }
+
+      if (changed) {
+        await missing.save();
+      }
+    }
+
+    // 🔥 2) Find or create Invitation for (brandId, handle, platform)
     let invitation = await Invitation.findOne({
       brandId: rawBrandId,
       handle,
       platform,
     });
 
+    let isNewInvitation = false;
+
     if (!invitation) {
-      // No invitation yet → create with status "invited"
+      // No invitation yet → create with status "available"
       invitation = await Invitation.create({
         brandId: rawBrandId,
         handle,
         platform,
         campaignId: rawCampaignId || null,
-        status: 'invited',
+        status: 'available',
+        // link to the MissingEmail record we just ensured
+        missingEmailId: missing.missingEmailId,
       });
-    } else if (rawCampaignId && invitation.campaignId !== rawCampaignId) {
-      // Update existing invitation's campaignId if needed
-      invitation.campaignId = rawCampaignId;
-      await invitation.save();
+      isNewInvitation = true;
+    } else {
+      // Update existing invitation's campaignId / missingEmailId if needed
+      let saveNeeded = false;
+
+      if (rawCampaignId && invitation.campaignId !== rawCampaignId) {
+        invitation.campaignId = rawCampaignId;
+        saveNeeded = true;
+      }
+
+      if (
+        missing.missingEmailId &&
+        invitation.missingEmailId !== missing.missingEmailId
+      ) {
+        invitation.missingEmailId = missing.missingEmailId;
+        saveNeeded = true;
+      }
+
+      if (saveNeeded) {
+        await invitation.save();
+      }
     }
+
+    // 🔥 3) Send the actual invitation email using the internal helper
+    // We send on both new + existing invitation (you can limit to new only if you want)
+    const sendResult = await sendCampaignInvitationInternal({
+      brandId: rawBrandId,
+      campaignId: rawCampaignId || undefined,
+      invitationId: invitation.invitationId,
+      compensation,
+      deliverables,
+      additionalNotes,
+      subject: customSubject,
+      body: customBody,
+    });
 
     return res.json({
       status: 'success',
-      message: 'Email invitation ready for this creator.',
+      message: 'Email invitation created and sent to this creator.',
       isExistingInfluencer: false,
       brandName,
       invitationId: invitation.invitationId,
+      emailSent: true,
+      emailMeta: {
+        recipientEmail: sendResult.recipientEmail,
+        threadId: sendResult.threadId,
+        messageId: sendResult.messageId,
+        subject: sendResult.subject,
+        campaignId: sendResult.campaignId,
+      },
+      isNewInvitation,
     });
   } catch (err) {
     console.error('Error in /emails/invitation:', err);
     return res.status(500).json({
       status: 'error',
-      message: 'Internal server error',
+      message: err.message || 'Internal server error',
     });
   }
 };
