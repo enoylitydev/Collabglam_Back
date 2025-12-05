@@ -156,7 +156,7 @@ exports.createMilestoneOrder = async (req, res) => {
   try {
     const {
       amount,
-      currency = 'INR',
+      currency = 'USD',
       receipt,
       brandId,
       influencerId,
