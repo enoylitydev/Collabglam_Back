@@ -16,9 +16,12 @@ const {
 // Helper to build app URL
 const APP_BASE_URL = process.env.APP_BASE_URL || '';
 
+// 2% Razorpay fee (can be overridden from env)
+const RAZORPAY_FEE_PERCENT = Number(process.env.RAZORPAY_FEE_PERCENT || 0.02);
+
 /**
  * POST /milestone/create
- * body: { brandId, influencerId, campaignId, milestoneTitle, amount, milestoneDescription }
+ * body: { brandId, influencerId, campaignId, milestoneTitle, amount, milestoneDescription, razorpayOrderId?, razorpayPaymentId? }
  */
 exports.createMilestone = async (req, res) => {
   const {
@@ -28,6 +31,8 @@ exports.createMilestone = async (req, res) => {
     milestoneTitle,
     amount,
     milestoneDescription = '',
+    razorpayOrderId = null,
+    razorpayPaymentId = null,
   } = req.body;
 
   const amountNum = Number(amount);
@@ -37,7 +42,8 @@ exports.createMilestone = async (req, res) => {
 
   if (!brandId || !influencerId || !campaignId || !milestoneTitle || amount == null) {
     return res.status(400).json({
-      message: 'brandId, influencerId, campaignId, milestoneTitle and amount are required',
+      message:
+        'brandId, influencerId, campaignId, milestoneTitle and amount are required',
     });
   }
 
@@ -77,7 +83,8 @@ exports.createMilestone = async (req, res) => {
       }
     }
 
-    // 2b) NEW: check total milestone amount vs campaign budget
+    // 2b) Check total milestone base amount vs campaign budget
+    // NOTE: we only use `amount` here, Razorpay fee is not part of campaign budget
     if (hasBudget) {
       const existingTotalForCampaign = doc.milestoneHistory
         .filter((e) => e.campaignId === campaignId)
@@ -99,6 +106,16 @@ exports.createMilestone = async (req, res) => {
       }
     }
 
+    // 2c) 🔥 Compute Razorpay fee & total
+    const feePercent =
+      !isNaN(RAZORPAY_FEE_PERCENT) && RAZORPAY_FEE_PERCENT >= 0
+        ? RAZORPAY_FEE_PERCENT
+        : 0.02;
+
+    const rawFee = amountNum * feePercent;
+    const razorpayFee = Math.round(rawFee * 100) / 100; // 2 decimals
+    const totalWithFee = amountNum + razorpayFee;
+
     // 3) Append a new history entry
     const entry = {
       influencerId,
@@ -108,10 +125,17 @@ exports.createMilestone = async (req, res) => {
       milestoneDescription,
       released: false,
       createdAt: new Date(),
+
+      razorpayFee,
+      totalWithFee,
+      razorpayOrderId,
+      razorpayPaymentId,
     };
+
     doc.milestoneHistory.push(entry);
 
     // 4) Update walletBalance (escrow) + totalAmount
+    // NOTE: escrow is only the base amount, not Razorpay fee
     doc.walletBalance = (doc.walletBalance || 0) + amountNum;
     doc.totalAmount = (doc.totalAmount || 0) + amountNum;
 
@@ -170,6 +194,12 @@ exports.createMilestone = async (req, res) => {
       milestoneId: doc.milestoneId,
       walletBalance: doc.walletBalance,
       totalAmount: doc.totalAmount,
+      payment: {
+        baseAmount: amountNum,
+        razorpayFee,
+        totalWithFee,
+        feePercent: feePercent,
+      },
       entry,
     });
   } catch (err) {
@@ -179,7 +209,7 @@ exports.createMilestone = async (req, res) => {
 };
 
 /**
- * POST /milestone/listByCampaign (route name can be /milestone/byCampaign)
+ * POST /milestone/listByCampaign
  * body: { campaignId }
  */
 exports.getMilestonesByCampaign = async (req, res) => {
@@ -523,11 +553,7 @@ exports.getInfluencerPaidTotal = async (req, res) => {
  */
 exports.adminListPayouts = async (req, res) => {
   try {
-    const {
-      status = 'all',
-      page = 1,
-      limit = 20,
-    } = req.body || {};
+    const { status = 'all', page = 1, limit = 20 } = req.body || {};
 
     const pageNum = Number(page) || 1;
     const limitNum = Math.max(1, Number(limit) || 20);
@@ -613,6 +639,8 @@ exports.adminListPayouts = async (req, res) => {
         campaignId: e.campaignId,
         campaignTitle: campaignMap.get(e.campaignId) || null,
         amount: e.amount,
+        razorpayFee: e.razorpayFee,
+        totalWithFee: e.totalWithFee,
         payoutStatus: e.payoutStatus, // "initiated" | "paid"
         releasedAt: e.releasedAt,
         createdAt: e.createdAt,
