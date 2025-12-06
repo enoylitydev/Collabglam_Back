@@ -1,5 +1,5 @@
 // controllers/emailController.js
-const { SESClient, SendEmailCommand } = require('@aws-sdk/client-ses');
+const { SESClient, SendEmailCommand, SendRawEmailCommand } = require('@aws-sdk/client-ses');
 const Brand = require('../models/brand');
 const Influencer = require('../models/influencer');
 const { EmailThread, EmailMessage, EmailTemplate } = require('../models/email');
@@ -8,7 +8,10 @@ const MissingEmail = require('../models/MissingEmail');
 const Campaign = require('../models/campaign');
 const ChatRoom = require('../models/chat');
 const { buildInvitationEmail } = require('../template/invitationTemplate');
+const { uploadToGridFS } = require('../utils/gridfs'); // 🔁 adjust path if different
 const { v4: uuidv4 } = require('uuid');
+
+const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024; // 20MB per file
 
 // ---------- SES CLIENT (uses AWS keys if provided) ----------
 const ses = new SESClient({
@@ -181,32 +184,111 @@ async function sendViaSES({
   htmlBody,
   textBody,
   replyTo,
+  attachments,
 }) {
-  const params = {
-    Source: `${fromName} <${fromAlias}>`,
-    Destination: {
-      ToAddresses: [toRealEmail],
-    },
-    Message: {
-      Subject: { Charset: 'UTF-8', Data: subject },
-      Body: {},
-    },
-  };
-
-  if (replyTo) {
-    params.ReplyToAddresses = [replyTo];
-  }
-
-  if (htmlBody) {
-    params.Message.Body.Html = { Charset: 'UTF-8', Data: htmlBody };
-  }
-  if (textBody) {
-    params.Message.Body.Text = { Charset: 'UTF-8', Data: textBody };
-  }
-
-  const cmd = new SendEmailCommand(params);
+  let cmd;
+  const nl = '\r\n';
 
   try {
+    if (attachments && attachments.length) {
+      // ---------- multipart/mixed with attachments ----------
+      const mixedBoundary = `Mixed_${uuidv4()}`;
+      const altBoundary = `Alt_${uuidv4()}`;
+
+      const headers = [
+        `From: ${fromName} <${fromAlias}>`,
+        `To: ${toRealEmail}`,
+        `Subject: ${subject}`,
+        'MIME-Version: 1.0',
+        `Content-Type: multipart/mixed; boundary="${mixedBoundary}"`,
+      ];
+      if (replyTo) {
+        headers.push(`Reply-To: ${replyTo}`);
+      }
+
+      let raw = headers.join(nl) + nl + nl;
+
+      // multipart/alternative (text + html)
+      raw += `--${mixedBoundary}${nl}`;
+      raw += `Content-Type: multipart/alternative; boundary="${altBoundary}"${nl}${nl}`;
+
+      if (textBody) {
+        raw += `--${altBoundary}${nl}`;
+        raw += `Content-Type: text/plain; charset="UTF-8"${nl}`;
+        raw += `Content-Transfer-Encoding: 7bit${nl}${nl}`;
+        raw += `${textBody}${nl}${nl}`;
+      }
+
+      if (htmlBody) {
+        raw += `--${altBoundary}${nl}`;
+        raw += `Content-Type: text/html; charset="UTF-8"${nl}`;
+        raw += `Content-Transfer-Encoding: 7bit${nl}${nl}`;
+        raw += `${htmlBody}${nl}${nl}`;
+      }
+
+      raw += `--${altBoundary}--${nl}${nl}`;
+
+      // Attachments
+      for (const att of attachments) {
+        if (!att) continue;
+
+        const filename = (att.filename || 'attachment').replace(/"/g, "'");
+        const contentType =
+          att.contentType || 'application/octet-stream';
+
+        let base64 = '';
+        if (Buffer.isBuffer(att.content)) {
+          base64 = att.content.toString('base64');
+        } else if (typeof att.content === 'string') {
+          const trimmed = att.content.trim();
+          base64 = trimmed.includes(',')
+            ? trimmed.split(',').pop()
+            : trimmed;
+        }
+
+        if (!base64) continue;
+
+        raw += `--${mixedBoundary}${nl}`;
+        raw += `Content-Type: ${contentType}; name="${filename}"${nl}`;
+        raw += `Content-Disposition: attachment; filename="${filename}"${nl}`;
+        raw += 'Content-Transfer-Encoding: base64' + nl + nl;
+        raw += `${base64}${nl}${nl}`;
+      }
+
+      raw += `--${mixedBoundary}--`;
+
+      cmd = new SendRawEmailCommand({
+        RawMessage: {
+          Data: Buffer.from(raw),
+        },
+      });
+    } else {
+      // ---------- simple text/html only (no attachments) ----------
+      const params = {
+        Source: `${fromName} <${fromAlias}>`,
+        Destination: {
+          ToAddresses: [toRealEmail],
+        },
+        Message: {
+          Subject: { Charset: 'UTF-8', Data: subject },
+          Body: {},
+        },
+      };
+
+      if (replyTo) {
+        params.ReplyToAddresses = [replyTo];
+      }
+
+      if (htmlBody) {
+        params.Message.Body.Html = { Charset: 'UTF-8', Data: htmlBody };
+      }
+      if (textBody) {
+        params.Message.Body.Text = { Charset: 'UTF-8', Data: textBody };
+      }
+
+      cmd = new SendEmailCommand(params);
+    }
+
     return await ses.send(cmd);
   } catch (err) {
     console.error('SES send error:', err);
@@ -215,9 +297,8 @@ async function sendViaSES({
     const code = sesError.Code || err.name;
     const message = sesError.Message || err.message || 'SES send failed';
 
-    // 🔥 Handle sandbox "not verified" nicely
+    // sandbox "not verified" handling
     if (code === 'MessageRejected' && /not verified/i.test(message)) {
-      // try to extract failing email from Amazon message
       let failingEmail = '';
       const match = message.match(/: ([^ ]+@[^ ]+)/);
       if (match && match[1]) failingEmail = match[1];
@@ -234,7 +315,6 @@ async function sendViaSES({
       throw e;
     }
 
-    // anything else – bubble up as-is
     throw err;
   }
 }
@@ -387,7 +467,14 @@ exports.getTemplateByKey = async (req, res) => {
  */
 exports.sendBrandToInfluencer = async (req, res) => {
   try {
-    const { brandId, influencerId, subject, body, templateId } = req.body;
+    const {
+      brandId,
+      influencerId,
+      subject,
+      body,
+      templateId,
+      attachments, // [{ filename, contentType, contentBase64, size }]
+    } = req.body;
 
     if (!brandId || !influencerId || !subject || !body) {
       return res.status(400).json({
@@ -398,7 +485,8 @@ exports.sendBrandToInfluencer = async (req, res) => {
     const brand = await findBrandByIdOrBrandId(brandId);
     const influencer = await findInfluencerByIdOrInfluencerId(influencerId);
 
-    if (!brand) return res.status(404).json({ error: 'Brand not found' });
+    if (!brand)
+      return res.status(404).json({ error: 'Brand not found' });
     if (!influencer) {
       return res.status(404).json({ error: 'Influencer not found' });
     }
@@ -409,7 +497,8 @@ exports.sendBrandToInfluencer = async (req, res) => {
       createdBy: 'brand',
     });
 
-    const fromAliasPretty = thread.brandDisplayAlias || thread.brandAliasEmail;
+    const fromAliasPretty =
+      thread.brandDisplayAlias || thread.brandAliasEmail;
     const relayAlias = thread.brandAliasEmail;
 
     const fromName = `${brand.name} via ${process.env.PLATFORM_NAME || 'CollabGlam'
@@ -422,6 +511,78 @@ exports.sendBrandToInfluencer = async (req, res) => {
       </p>`;
     const textBody = body;
 
+    /* ─────────────────────────────────────────────
+       1) Normalize incoming attachments from frontend
+       ───────────────────────────────────────────── */
+    const safeAttachments = Array.isArray(attachments)
+      ? attachments.map((att) => ({
+        filename: att.filename || att.name || 'attachment',
+        contentType: att.contentType || 'application/octet-stream',
+        // keep base64 string for SES
+        contentBase64: att.contentBase64 || att.content || '',
+        size: Number(att.size) || 0,
+      }))
+      : [];
+
+    /* ─────────────────────────────────────────────
+       2) Upload to GridFS with 20MB per-file limit
+       ───────────────────────────────────────────── */
+    let uploadedFiles = [];
+    if (safeAttachments.length) {
+      const filesForGrid = safeAttachments.map((att) => {
+        const raw = (att.contentBase64 || '').trim();
+        const base64 = raw.includes(',') ? raw.split(',').pop() : raw;
+
+        if (!base64) {
+          const err = new Error(
+            `Attachment "${att.filename}" has no content`
+          );
+          err.statusCode = 400;
+          throw err;
+        }
+
+        const buffer = Buffer.from(base64, 'base64');
+
+        // 🔥 enforce 20MB per file
+        if (buffer.length > MAX_ATTACHMENT_BYTES) {
+          const err = new Error(
+            `Attachment "${att.filename}" is too large. Max allowed size is 20MB.`
+          );
+          err.statusCode = 413;
+          throw err;
+        }
+
+        return {
+          originalname: att.filename,
+          mimetype: att.contentType,
+          buffer,
+          size: buffer.length,
+        };
+      });
+
+      uploadedFiles = await uploadToGridFS(filesForGrid, {
+        req, // lets gridfs util build full URL from request
+        prefix: 'email',
+        metadata: {
+          kind: 'email-attachment',
+          brandId: brand.brandId || String(brand._id),
+          influencerId: influencer.influencerId || String(influencer._id),
+        },
+      });
+    }
+
+    /* ─────────────────────────────────────────────
+       3) Attachments for SES (use base64 from frontend)
+       ───────────────────────────────────────────── */
+    const sesAttachments = safeAttachments.length
+      ? safeAttachments.map((att) => ({
+        filename: att.filename,
+        contentType: att.contentType,
+        content: att.contentBase64,
+        size: att.size,
+      }))
+      : undefined;
+
     await sendViaSES({
       fromAlias: fromAliasPretty,
       fromName,
@@ -430,7 +591,22 @@ exports.sendBrandToInfluencer = async (req, res) => {
       htmlBody,
       textBody,
       replyTo: relayAlias,
+      attachments: sesAttachments,
     });
+
+    /* ─────────────────────────────────────────────
+       4) Save attachment metadata (with URL) in EmailMessage
+       ───────────────────────────────────────────── */
+    let attachmentMeta = [];
+    if (uploadedFiles.length) {
+      attachmentMeta = uploadedFiles.map((file) => ({
+        filename: file.originalName || file.filename,
+        contentType: file.mimeType,
+        size: file.size,
+        storageKey: String(file.id), // GridFS file id
+        url: file.url,               // direct URL like /file/filename
+      }));
+    }
 
     const messageDoc = await EmailMessage.create({
       thread: thread._id,
@@ -443,6 +619,7 @@ exports.sendBrandToInfluencer = async (req, res) => {
       htmlBody,
       textBody,
       template: templateId || null,
+      attachments: attachmentMeta.length ? attachmentMeta : undefined,
     });
 
     return res.status(200).json({
@@ -457,30 +634,23 @@ exports.sendBrandToInfluencer = async (req, res) => {
     });
   } catch (err) {
     console.error('sendBrandToInfluencer error:', err);
-    const status =
-      err.statusCode || err?.$metadata?.httpStatusCode || 500;
+    const status = err.statusCode || err?.$metadata?.httpStatusCode || 500;
     return res
       .status(status)
       .json({ error: err.message || 'Internal server error' });
   }
 };
 
-/**
- * POST /api/email/influencer-to-brand
- * Body:
- *  - influencerId
- *  - brandId
- *  - subject
- *  - body
- *  - templateId (optional)
- *
- * Influencer -> Brand
- * From: "Influencer via CollabGlam" <influencer@collabglam.cloud>
- * Reply-To: <b-adidas-xxxxxx@collabglam.cloud> (same relay)
- */
 exports.sendInfluencerToBrand = async (req, res) => {
   try {
-    const { brandId, influencerId, subject, body, templateId } = req.body;
+    const {
+      brandId,
+      influencerId,
+      subject,
+      body,
+      templateId,
+      attachments, // [{ filename, contentType, contentBase64, size }]
+    } = req.body;
 
     if (!brandId || !influencerId || !subject || !body) {
       return res.status(400).json({
@@ -502,7 +672,7 @@ exports.sendInfluencerToBrand = async (req, res) => {
       createdBy: 'influencer',
     });
 
-    const globalInfluencerAlias = thread.influencerAliasEmail; // influencer@collabglam.cloud
+    const globalInfluencerAlias = thread.influencerAliasEmail; // influencer@...
     const relayAlias = thread.brandAliasEmail;
 
     const fromName = `${influencer.name || 'Influencer'} via ${process.env.PLATFORM_NAME || 'CollabGlam'
@@ -515,6 +685,75 @@ exports.sendInfluencerToBrand = async (req, res) => {
       </p>`;
     const textBody = body;
 
+    /* ─────────────────────────────────────────────
+       1) Normalize incoming attachments from frontend
+       ───────────────────────────────────────────── */
+    const safeAttachments = Array.isArray(attachments)
+      ? attachments.map((att) => ({
+        filename: att.filename || att.name || 'attachment',
+        contentType: att.contentType || 'application/octet-stream',
+        contentBase64: att.contentBase64 || att.content || '',
+        size: Number(att.size) || 0,
+      }))
+      : [];
+
+    /* ─────────────────────────────────────────────
+       2) Upload to GridFS with 20MB per-file limit
+       ───────────────────────────────────────────── */
+    let uploadedFiles = [];
+    if (safeAttachments.length) {
+      const filesForGrid = safeAttachments.map((att) => {
+        const raw = (att.contentBase64 || '').trim();
+        const base64 = raw.includes(',') ? raw.split(',').pop() : raw;
+
+        if (!base64) {
+          const err = new Error(`Attachment "${att.filename}" has no content`);
+          err.statusCode = 400;
+          throw err;
+        }
+
+        const buffer = Buffer.from(base64, 'base64');
+
+        if (buffer.length > MAX_ATTACHMENT_BYTES) {
+          const err = new Error(
+            `Attachment "${att.filename}" is too large. Max allowed size is 20MB.`
+          );
+          err.statusCode = 413;
+          throw err;
+        }
+
+        return {
+          originalname: att.filename,
+          mimetype: att.contentType,
+          buffer,
+          size: buffer.length,
+        };
+      });
+
+      uploadedFiles = await uploadToGridFS(filesForGrid, {
+        req,
+        prefix: 'email',
+        metadata: {
+          kind: 'email-attachment',
+          brandId: brand.brandId || String(brand._id),
+          influencerId: influencer.influencerId || String(influencer._id),
+          direction: 'influencer_to_brand',
+        },
+      });
+    }
+
+    /* ─────────────────────────────────────────────
+       3) Attachments for SES (keep base64 string)
+       ───────────────────────────────────────────── */
+    const sesAttachments = safeAttachments.length
+      ? safeAttachments.map((att) => ({
+        filename: att.filename,
+        contentType: att.contentType,
+        content: att.contentBase64,
+        size: att.size,
+      }))
+      : undefined;
+
     await sendViaSES({
       fromAlias: globalInfluencerAlias,
       fromName,
@@ -523,7 +762,22 @@ exports.sendInfluencerToBrand = async (req, res) => {
       htmlBody,
       textBody,
       replyTo: relayAlias,
+      attachments: sesAttachments,
     });
+
+    /* ─────────────────────────────────────────────
+       4) Save attachment metadata (with URL) in EmailMessage
+       ───────────────────────────────────────────── */
+    let attachmentMeta = [];
+    if (uploadedFiles.length) {
+      attachmentMeta = uploadedFiles.map((file) => ({
+        filename: file.originalName || file.filename,
+        contentType: file.mimeType,
+        size: file.size,
+        storageKey: String(file.id),
+        url: file.url,
+      }));
+    }
 
     const messageDoc = await EmailMessage.create({
       thread: thread._id,
@@ -536,6 +790,7 @@ exports.sendInfluencerToBrand = async (req, res) => {
       htmlBody,
       textBody,
       template: templateId || null,
+      attachments: attachmentMeta.length ? attachmentMeta : undefined,
     });
 
     return res.status(200).json({
@@ -550,238 +805,21 @@ exports.sendInfluencerToBrand = async (req, res) => {
     });
   } catch (err) {
     console.error('sendInfluencerToBrand error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    const status = err.statusCode || err?.$metadata?.httpStatusCode || 500;
+    return res.status(status).json({ error: err.message || 'Internal server error' });
   }
 };
 
 exports.sendCampaignInvitation = async (req, res) => {
   try {
-    const {
-      brandId,
-      campaignId, // now OPTIONAL
-      influencerId,
-      invitationId,
-      campaignLink,
-      compensation,
-      deliverables,
-      additionalNotes,
-      subject: customSubject,
-      body: customBody, // text the brand typed in the compose modal
-    } = req.body;
-
-    // ✅ Only brandId is strictly required here
-    if (!brandId) {
-      return res
-        .status(400)
-        .json({ error: 'brandId is required.' });
-    }
-
-    // Still require at least influencerId or invitationId
-    if (!influencerId && !invitationId) {
-      return res.status(400).json({
-        error: 'Either influencerId or invitationId is required.',
-      });
-    }
-
-    const brand = await findBrandByIdOrBrandId(brandId);
-    if (!brand) return res.status(404).json({ error: 'Brand not found' });
-
-    // Resolve influencer + email (works for both normal influencers and invitations)
-    const { influencer, influencerName, recipientEmail } =
-      await resolveInfluencerAndEmail({ influencerId, invitationId, brand });
-
-    let subject = customSubject;
-    let htmlBody;
-    let textBody;
-
-    /* ────────────────────────────────────────────────────────────── */
-    /* PATH 1: Campaign-based invitation (campaignId present)        */
-    /* ────────────────────────────────────────────────────────────── */
-    if (campaignId) {
-      const campaign = await findCampaignByIdOrCampaignsId(campaignId);
-      if (!campaign) {
-        return res.status(404).json({ error: 'Campaign not found' });
-      }
-
-      const brandName = brand.name;
-
-      const campaignTitle =
-        campaign.productOrServiceName ||
-        campaign.campaignType ||
-        campaign.brandName ||
-        'Our Campaign';
-
-      const campaignObjective = campaign.goal || '';
-
-      let defaultDeliverables = '';
-      if (
-        Array.isArray(campaign.creativeBrief) &&
-        campaign.creativeBrief.length
-      ) {
-        defaultDeliverables = campaign.creativeBrief.join(', ');
-      } else if (campaign.creativeBriefText) {
-        defaultDeliverables = campaign.creativeBriefText;
-      } else {
-        defaultDeliverables = 'Content deliverables to be discussed with you.';
-      }
-      const finalDeliverables = deliverables || defaultDeliverables;
-
-      const finalCompensation =
-        compensation ||
-        'Compensation will be discussed based on your standard rates and the campaign scope.';
-
-      let timelineText = 'Flexible / To be discussed';
-      if (
-        campaign.timeline &&
-        campaign.timeline.startDate &&
-        campaign.timeline.endDate
-      ) {
-        const start = new Date(campaign.timeline.startDate);
-        const end = new Date(campaign.timeline.endDate);
-        const fmt = (d) =>
-          d.toLocaleDateString('en-US', {
-            day: '2-digit',
-            month: 'short',
-            year: 'numeric',
-          });
-        timelineText = `${fmt(start)} – ${fmt(end)}`;
-      }
-
-      const notes =
-        additionalNotes ||
-        campaign.additionalNotes ||
-        campaign.description ||
-        '';
-
-      const baseUrl = process.env.CAMPAIGN_BASE_URL || '';
-      const link =
-        campaignLink ||
-        (baseUrl
-          ? `${baseUrl.replace(/\/$/, '')}/campaigns/${campaign.campaignsId}`
-          : '#');
-
-      // Build full campaign invitation email
-      const templateResult = buildInvitationEmail({
-        brandName,
-        influencerName,
-        campaignTitle,
-        campaignObjective,
-        deliverables: finalDeliverables,
-        compensation: finalCompensation,
-        timeline: timelineText,
-        additionalNotes: notes,
-        campaignLink: link,
-      });
-
-      subject = subject || templateResult.subject;
-
-      // If the brand typed custom text, prepend it above "Campaign Details"
-      if (customBody && customBody.trim()) {
-        const customHtmlBlock = `<p>${customBody
-          .split('\n')
-          .map((line) => line.trim())
-          .join('<br/>')}</p><br/>`;
-
-        const marker =
-          '<h3 style="margin-top:24px;margin-bottom:8px;font-size:16px;color:#111827;">Campaign Details</h3>';
-
-        if (templateResult.htmlBody.includes(marker)) {
-          htmlBody = templateResult.htmlBody.replace(
-            marker,
-            `${customHtmlBlock}${marker}`
-          );
-        } else {
-          // Fallback – just prepend the custom block
-          htmlBody = `${customHtmlBlock}${templateResult.htmlBody}`;
-        }
-
-        // Plain text: prepend the custom note + template text
-        textBody = `${customBody.trim()}\n\n${templateResult.textBody}`;
-      } else {
-        // No custom body → just use the full template
-        htmlBody = templateResult.htmlBody;
-        textBody = templateResult.textBody;
-      }
-    } else {
-      /* ──────────────────────────────────────────────────────────── */
-      /* PATH 2: NO CAMPAIGN (generic collab email)                  */
-      /* ──────────────────────────────────────────────────────────── */
-
-      // Default subject if none provided
-      subject =
-        subject ||
-        `Collaboration opportunity with ${brand.name}`;
-
-      const safeBody =
-        (customBody && customBody.trim()) ||
-        `Hi ${influencerName || 'there'},
-
-${brand.name} would love to collaborate with you on upcoming content.
-
-[Add your brief, deliverables, timelines, and budget details here]
-
-Best,
-${brand.name} team`;
-
-      htmlBody = `<p>${safeBody
-        .split('\n')
-        .map((line) => line.trim())
-        .join('<br/>')}</p>
-        <hr/>
-        <p style="font-size:12px;color:#666;">
-          Sent via ${process.env.PLATFORM_NAME || 'CollabGlam'} – your email is hidden.
-        </p>`;
-      textBody = safeBody;
-    }
-
-    // Create / reuse thread + send via SES (same as before)
-    const thread = await getOrCreateThread({
-      brand,
-      influencer,
-      createdBy: 'brand',
+    // Delegate to the internal helper so we reuse the same logic
+    const result = await sendCampaignInvitationInternal({
+      ...req.body,  // includes brandId, campaignId, influencerId/invitationId, attachments, etc.
+      _request: req, // pass Express req so GridFS can build URLs
     });
 
-    const fromAliasPretty = thread.brandDisplayAlias || thread.brandAliasEmail;
-    const relayAlias = thread.brandAliasEmail;
-
-    const fromName = `${brand.name} via ${process.env.PLATFORM_NAME || 'CollabGlam'
-      }`;
-
-    await sendViaSES({
-      fromAlias: fromAliasPretty,
-      fromName,
-      toRealEmail: recipientEmail,
-      subject,
-      htmlBody,
-      textBody,
-      replyTo: relayAlias,
-    });
-
-    const messageDoc = await EmailMessage.create({
-      thread: thread._id,
-      direction: 'brand_to_influencer',
-      fromUser: brand._id,
-      fromUserModel: 'Brand',
-      fromAliasEmail: fromAliasPretty,
-      toRealEmail: recipientEmail,
-      subject,
-      htmlBody,
-      textBody,
-      template: null,
-    });
-
-    return res.status(200).json({
-      success: true,
-      threadId: thread._id,
-      messageId: messageDoc._id,
-      recipientEmail,
-      brandAliasEmail: thread.brandAliasEmail,
-      influencerAliasEmail: thread.influencerAliasEmail,
-      brandDisplayAlias: thread.brandDisplayAlias,
-      influencerDisplayAlias: thread.influencerDisplayAlias,
-      subject,
-      campaignId: campaignId || null,
-    });
+    // Internal helper already returns a nice payload
+    return res.status(200).json(result);
   } catch (err) {
     console.error('sendCampaignInvitation error:', err);
     const status = err.statusCode || 500;
@@ -1079,6 +1117,16 @@ exports.getCampaignInvitationPreview = async (req, res) => {
 
 exports.handleEmailInvitation = async (req, res) => {
   try {
+    // Optional extras that can come from the frontend
+    const {
+      compensation,
+      deliverables,
+      additionalNotes,
+      subject: customSubject,
+      body: customBody,
+      attachments,         // ✅ add this
+    } = req.body;
+
     const rawEmail = (req.body?.email || '').trim().toLowerCase();
     const rawBrandId = (req.body?.brandId || '').trim();
     const rawCampaignId = (req.body?.campaignId || '').trim();
@@ -1140,41 +1188,32 @@ exports.handleEmailInvitation = async (req, res) => {
         const participants = [
           { userId: rawBrandId, name: brandName, role: 'brand' },
           { userId: influencerId, name: influencerName, role: 'influencer' },
-        ].sort((a, b) => (a.userId > b.userId ? 1 : -1)); // same sortParticipants logic
+        ].sort((a, b) => (a.userId > b.userId ? 1 : -1));
 
         try {
-          // IMPORTANT:
-          // If you keep a UNIQUE index on messages.messageId,
-          // either:
-          //  - fix the index as discussed (drop unique or partial unique), OR
-          //  - always create with at least one message with a unique messageId.
-          //
-          // If messages are optional, you can simply do:
-          //   room = await ChatRoom.create({ participants });
-          //
-          // If you want to avoid the null-messageId conflict, use a system message:
           room = await ChatRoom.create({ participants });
         } catch (err) {
-          // Handle race conditions / duplicate-key on messages.messageId gracefully
           if (
             err &&
             err.code === 11000 &&
             err.keyPattern &&
             err.keyPattern['messages.messageId']
           ) {
-            // Another process may have created the room or a message concurrently.
-            // Try to fetch the room again:
+            // Race condition: room/message created in parallel → fetch again
             room = await ChatRoom.findOne({
               'participants.userId': { $all: [rawBrandId, influencerId] },
               'participants.2': { $exists: false },
             });
 
             if (!room) {
-              // Still no room – bubble the error so you can see it in logs
-              console.error('Duplicate key on messages.messageId and no room found:', err);
+              console.error(
+                'Duplicate key on messages.messageId and no room found:',
+                err
+              );
               return res.status(500).json({
                 status: 'error',
-                message: 'Failed to create chat room (messages index conflict).',
+                message:
+                  'Failed to create chat room (messages index conflict).',
               });
             }
           } else {
@@ -1200,14 +1239,15 @@ exports.handleEmailInvitation = async (req, res) => {
     }
 
     // ─────────────────────────────────────────────
-    // CASE B: No influencer account → prepare email invitation
+    // CASE B: No influencer account → create Invitation + send email
     // ─────────────────────────────────────────────
 
     // We now require handle + platform so we can tie an Invitation
     if (!rawHandle || !rawPlatform) {
       return res.status(400).json({
         status: 'error',
-        message: 'handle and platform are required when influencer is not signed up',
+        message:
+          'handle and platform are required when influencer is not signed up',
       });
     }
 
@@ -1231,40 +1271,121 @@ exports.handleEmailInvitation = async (req, res) => {
       });
     }
 
-    // Find or create Invitation for (brandId, handle, platform)
+    // 🔥 1) Ensure we have a MissingEmail record for this creator
+    let missing = await MissingEmail.findOne({ email });
+    if (!missing) {
+      // fallback by handle (may already exist with no email)
+      missing = await MissingEmail.findOne({ handle });
+    }
+
+    if (!missing) {
+      // Create a new MissingEmail entry with this email + handle
+      missing = await MissingEmail.create({
+        email,
+        handle,
+        platform,
+        // brandId is optional – only include if your MissingEmail schema has it
+        brandId: rawBrandId,
+      });
+    } else {
+      // Update existing record with the latest email / handle / platform
+      let changed = false;
+
+      if (email && email !== missing.email) {
+        missing.email = email;
+        changed = true;
+      }
+      if (handle && handle !== missing.handle) {
+        missing.handle = handle;
+        changed = true;
+      }
+      if (platform && platform !== missing.platform) {
+        missing.platform = platform;
+        changed = true;
+      }
+
+      if (changed) {
+        await missing.save();
+      }
+    }
+
+    // 🔥 2) Find or create Invitation for (brandId, handle, platform)
     let invitation = await Invitation.findOne({
       brandId: rawBrandId,
       handle,
       platform,
     });
 
+    let isNewInvitation = false;
+
     if (!invitation) {
-      // No invitation yet → create with status "invited"
+      // No invitation yet → create with status "available"
       invitation = await Invitation.create({
         brandId: rawBrandId,
         handle,
         platform,
         campaignId: rawCampaignId || null,
-        status: 'invited',
+        status: 'available',
+        // link to the MissingEmail record we just ensured
+        missingEmailId: missing.missingEmailId,
       });
-    } else if (rawCampaignId && invitation.campaignId !== rawCampaignId) {
-      // Update existing invitation's campaignId if needed
-      invitation.campaignId = rawCampaignId;
-      await invitation.save();
+      isNewInvitation = true;
+    } else {
+      // Update existing invitation's campaignId / missingEmailId if needed
+      let saveNeeded = false;
+
+      if (rawCampaignId && invitation.campaignId !== rawCampaignId) {
+        invitation.campaignId = rawCampaignId;
+        saveNeeded = true;
+      }
+
+      if (
+        missing.missingEmailId &&
+        invitation.missingEmailId !== missing.missingEmailId
+      ) {
+        invitation.missingEmailId = missing.missingEmailId;
+        saveNeeded = true;
+      }
+
+      if (saveNeeded) {
+        await invitation.save();
+      }
     }
+
+    // 🔥 3) Send the actual invitation email using the internal helper
+    // We send on both new + existing invitation (you can limit to new only if you want)
+    const sendResult = await sendCampaignInvitationInternal({
+      brandId: rawBrandId,
+      campaignId: rawCampaignId || undefined,
+      invitationId: invitation.invitationId,
+      compensation,
+      deliverables,
+      additionalNotes,
+      subject: customSubject,
+      body: customBody,
+    });
 
     return res.json({
       status: 'success',
-      message: 'Email invitation ready for this creator.',
+      message: 'Email invitation created and sent to this creator.',
       isExistingInfluencer: false,
       brandName,
       invitationId: invitation.invitationId,
+      emailSent: true,
+      emailMeta: {
+        recipientEmail: sendResult.recipientEmail,
+        threadId: sendResult.threadId,
+        messageId: sendResult.messageId,
+        subject: sendResult.subject,
+        campaignId: sendResult.campaignId,
+      },
+      isNewInvitation,
     });
   } catch (err) {
     console.error('Error in /emails/invitation:', err);
     return res.status(500).json({
       status: 'error',
-      message: 'Internal server error',
+      message: err.message || 'Internal server error',
     });
   }
 };
@@ -1281,6 +1402,8 @@ async function sendCampaignInvitationInternal(payload = {}) {
     additionalNotes,
     subject: customSubject,
     body: customBody, // text the brand typed in the compose modal
+    attachments,      // OPTIONAL [{ filename, contentType, contentBase64, size }]
+    _request,         // OPTIONAL Express req (from HTTP controller)
   } = payload;
 
   // ✅ Only brandId is strictly required here
@@ -1427,13 +1550,9 @@ async function sendCampaignInvitationInternal(payload = {}) {
     /* PATH 2: NO CAMPAIGN (generic collab email)  */
     /* ──────────────────────────────────────────── */
 
-    // Subject: custom if provided, else a nice default
     subject =
-      subject ||
-      `Collaboration opportunity with ${brand.name}`;
+      subject || `Collaboration opportunity with ${brand.name}`;
 
-    // If brand wrote a custom body in the compose modal, use it as-is
-    // (apart from footer), to avoid surprising them.
     if (customBody && customBody.trim()) {
       const safeBody = customBody.trim();
 
@@ -1448,7 +1567,6 @@ async function sendCampaignInvitationInternal(payload = {}) {
 
       textBody = safeBody;
     } else {
-      // Auto-generate a clean, generic collab email using optional fields
       const lines = [];
 
       lines.push(`Hi ${influencerName || 'there'},`);
@@ -1459,7 +1577,7 @@ async function sendCampaignInvitationInternal(payload = {}) {
 
       const deliverablesText = Array.isArray(deliverables)
         ? deliverables.join(', ')
-        : (deliverables || '');
+        : deliverables || '';
 
       const compText = compensation || '';
       const notesText = additionalNotes || '';
@@ -1509,6 +1627,78 @@ async function sendCampaignInvitationInternal(payload = {}) {
     }
   }
 
+  /* ─────────────────────────────────────────────
+     1) Normalize incoming attachments
+     ───────────────────────────────────────────── */
+  const safeAttachments = Array.isArray(attachments)
+    ? attachments.map((att) => ({
+      filename: att.filename || att.name || 'attachment',
+      contentType: att.contentType || 'application/octet-stream',
+      contentBase64: att.contentBase64 || att.content || '',
+      size: Number(att.size) || 0,
+    }))
+    : [];
+
+  /* ─────────────────────────────────────────────
+     2) Upload to GridFS with 20MB per-file limit
+     ───────────────────────────────────────────── */
+  let uploadedFiles = [];
+  if (safeAttachments.length) {
+    const filesForGrid = safeAttachments.map((att) => {
+      const raw = (att.contentBase64 || '').trim();
+      const base64 = raw.includes(',') ? raw.split(',').pop() : raw;
+
+      if (!base64) {
+        const err = new Error(`Attachment "${att.filename}" has no content`);
+        err.statusCode = 400;
+        throw err;
+      }
+
+      const buffer = Buffer.from(base64, 'base64');
+
+      if (buffer.length > MAX_ATTACHMENT_BYTES) {
+        const err = new Error(
+          `Attachment "${att.filename}" is too large. Max allowed size is 20MB.`
+        );
+        err.statusCode = 413;
+        throw err;
+      }
+
+      return {
+        originalname: att.filename,
+        mimetype: att.contentType,
+        buffer,
+        size: buffer.length,
+      };
+    });
+
+    uploadedFiles = await uploadToGridFS(filesForGrid, {
+      req: _request,
+      prefix: 'email',
+      metadata: {
+        kind: 'email-attachment',
+        brandId: brand.brandId || String(brand._id),
+        influencerId: influencer.influencerId || String(influencer._id),
+        invitationId: invitationId || null,
+        campaignId: campaignId || null,
+        direction: 'brand_to_influencer',
+        context: 'campaign-invitation',
+      },
+    });
+  }
+
+  /* ─────────────────────────────────────────────
+     3) Attachments for SES
+     ───────────────────────────────────────────── */
+  const sesAttachments = safeAttachments.length
+    ? safeAttachments.map((att) => ({
+      filename: att.filename,
+      contentType: att.contentType,
+      content: att.contentBase64,
+      size: att.size,
+    }))
+    : undefined;
+
   // Create / reuse thread + send via SES
   const thread = await getOrCreateThread({
     brand,
@@ -1530,7 +1720,22 @@ async function sendCampaignInvitationInternal(payload = {}) {
     htmlBody,
     textBody,
     replyTo: relayAlias,
+    attachments: sesAttachments,
   });
+
+  /* ─────────────────────────────────────────────
+     4) Save attachment metadata in EmailMessage
+     ───────────────────────────────────────────── */
+  let attachmentMeta = [];
+  if (uploadedFiles.length) {
+    attachmentMeta = uploadedFiles.map((file) => ({
+      filename: file.originalName || file.filename,
+      contentType: file.mimeType,
+      size: file.size,
+      storageKey: String(file.id),
+      url: file.url,
+    }));
+  }
 
   const messageDoc = await EmailMessage.create({
     thread: thread._id,
@@ -1543,6 +1748,7 @@ async function sendCampaignInvitationInternal(payload = {}) {
     htmlBody,
     textBody,
     template: null,
+    attachments: attachmentMeta.length ? attachmentMeta : undefined,
   });
 
   return {

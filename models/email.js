@@ -38,10 +38,10 @@ const emailThreadSchema = new Schema(
     },
 
     /**
- * BRAND ALIAS ADDRESS (UNIQUE PER BRAND)
- * Example: adidas@collabglam.cloud
- * Used as From + Reply-To and inbound routing.
- */
+     * BRAND ALIAS ADDRESS (UNIQUE PER BRAND)
+     * Example: adidas@collabglam.cloud
+     * Used as From + Reply-To and inbound routing.
+     */
     brandAliasEmail: {
       type: String,
       required: true,
@@ -132,6 +132,17 @@ const emailMessageSchema = new Schema(
     subject: { type: String, required: true },
     htmlBody: { type: String },
     textBody: { type: String },
+
+    attachments: [
+      {
+        filename: { type: String, required: true },
+        contentType: { type: String, required: true },
+        size: { type: Number, required: true },
+        storageKey: { type: String },
+        url: { type: String },
+      },
+    ],
+
 
     template: {
       type: Schema.Types.ObjectId,
