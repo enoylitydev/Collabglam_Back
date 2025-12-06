@@ -138,5 +138,5 @@ brandSchema.index(
     },
   }
 );
-
+ 
 module.exports = mongoose.model('Brand', brandSchema);
