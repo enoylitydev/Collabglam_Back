@@ -6,7 +6,6 @@ const { EmailThread, EmailMessage, EmailTemplate } = require('../models/email');
 const Invitation = require('../models/NewInvitations');
 const MissingEmail = require('../models/MissingEmail');
 const Campaign = require('../models/campaign');
-const ChatRoom = require('../models/chat');
 const { buildInvitationEmail } = require('../template/invitationTemplate');
 const { uploadToGridFS } = require('../utils/gridfs'); // 🔁 adjust path if different
 const { v4: uuidv4 } = require('uuid');
@@ -1121,14 +1120,14 @@ exports.getCampaignInvitationPreview = async (req, res) => {
 
 exports.handleEmailInvitation = async (req, res) => {
   try {
-    // Optional extras that can come from the frontend
+    // Optional extras from frontend
     const {
       compensation,
       deliverables,
       additionalNotes,
       subject: customSubject,
       body: customBody,
-      attachments,         // ✅ add this
+      attachments, // OPTIONAL: [{ filename, contentType, contentBase64, size }]
     } = req.body;
 
     const rawEmail = (req.body?.email || '').trim().toLowerCase();
@@ -1154,11 +1153,7 @@ exports.handleEmailInvitation = async (req, res) => {
     const email = rawEmail;
 
     // 2) Load brand for response context
-    const brand = await Brand.findOne(
-      { brandId: rawBrandId },
-      'brandId name'
-    ).lean();
-
+    const brand = await Brand.findOne({ brandId: rawBrandId }, 'brandId name').lean();
     if (!brand) {
       return res.status(404).json({
         status: 'error',
@@ -1172,7 +1167,7 @@ exports.handleEmailInvitation = async (req, res) => {
     const influencer = await Influencer.findOne({ email }).lean();
 
     // ─────────────────────────────────────────────
-    // CASE A: Existing influencer → ensure chat room
+    // CASE A: Existing influencer → send email ONLY (no chat room)
     // ─────────────────────────────────────────────
     if (influencer && influencer.influencerId && influencer.otpVerified) {
       const influencerId = influencer.influencerId;
@@ -1182,68 +1177,40 @@ exports.handleEmailInvitation = async (req, res) => {
         influencer.email ||
         email;
 
-      // Look for an existing 1:1 room between this brand & influencer
-      let room = await ChatRoom.findOne({
-        'participants.userId': { $all: [rawBrandId, influencerId] },
-        'participants.2': { $exists: false }, // ensure only 2 participants
+      // Use internal helper to send the campaign / generic invitation email
+      const sendResult = await sendCampaignInvitationInternal({
+        brandId: rawBrandId,
+        campaignId: rawCampaignId || undefined,
+        influencerId,          // existing influencer path
+        compensation,
+        deliverables,
+        additionalNotes,
+        subject: customSubject,
+        body: customBody,
+        attachments,           // forward attachments
+        _request: req,         // needed so GridFS can build URLs
       });
 
-      if (!room) {
-        const participants = [
-          { userId: rawBrandId, name: brandName, role: 'brand' },
-          { userId: influencerId, name: influencerName, role: 'influencer' },
-        ].sort((a, b) => (a.userId > b.userId ? 1 : -1));
-
-        try {
-          room = await ChatRoom.create({ participants });
-        } catch (err) {
-          if (
-            err &&
-            err.code === 11000 &&
-            err.keyPattern &&
-            err.keyPattern['messages.messageId']
-          ) {
-            // Race condition: room/message created in parallel → fetch again
-            room = await ChatRoom.findOne({
-              'participants.userId': { $all: [rawBrandId, influencerId] },
-              'participants.2': { $exists: false },
-            });
-
-            if (!room) {
-              console.error(
-                'Duplicate key on messages.messageId and no room found:',
-                err
-              );
-              return res.status(500).json({
-                status: 'error',
-                message:
-                  'Failed to create chat room (messages index conflict).',
-              });
-            }
-          } else {
-            console.error('Error creating chat room:', err);
-            return res.status(500).json({
-              status: 'error',
-              message: 'Failed to create chat room.',
-            });
-          }
-        }
-      }
-
-      // Success: existing influencer + chat room ready
       return res.json({
         status: 'success',
-        message: 'Existing influencer found, redirect to chat room.',
+        message: 'Existing influencer found, invitation email sent.',
         isExistingInfluencer: true,
         influencerId,
         influencerName,
         brandName,
-        roomId: room.roomId,
+        emailSent: true,
+        emailMeta: {
+          recipientEmail: sendResult.recipientEmail,
+          threadId: sendResult.threadId,
+          messageId: sendResult.messageId,
+          subject: sendResult.subject,
+          campaignId: sendResult.campaignId,
+        },
       });
     }
 
     // ─────────────────────────────────────────────
-    // CASE B: No influencer account → create Invitation + send email
+    // CASE B: No verified influencer account → create Invitation + send email
     // ─────────────────────────────────────────────
 
     // We now require handle + platform so we can tie an Invitation
@@ -1357,16 +1324,17 @@ exports.handleEmailInvitation = async (req, res) => {
     }
 
     // 🔥 3) Send the actual invitation email using the internal helper
-    // We send on both new + existing invitation (you can limit to new only if you want)
     const sendResult = await sendCampaignInvitationInternal({
       brandId: rawBrandId,
       campaignId: rawCampaignId || undefined,
-      invitationId: invitation.invitationId,
+      invitationId: invitation.invitationId, // use invitation-based flow
       compensation,
       deliverables,
       additionalNotes,
       subject: customSubject,
       body: customBody,
+      attachments,          // forward attachments
+      _request: req,        // again, for GridFS URL building
     });
 
     return res.json({
