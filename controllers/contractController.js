@@ -784,6 +784,77 @@ function renderContractHTML({ contract, templateText }) {
 </html>`;
 }
 
+let sharedBrowserPromise = null;
+
+async function launchBrowserOnce() {
+  const baseOptions = {
+    headless: true,
+    dumpio: true, // log Chrome stdout/stderr -> super helpful to debug
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--disable-extensions",
+      // These two can help in very constrained Docker environments:
+      // "--single-process",
+      // "--no-zygote",
+    ],
+    timeout: 60000, // ⬅️ increase from default 30s
+  };
+
+  const execPath = process.env.CHROME_EXECUTABLE_PATH;
+
+  if (execPath && fs.existsSync(execPath)) {
+    console.log("[PDF] Using CHROME_EXECUTABLE_PATH:", execPath);
+    try {
+      return await puppeteer.launch({ ...baseOptions, executablePath: execPath });
+    } catch (err) {
+      console.error("[PDF] Launch with CHROME_EXECUTABLE_PATH failed, falling back to default Chromium", err);
+    }
+  } else if (execPath) {
+    console.warn("[PDF] CHROME_EXECUTABLE_PATH does not exist:", execPath);
+  } else {
+    console.log("[PDF] No CHROME_EXECUTABLE_PATH set, using Puppeteer's default Chromium.");
+  }
+
+  // Fallback: Puppeteer’s own Chromium
+  return await puppeteer.launch(baseOptions);
+}
+
+async function getSharedBrowser() {
+  if (sharedBrowserPromise) {
+    try {
+      const b = await sharedBrowserPromise;
+      if (b && b.isConnected && b.isConnected()) return b;
+    } catch (_) {
+      // broken promise -> reset
+    }
+    sharedBrowserPromise = null;
+  }
+
+  sharedBrowserPromise = (async () => {
+    const browser = await launchBrowserOnce();
+    browser.on("disconnected", () => {
+      console.warn("[PDF] Browser disconnected, resetting shared instance");
+      sharedBrowserPromise = null;
+    });
+    return browser;
+  })();
+
+  return sharedBrowserPromise;
+}
+
+// Close shared browser cleanly on process exit
+process.on("exit", async () => {
+  try {
+    if (sharedBrowserPromise) {
+      const b = await sharedBrowserPromise;
+      if (b && b.close) await b.close();
+    }
+  } catch (_) {}
+});
+
 async function renderPDFWithPuppeteer({
   html,
   res,
@@ -791,10 +862,17 @@ async function renderPDFWithPuppeteer({
   headerTitle,
   headerDate,
 }) {
-  let browser;
+  let page;
+
   const headerTemplate = `
     <style>
-      .pdf-h { font-family: "Times New Roman", Times, serif; font-size: 9pt; width: 100%; padding: 4mm 10mm; text-align: center; }
+      .pdf-h {
+        font-family: "Times New Roman", Times, serif;
+        font-size: 9pt;
+        width: 100%;
+        padding: 4mm 10mm;
+        text-align: center;
+      }
       .pdf-h .title { font-weight: bold; }
       .pdf-h .date { margin-top: 1mm; }
     </style>
@@ -803,50 +881,10 @@ async function renderPDFWithPuppeteer({
       <div class="date">Effective Date: ${esc(headerDate || "")}</div>
     </div>`;
 
-  // --- small helper to try env Chrome first, then fallback to Puppeteer's Chromium ---
-  const launchBrowser = async () => {
-    const baseOptions = {
-      headless: true,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--disable-extensions",
-      ],
-    };
-
-    const execPath = process.env.CHROME_EXECUTABLE_PATH;
-    if (execPath) {
-      try {
-        if (fs.existsSync(execPath)) {
-          console.log("[PDF] Trying CHROME_EXECUTABLE_PATH:", execPath);
-          return await puppeteer.launch({ ...baseOptions, executablePath: execPath });
-        } else {
-          console.warn(
-            "[PDF] CHROME_EXECUTABLE_PATH does not exist:",
-            execPath,
-            "— falling back to Puppeteer's default"
-          );
-        }
-      } catch (err) {
-        console.error(
-          "[PDF] Launch with CHROME_EXECUTABLE_PATH failed, falling back to default Chromium",
-          err
-        );
-      }
-    } else {
-      console.log("[PDF] No CHROME_EXECUTABLE_PATH set, using Puppeteer's default Chromium.");
-    }
-
-    // Fallback: let Puppeteer choose its own downloaded Chromium
-    return await puppeteer.launch(baseOptions);
-  };
-
   try {
-    browser = await launchBrowser();
+    const browser = await getSharedBrowser();
+    page = await browser.newPage();
 
-    const page = await browser.newPage();
     await page.emulateMediaType("print");
     await page.setContent(html, { waitUntil: "networkidle0" });
 
@@ -901,14 +939,13 @@ async function renderPDFWithPuppeteer({
       return;
     } catch (fallbackErr) {
       console.error("PDFKit fallback also failed", fallbackErr);
-      // if even fallback dies, report standard error
       return respondError(res, "PDF generation failed", 500, fallbackErr);
     }
   } finally {
-    try {
-      if (browser) await browser.close();
-    } catch (_) {
-      // ignore
+    if (page) {
+      try {
+        await page.close();
+      } catch (_) {}
     }
   }
 }
