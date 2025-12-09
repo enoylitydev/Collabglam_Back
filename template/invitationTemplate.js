@@ -98,13 +98,6 @@ function buildInvitationEmail(ctx) {
           To proceed, please review the full brief and respond to the invitation using the link below:
         </p>
 
-        <p style="margin:16px 0;">
-          <a href="${campaignLink}"
-             style="display:inline-block;padding:10px 18px;background:#111827;color:#ffffff;text-decoration:none;border-radius:999px;font-weight:600;font-size:14px;">
-            👉 View Campaign & Respond
-          </a>
-        </p>
-
         <p>If you have any questions or need further clarification, feel free to contact the brand or reach out to CollabGlam Support.</p>
 
         <p>
@@ -142,8 +135,6 @@ function buildInvitationEmail(ctx) {
     `Compensation: ${compensation}`,
     `Campaign Timeline: ${timeline}`,
     additionalNotes ? `Additional Notes: ${additionalNotes}` : '',
-    '',
-    `View Campaign & Respond: ${campaignLink}`,
     '',
     'If you have any questions or need further clarification, feel free to contact the brand or reach out to CollabGlam Support.',
     '',
