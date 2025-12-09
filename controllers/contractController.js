@@ -784,7 +784,13 @@ function renderContractHTML({ contract, templateText }) {
 </html>`;
 }
 
-async function renderPDFWithPuppeteer({ html, res, filename = "Contract.pdf", headerTitle, headerDate }) {
+async function renderPDFWithPuppeteer({
+  html,
+  res,
+  filename = "Contract.pdf",
+  headerTitle,
+  headerDate,
+}) {
   let browser;
   const headerTemplate = `
     <style>
@@ -797,8 +803,9 @@ async function renderPDFWithPuppeteer({ html, res, filename = "Contract.pdf", he
       <div class="date">Effective Date: ${esc(headerDate || "")}</div>
     </div>`;
 
-  try {
-    browser = await puppeteer.launch({
+  // --- small helper to try env Chrome first, then fallback to Puppeteer's Chromium ---
+  const launchBrowser = async () => {
+    const baseOptions = {
       headless: true,
       args: [
         "--no-sandbox",
@@ -807,8 +814,37 @@ async function renderPDFWithPuppeteer({ html, res, filename = "Contract.pdf", he
         "--disable-gpu",
         "--disable-extensions",
       ],
-      executablePath: process.env.CHROME_EXECUTABLE_PATH || undefined,
-    });
+    };
+
+    const execPath = process.env.CHROME_EXECUTABLE_PATH;
+    if (execPath) {
+      try {
+        if (fs.existsSync(execPath)) {
+          console.log("[PDF] Trying CHROME_EXECUTABLE_PATH:", execPath);
+          return await puppeteer.launch({ ...baseOptions, executablePath: execPath });
+        } else {
+          console.warn(
+            "[PDF] CHROME_EXECUTABLE_PATH does not exist:",
+            execPath,
+            "— falling back to Puppeteer's default"
+          );
+        }
+      } catch (err) {
+        console.error(
+          "[PDF] Launch with CHROME_EXECUTABLE_PATH failed, falling back to default Chromium",
+          err
+        );
+      }
+    } else {
+      console.log("[PDF] No CHROME_EXECUTABLE_PATH set, using Puppeteer's default Chromium.");
+    }
+
+    // Fallback: let Puppeteer choose its own downloaded Chromium
+    return await puppeteer.launch(baseOptions);
+  };
+
+  try {
+    browser = await launchBrowser();
 
     const page = await browser.newPage();
     await page.emulateMediaType("print");
@@ -833,11 +869,47 @@ async function renderPDFWithPuppeteer({ html, res, filename = "Contract.pdf", he
     return res.end(pdf);
   } catch (e) {
     console.error("Puppeteer PDF failed", e);
-    throw e;
+
+    // ---------- Hard fallback: use PDFKit so the user still gets something ----------
+    try {
+      const doc = new PDFDocument({ margin: 50 });
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `inline; filename=${filename}`);
+
+      doc.pipe(res);
+
+      doc
+        .fontSize(18)
+        .text(headerTitle || "Master Brand–Influencer Agreement", {
+          align: "center",
+        })
+        .moveDown();
+
+      // crude HTML strip just for fallback readability
+      const plain = String(html || "")
+        .replace(/<\/(p|div|h1|h2|h3|br)>/gi, "\n\n")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\n{3,}/g, "\n\n");
+
+      const paragraphs = plain.split(/\n\s*\n/);
+      paragraphs.forEach((p, idx) => {
+        doc.text(p.trim(), { align: "justify" });
+        if (idx < paragraphs.length - 1) doc.moveDown();
+      });
+
+      doc.end();
+      return;
+    } catch (fallbackErr) {
+      console.error("PDFKit fallback also failed", fallbackErr);
+      // if even fallback dies, report standard error
+      return respondError(res, "PDF generation failed", 500, fallbackErr);
+    }
   } finally {
     try {
       if (browser) await browser.close();
-    } catch (_) { }
+    } catch (_) {
+      // ignore
+    }
   }
 }
 
