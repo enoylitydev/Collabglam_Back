@@ -10,6 +10,8 @@ const ChatRoom = require('../models/chat');
 const { buildInvitationEmail } = require('../template/invitationTemplate');
 const { uploadToGridFS } = require('../utils/gridfs'); // 🔁 adjust path if different
 const { v4: uuidv4 } = require('uuid');
+const EmailAlias = require('../models/emailAlias');
+const { getOrCreateBrandAlias, getOrCreateInfluencerAlias } = require('../utils/emailAliases');
 
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024; // 20MB per file
 
@@ -86,47 +88,24 @@ function sortParticipants(a, b) {
   return a.userId.localeCompare(b.userId);
 }
 
-/**
- * Get or create a thread for a Brand + Influencer pair.
- *
- * Semantics:
- * - brandAliasEmail: per-BRAND alias (e.g. adidas@collabglam.cloud). Stored on Brand.
- * - brandDisplayAlias: same as brandAliasEmail; used for UI / From.
- * - influencerAliasEmail: global alias influencer@collabglam.cloud (same for all).
- */
-async function getOrCreateThread({ brand, influencer, createdBy }) {
+async function getOrCreateThread({ brand, influencer, createdBy, subject }) {
   let thread = await EmailThread.findOne({
     brand: brand._id,
     influencer: influencer._id,
   });
 
-  if (thread) return thread;
-
-  // ✅ Prefer alias stored on Brand (generated at signup)
-  let brandAlias = brand.brandAliasEmail;
-
-  // Backfill for legacy brands that don't have brandAliasEmail yet
-  if (!brandAlias) {
-    brandAlias = EmailThread.generateAliasEmail(brand.name);
-    brand.brandAliasEmail = brandAlias;
-    try {
-      await brand.save();
-    } catch (e) {
-      console.error(
-        'Failed to backfill brandAliasEmail on Brand:',
-        e?.message || e
-      );
+  if (thread) {
+    // Optionally update subject on first message
+    if (!thread.subject && subject) {
+      thread.subject = subject;
+      await thread.save();
     }
+    return thread;
   }
 
-  // config/email.js (or top of emailController.js)
-  const RELAY_DOMAIN = process.env.EMAIL_RELAY_DOMAIN;
-  if (!RELAY_DOMAIN) {
-    throw new Error('EMAIL_RELAY_DOMAIN is not set');
-  }
+  const brandAlias = await getOrCreateBrandAlias(brand);
+  const influencerAlias = await getOrCreateInfluencerAlias(influencer);
 
-  // in getOrCreateThread:
-  const influencerGlobalAlias = `influencer@${RELAY_DOMAIN}`;
   thread = await EmailThread.create({
     brand: brand._id,
     influencer: influencer._id,
@@ -140,12 +119,12 @@ async function getOrCreateThread({ brand, influencer, createdBy }) {
       email: influencer.email,
     },
 
-    // ✅ alias and display are the same
     brandAliasEmail: brandAlias,
-    influencerAliasEmail: influencerGlobalAlias,
+    influencerAliasEmail: influencerAlias,
     brandDisplayAlias: brandAlias,
-    influencerDisplayAlias: influencerGlobalAlias,
+    influencerDisplayAlias: influencerAlias,
 
+    subject: subject || undefined,
     status: 'active',
     createdBy: createdBy || 'system',
   });
@@ -495,14 +474,11 @@ exports.sendBrandToInfluencer = async (req, res) => {
       brand,
       influencer,
       createdBy: 'brand',
+      subject,
     });
 
-    const fromAliasPretty =
-      thread.brandDisplayAlias || thread.brandAliasEmail;
-    const relayAlias = thread.brandAliasEmail;
-
-    const fromName = `${brand.name} via ${process.env.PLATFORM_NAME || 'CollabGlam'
-      }`;
+    const fromAlias = thread.brandDisplayAlias || thread.brandAliasEmail;
+    const fromName = `${brand.name} via ${process.env.PLATFORM_NAME || 'CollabGlam'}`;
 
     const htmlBody = `<p>${body.replace(/\n/g, '<br/>')}</p>
       <hr/>
@@ -583,14 +559,14 @@ exports.sendBrandToInfluencer = async (req, res) => {
       }))
       : undefined;
 
-    await sendViaSES({
-      fromAlias: fromAliasPretty,
+    const sesResult = await sendViaSES({
+      fromAlias,
       fromName,
       toRealEmail: influencer.email,
       subject,
       htmlBody,
       textBody,
-      replyTo: relayAlias,
+      replyTo: thread.brandAliasEmail,
       attachments: sesAttachments,
     });
 
@@ -611,22 +587,38 @@ exports.sendBrandToInfluencer = async (req, res) => {
     const messageDoc = await EmailMessage.create({
       thread: thread._id,
       direction: 'brand_to_influencer',
+
       fromUser: brand._id,
       fromUserModel: 'Brand',
-      fromAliasEmail: fromAliasPretty,
+
+      fromAliasEmail: fromAlias,
+      fromProxyEmail: thread.brandAliasEmail,
+      fromRealEmail: brand.email,
+
       toRealEmail: influencer.email,
+      toProxyEmail: thread.influencerAliasEmail,
+
       subject,
       htmlBody,
       textBody,
       template: templateId || null,
+
       attachments: attachmentMeta.length ? attachmentMeta : undefined,
+      sentAt: new Date(),
+
+      messageId: sesResult?.MessageId || undefined,
     });
+
+    thread.lastMessageAt = messageDoc.createdAt;
+    thread.lastMessageDirection = 'brand_to_influencer';
+    thread.lastMessageSnippet = textBody.slice(0, 200);
+    await thread.save();
 
     return res.status(200).json({
       success: true,
       threadId: thread._id,
       messageId: messageDoc._id,
-      recipientEmail: influencer.email,
+      recipientEmail: influencer.email, // internal only; UI should hide this
       brandAliasEmail: thread.brandAliasEmail,
       influencerAliasEmail: thread.influencerAliasEmail,
       brandDisplayAlias: thread.brandDisplayAlias,
@@ -670,13 +662,11 @@ exports.sendInfluencerToBrand = async (req, res) => {
       brand,
       influencer,
       createdBy: 'influencer',
+      subject,
     });
 
-    const globalInfluencerAlias = thread.influencerAliasEmail; // influencer@...
-    const relayAlias = thread.brandAliasEmail;
-
-    const fromName = `${influencer.name || 'Influencer'} via ${process.env.PLATFORM_NAME || 'CollabGlam'
-      }`;
+    const fromAlias = thread.influencerAliasEmail;
+    const fromName = `${influencer.name || 'Influencer'} via ${process.env.PLATFORM_NAME || 'CollabGlam'}`;
 
     const htmlBody = `<p>${body.replace(/\n/g, '<br/>')}</p>
       <hr/>
@@ -754,14 +744,15 @@ exports.sendInfluencerToBrand = async (req, res) => {
       }))
       : undefined;
 
-    await sendViaSES({
-      fromAlias: globalInfluencerAlias,
+    const sesResult = await sendViaSES({
+      fromAlias,
       fromName,
       toRealEmail: brand.email,
       subject,
       htmlBody,
       textBody,
-      replyTo: relayAlias,
+      // 🔑 Reply-To MUST be the influencer proxy now
+      replyTo: thread.influencerAliasEmail,
       attachments: sesAttachments,
     });
 
@@ -784,20 +775,33 @@ exports.sendInfluencerToBrand = async (req, res) => {
       direction: 'influencer_to_brand',
       fromUser: influencer._id,
       fromUserModel: 'Influencer',
-      fromAliasEmail: globalInfluencerAlias,
+
+      fromAliasEmail: fromAlias,
+      fromProxyEmail: thread.influencerAliasEmail,
+      fromRealEmail: influencer.email,
       toRealEmail: brand.email,
+      toProxyEmail: thread.brandAliasEmail,
+
       subject,
       htmlBody,
       textBody,
       template: templateId || null,
       attachments: attachmentMeta.length ? attachmentMeta : undefined,
+
+      sentAt: new Date(),
+      messageId: sesResult?.MessageId || undefined,
     });
+
+    thread.lastMessageAt = messageDoc.createdAt;
+    thread.lastMessageDirection = 'influencer_to_brand';
+    thread.lastMessageSnippet = textBody.slice(0, 200);
+    await thread.save();
 
     return res.status(200).json({
       success: true,
       threadId: thread._id,
       messageId: messageDoc._id,
-      recipientEmail: brand.email,
+      recipientEmail: brand.email, // internal only
       brandAliasEmail: thread.brandAliasEmail,
       influencerAliasEmail: thread.influencerAliasEmail,
       brandDisplayAlias: thread.brandDisplayAlias,
@@ -1767,3 +1771,121 @@ async function sendCampaignInvitationInternal(payload = {}) {
 
 // export internal helper so other controllers (admin) can use it
 exports._sendCampaignInvitationInternal = sendCampaignInvitationInternal;
+
+exports.getConversationsForCurrentInfluencer = async (req, res) => {
+  try {
+    const auth = req.influencer;
+    if (!auth || !auth.influencerId) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    const influencer = await Influencer.findOne({
+      influencerId: auth.influencerId,
+    }).lean();
+    if (!influencer) {
+      return res.status(404).json({ error: 'Influencer not found' });
+    }
+
+    const threads = await EmailThread.find({ influencer: influencer._id })
+      .populate('brand', 'name brandId brandAliasEmail logoUrl')
+      .sort({ lastMessageAt: -1 })
+      .lean();
+
+    const conversations = threads.map(t => ({
+      id: String(t._id),
+      brand: {
+        brandId: t.brand?.brandId || null,
+        name: t.brand?.name || t.brandSnapshot?.name || 'Brand',
+        aliasEmail: t.brandAliasEmail,
+        logoUrl: t.brand?.logoUrl || null,
+      },
+      subject: t.subject || t.lastMessageSnippet || '',
+      lastMessageAt: t.lastMessageAt,
+      lastMessageDirection: t.lastMessageDirection,
+      lastMessageSnippet: t.lastMessageSnippet || '',
+      influencerAliasEmail: t.influencerAliasEmail,
+      // NOTE: we do NOT expose brand.email or influencerSnapshot.email
+    }));
+
+    return res.status(200).json({ conversations });
+  } catch (err) {
+    console.error('getConversationsForCurrentInfluencer error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+exports.getConversationForCurrentInfluencer = async (req, res) => {
+  try {
+    const auth = req.influencer;
+    const { id: threadId } = req.params;
+
+    if (!auth || !auth.influencerId) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    const influencer = await Influencer.findOne({
+      influencerId: auth.influencerId,
+    });
+    if (!influencer) {
+      return res.status(404).json({ error: 'Influencer not found' });
+    }
+
+    const thread = await EmailThread.findById(threadId)
+      .populate('brand', 'name brandId brandAliasEmail logoUrl')
+      .populate('influencer', 'name influencerId influencerAliasEmail')
+      .lean();
+
+    if (!thread) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+    if (String(thread.influencer) !== String(influencer._id)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    const messages = await EmailMessage.find({ thread: thread._id })
+      .sort({ createdAt: 1 })
+      .lean();
+
+    const mappedMessages = messages.map(m => ({
+      id: String(m._id),
+      direction: m.direction,
+      createdAt: m.createdAt,
+      sentAt: m.sentAt,
+      receivedAt: m.receivedAt,
+      subject: m.subject,
+      htmlBody: m.htmlBody,
+      textBody: m.textBody,
+      // Only proxy addresses – no real emails
+      fromAliasEmail: m.fromAliasEmail,
+      fromProxyEmail: m.fromProxyEmail,
+      toProxyEmail: m.toProxyEmail,
+      attachments: m.attachments || [],
+    }));
+
+    return res.status(200).json({
+      conversation: {
+        id: String(thread._id),
+        subject: thread.subject,
+        brand: {
+          brandId: thread.brand?.brandId || null,
+          name: thread.brand?.name || thread.brandSnapshot?.name || 'Brand',
+          aliasEmail: thread.brandAliasEmail,
+
+          
+          logoUrl: thread.brand?.logoUrl || null,
+        },
+        influencer: {
+          influencerId: thread.influencer?.influencerId || auth.influencerId,
+          name: thread.influencer?.name || influencer.name,
+          aliasEmail: thread.influencerAliasEmail,
+        },
+        lastMessageAt: thread.lastMessageAt,
+        lastMessageDirection: thread.lastMessageDirection,
+        messages: mappedMessages,
+      },
+    });
+  } catch (err) {
+    console.error('getConversationForCurrentInfluencer error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+};

@@ -135,7 +135,12 @@ const influencerSchema = new mongoose.Schema(
     passwordResetVerified: { type: Boolean, default: false },
 
     paymentMethods: { type: [paymentSchema], default: [] },
-
+    influencerAliasEmail: {
+      type: String,
+      lowercase: true,
+      unique: true,
+      sparse: true,
+    },
     subscription: {
       planName: { type: String, required: true, default: 'free' },
       planId: {

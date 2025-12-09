@@ -23,7 +23,9 @@ const {
   requestEmailUpdate,
   verifyotp,
   saveQuickOnboarding,
-  getLiteById
+  getLiteById,
+  requestClaimEmailOtp,
+  verifyClaimEmailOtp,
 } = require('../controllers/influencerController');
 
 
@@ -64,5 +66,18 @@ router.post('/requestEmailUpdate', verifyToken, requestEmailUpdate);
 router.post('/verifyEmailUpdateOtp', verifyToken, verifyotp)
 
 router.get('/lite',verifyToken, getLiteById);;
+
+router.post(
+  '/claim-email/request-otp',
+  verifyToken,
+  requestClaimEmailOtp
+);
+
+router.post(
+  '/claim-email/verify',
+  verifyToken,
+  verifyClaimEmailOtp
+);
+
 
 module.exports = router;

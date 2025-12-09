@@ -21,7 +21,8 @@ const Campaign = require('../models/campaign');
 const Audience = require('../models/audience');            // ensure this path exists
 const AudienceRange = require('../models/audienceRange');  // ensure this path exists
 const Modash = require('../models/modash');
-
+const { linkConversationsForInfluencer } = require('../services/emailLinking');
+const { attachExternalEmailToInfluencer } = require('../utils/emailAliases');
 // Utils
 const subscriptionHelper = require('../utils/subscriptionHelper');
 const { escapeRegExp } = require('../utils/searchTokens');
@@ -145,6 +146,10 @@ async function sendMail({ to, subject, html, text }) {
   } catch (e) {
     console.error('[mailer] sendMail failed:', e?.message || e);
   }
+}
+
+function norm(e) {
+  return String(e || '').trim().toLowerCase();
 }
 
 /* ============================ Misc Normalizers ============================ */
@@ -272,13 +277,24 @@ exports.requestOtpInfluencer = async (req, res) => {
 
   try {
     const emailRegexCI = new RegExp(`^${escapeRegExp(normalizedEmail)}$`, 'i');
-    const alreadyRegistered =
-      normalizedRole === 'Influencer'
-        ? await Influencer.findOne({ email: emailRegexCI }, '_id')
-        : await Brand.findOne({ email: emailRegexCI }, '_id');
 
-    if (alreadyRegistered) return res.status(409).json({ message: 'User already present' });
+    if (normalizedRole === 'Influencer') {
+      // Only treat as "already registered" if this email belongs to a fully registered account
+      const existingInf = await Influencer.findOne(
+        { email: emailRegexCI },
+        'otpVerified'
+      );
 
+      if (existingInf && existingInf.otpVerified) {
+        return res.status(409).json({ message: 'User already present' });
+      }
+      // if influencer exists but otpVerified === false → allow OTP so they can "claim" it
+    } else {
+      const existingBrand = await Brand.findOne({ email: emailRegexCI }, '_id');
+      if (existingBrand) {
+        return res.status(409).json({ message: 'User already present' });
+      }
+    }
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
@@ -609,14 +625,18 @@ exports.registerInfluencer = async (req, res) => {
     if (!verifiedRec) return res.status(400).json({ message: 'Email not verified' });
 
     const emailRegexCI = new RegExp(`^${escapeRegExp(normalizedEmail)}$`, 'i');
-    const already = await Influencer.findOne({ email: emailRegexCI }, '_id');
-    if (already) return res.status(400).json({ message: 'Already registered' });
+    // Look up any existing influencer with this email
+    const existingInf = await Influencer.findOne({ email: emailRegexCI });
+
+    if (existingInf && existingInf.otpVerified) {
+      // This is a fully registered account → block
+      return res.status(400).json({ message: 'Already registered' });
+    }
 
     const [countryDoc] = await Promise.all([
       Country.findById(countryId)
     ]);
     if (!countryDoc) return res.status(400).json({ message: 'Invalid countryId' });
-
     // 🔹 1) Build Modash profile payloads from incoming data
     const profiles = [];
 
@@ -714,28 +734,53 @@ exports.registerInfluencer = async (req, res) => {
     }
 
     // 🔹 5) Create core Influencer document (NO socialProfiles HERE anymore)
-    const inf = new Influencer({
-      name,
-      email: normalizedEmail,
-      password,
-      phone: phone || '',
+    let inf = existingInf;
 
-      primaryPlatform,
+    if (!inf) {
+      // Normal case: no influencer yet → create new
+      inf = new Influencer({
+        name,
+        email: normalizedEmail,
+        password,
+        phone: phone || '',
 
-      countryId,
-      country: countryDoc.countryName,
+        primaryPlatform,
 
-      city: city || '',
-      gender: gender || '',
-      dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : undefined,
-      languages: languageDocs,
+        countryId,
+        country: countryDoc.countryName,
 
-      otpVerified: true
-    });
+        city: city || '',
+        gender: gender || '',
+        dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : undefined,
+        languages: languageDocs,
 
-    // 🔹 6) Attach free subscription plan if available
+        otpVerified: true
+      });
+    } else {
+      // CLAIM CASE: this email was pre-created from an invite / admin flow.
+      // Upgrade it into a real, login-able account.
+      inf.name = name;
+      inf.email = normalizedEmail; // just to be safe
+      inf.password = password;
+      inf.phone = phone || inf.phone || '';
+
+      inf.primaryPlatform = primaryPlatform;
+
+      inf.countryId = countryId;
+      inf.country = countryDoc.countryName;
+      inf.city = city || inf.city || '';
+
+      // You can choose whether to override or keep previous gender/dateOfBirth:
+      inf.gender = gender || inf.gender || '';
+      inf.dateOfBirth = dateOfBirth ? new Date(dateOfBirth) : inf.dateOfBirth;
+
+      inf.languages = languageDocs;
+      inf.otpVerified = true; // mark as fully registered now
+    }
+
+    // Attach free subscription ONLY if they don't already have a plan
     const freePlan = await subscriptionHelper.getFreePlan('Influencer');
-    if (freePlan) {
+    if (freePlan && (!inf.subscription || !inf.subscription.planId)) {
       inf.subscription = {
         planId: freePlan.planId,
         planName: freePlan.name,
@@ -749,9 +794,9 @@ exports.registerInfluencer = async (req, res) => {
       };
       inf.subscriptionExpired = false;
     }
-    // Save influencer first
-    await inf.save();
 
+    await inf.save();
+    await linkConversationsForInfluencer(inf, inf.email);
     // 🔹 7) Persist Modash profile data in separate Modash collection
     try {
       await Promise.all(
@@ -966,7 +1011,7 @@ exports.login = async (req, res) => {
       }
 
       await influencer.save();
-
+      await linkConversationsForInfluencer(influencer, influencer.email);
       if (influencer.lockUntil && influencer.lockUntil > now) {
         return res.status(403).json({
           message: 'Too many failed attempts. Account locked for 24 hours.',
@@ -1975,6 +2020,122 @@ exports.getLiteById = async (req, res) => {
     });
   } catch (err) {
     console.error('Error in getLiteById:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+exports.requestClaimEmailOtp = async (req, res) => {
+  try {
+    const requester = req.influencer;
+    const { externalEmail } = req.body || {};
+
+    if (!requester || !requester.influencerId) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+    if (!externalEmail) {
+      return res.status(400).json({ message: 'externalEmail is required' });
+    }
+
+    const normalized = norm(externalEmail);
+    if (!normalized) {
+      return res.status(400).json({ message: 'Invalid externalEmail' });
+    }
+
+    const inf = await Influencer.findOne({ influencerId: requester.influencerId });
+    if (!inf) {
+      return res.status(404).json({ message: 'Influencer not found' });
+    }
+
+    if (normalized === norm(inf.email)) {
+      return res.status(400).json({ message: 'This email is already your login email' });
+    }
+
+    // Generate OTP for role "InfluencerAlias"
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+    await VerifyEmail.findOneAndUpdate(
+      { email: normalized, role: 'InfluencerAlias' },
+      {
+        $setOnInsert: { email: normalized, role: 'InfluencerAlias' },
+        $set: { otpCode: code, otpExpiresAt: expiresAt, verified: false },
+        $inc: { attempts: 1 },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    const subject = 'Verify this email to link your conversations';
+    const html = otpHtmlTemplate({
+      title: 'Verify your additional email',
+      subtitle: 'Use this code to link your past CollabGlam conversations.',
+      code,
+      minutes: 10,
+      preheader: 'Link your email to CollabGlam',
+    });
+    const text = otpTextFallback({
+      code,
+      minutes: 10,
+      title: 'Verify your additional email',
+    });
+
+    await sendMail({ to: normalized, subject, html, text });
+
+    return res.status(200).json({ message: 'OTP sent to external email' });
+  } catch (err) {
+    console.error('requestClaimEmailOtp error:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+exports.verifyClaimEmailOtp = async (req, res) => {
+  try {
+    const requester = req.influencer;
+    const { externalEmail, otp } = req.body || {};
+
+    if (!requester || !requester.influencerId) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+    if (!externalEmail || !otp) {
+      return res.status(400).json({ message: 'externalEmail and otp are required' });
+    }
+
+    const normalized = norm(externalEmail);
+    const code = String(otp).trim();
+
+    const inf = await Influencer.findOne({ influencerId: requester.influencerId });
+    if (!inf) {
+      return res.status(404).json({ message: 'Influencer not found' });
+    }
+
+    const ve = await VerifyEmail.findOne({
+      email: normalized,
+      role: 'InfluencerAlias',
+      otpCode: code,
+      otpExpiresAt: { $gt: new Date() },
+    });
+
+    if (!ve) {
+      return res.status(400).json({ message: 'Invalid or expired OTP' });
+    }
+
+    // Mark verified & clear
+    ve.verified = true;
+    ve.verifiedAt = new Date();
+    ve.otpCode = undefined;
+    ve.otpExpiresAt = undefined;
+    await ve.save();
+
+    // Attach externalEmail -> influencer in EmailAlias
+    await attachExternalEmailToInfluencer(inf, normalized);
+
+    // Link all conversations that used that email
+    await linkConversationsForInfluencer(inf, normalized);
+
+    return res.status(200).json({
+      message: 'Email linked successfully. Your past conversations are now attached.',
+    });
+  } catch (err) {
+    console.error('verifyClaimEmailOtp error:', err);
     return res.status(500).json({ message: 'Internal server error' });
   }
 };

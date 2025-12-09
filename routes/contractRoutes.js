@@ -29,11 +29,6 @@ const {
   resend,
 } = require('../controllers/contractController');
 
-/**
- * v2 — Color-owner flow
- * YELLOW (Brand) → GREY (System) → PURPLE (Influencer) → GREEN (Admin) → Sign & Lock
- */
-
 // Initiation & viewing
 router.post('/initiate', initiate);                      // Brand fills Yellow; System expands Grey
 router.post('/viewed', viewed);                          // Mark viewed
