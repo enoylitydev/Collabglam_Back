@@ -49,6 +49,27 @@ function formatInfluencerAddressLines(inf = {}) {
   return compactJoin([line1, line2, cityStateZip, country], ", ");
 }
 
+function formatDateTZ(date, tz, fmt = "MMMM D, YYYY") {
+  if (!date) return "";
+
+  const d = date instanceof Date ? date : new Date(date);
+
+  // If this is a "date-only" value (00:00:00.000Z), treat it as a pure calendar date
+  const isDateOnlyUTC =
+    d.getUTCHours() === 0 &&
+    d.getUTCMinutes() === 0 &&
+    d.getUTCSeconds() === 0 &&
+    d.getUTCMilliseconds() === 0;
+
+  if (isDateOnlyUTC) {
+    return moment.utc(d).format(fmt);
+  }
+
+  // For true instants (timestamps, signatures, etc.), respect the contract timezone
+  return tz ? moment(d).tz(tz).format(fmt) : moment(d).format(fmt);
+}
+
+
 function buildInfluencerAcceptanceTableHTML(inf = {}) {
   const cells = {
     legalName: esc(inf.legalName || ""),
@@ -87,7 +108,10 @@ function respondError(res, message = "Internal server error", status = 500, err 
 }
 
 const tzOr = (c, fallback = "America/Los_Angeles") =>
-  c?.admin?.timezone || c?.requestedEffectiveDateTimezone || c?.effectiveDateTimezone || fallback;
+  c?.requestedEffectiveDateTimezone ||
+  c?.effectiveDateTimezone ||
+  c?.admin?.timezone ||
+  fallback;
 
 function loadTimezones() {
   try {
@@ -222,16 +246,11 @@ function legalTextToHTML(raw) {
   return out.join("\n");
 }
 
-function formatDateTZ(date, tz, fmt = "MMMM D, YYYY") {
-  return moment(date).tz(tz).format(fmt);
-}
-
 function getBrandSelectedEffectiveDate(contract) {
   return contract?.requestedEffectiveDate
     || contract?.brand?.requestedEffectiveDate
     || null;
 }
-
 
 function signaturePanelHTML(contract) {
   const tz = tzOr(contract);
@@ -1315,7 +1334,7 @@ exports.initiate = async (req, res) => {
       other,
       admin,
       confirmations: { brand: { confirmed: false }, influencer: { confirmed: false } },
-      requestedEffectiveDate: requestedEffectiveDate ? new Date(requestedEffectiveDate) : undefined,
+      requestedEffectiveDate: requestedEffectiveDate || undefined,
       requestedEffectiveDateTimezone:
         requestedEffectiveDateTimezone || admin.timezone,
       brandName: other.brandProfile.legalName,
@@ -1698,31 +1717,53 @@ exports.preview = async (req, res) => {
   try {
     const { contractId } = req.query;
     assertRequired(req.query, ["contractId"]);
+
     const contract = await Contract.findOne({ contractId });
     if (!contract) return respondError(res, "Contract not found", 404);
 
-    const tz = tzOr(contract);
-    const text = contract.lockedAt
-      ? contract.renderedTextSnapshot
-      : renderTemplate(
-        contract.admin?.legalTemplateText || MASTER_TEMPLATE,
-        buildTokenMap(contract)
-      );
+    let tokens;
+    let templateText;
+    let renderedText;
 
-    const html = renderContractHTML({ contract, templateText: text });
-    const tokens = buildTokenMap(contract);
-    const headerDate = tokens["Agreement.EffectiveDateLong"] || "Pending";
+    if (contract.lockedAt && contract.renderedTextSnapshot) {
+      // Use the exact snapshot that was frozen at locking time
+      renderedText = contract.renderedTextSnapshot;
+      tokens = contract.templateTokensSnapshot || buildTokenMap(contract);
+      templateText = renderedText; // renderContractHTML expects already-rendered text here
+    } else {
+      // Live preview – use current template + tokens
+      templateText = contract.admin?.legalTemplateText || MASTER_TEMPLATE;
+      tokens = buildTokenMap(contract);
+      renderedText = renderTemplate(templateText, tokens);
+      templateText = renderedText;
+    }
+
+    const html = renderContractHTML({
+      contract,
+      templateText,
+    });
+
+    const headerTitle =
+      "COLLABGLAM MASTER BRAND–INFLUENCER AGREEMENT (TRI-PARTY)";
+    const headerDate =
+      tokens["Agreement.EffectiveDateLong"] ||
+      tokens["Agreement.EffectiveDate"] ||
+      "Pending";
 
     return await renderPDFWithPuppeteer({
       html,
       res,
-      filename: `Contract-${contractId}.pdf`,
-      headerTitle:
-        "COLLABGLAM MASTER BRAND–INFLUENCER AGREEMENT (TRI-PARTY)",
+      filename: `Contract-Preview-${contractId}.pdf`,
+      headerTitle,
       headerDate,
     });
   } catch (err) {
-    return respondError(res, err.message || "preview error", err.status || 500, err);
+    return respondError(
+      res,
+      err.message || "preview error",
+      err.status || 500,
+      err
+    );
   }
 };
 
