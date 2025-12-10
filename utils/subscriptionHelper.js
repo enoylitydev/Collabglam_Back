@@ -5,12 +5,12 @@ exports.getFreePlan = async (role) => {
   const targetName = 'free';
 
   let plan = await SubscriptionPlan
-    .findOne({ role, name: targetName, status: 'active' })
+    .findOne({ role, name: targetName })
     .select('+features +durationMins +durationMinutes +durationDays');
 
   if (!plan) {
     plan = await SubscriptionPlan
-      .findOne({ role, name: new RegExp(`^${targetName}$`, 'i'), status: 'active' })
+      .findOne({ role, name: new RegExp(`^${targetName}$`, 'i') })
       .select('+features +durationMins +durationMinutes +durationDays');
   }
 
