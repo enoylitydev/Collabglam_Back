@@ -7,20 +7,23 @@ exports.getFreePlan = async (role) => {
   let plan = await SubscriptionPlan
     .findOne({ role, name: targetName })
     .select('+features +durationMins +durationMinutes +durationDays');
+  console.log('[getFreePlan] after first query:', !!plan, { role, name: targetName });
 
   if (!plan) {
     plan = await SubscriptionPlan
       .findOne({ role, name: new RegExp(`^${targetName}$`, 'i') })
       .select('+features +durationMins +durationMinutes +durationDays');
+    console.log('[getFreePlan] after fallback query:', !!plan);
   }
 
-  if (!plan) return null;
+  if (!plan) {
+    console.warn('[getFreePlan] No free plan found for role:', role);
+    return null;
+  }
 
   const out = typeof plan.toObject === 'function' ? plan.toObject() : plan;
-
-  // ALWAYS just use features
   out.features = Array.isArray(out.features) ? out.features : [];
-
+  console.log('[getFreePlan] returning planId:', out.planId, 'name:', out.name);
   return out;
 };
 

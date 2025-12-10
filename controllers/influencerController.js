@@ -780,6 +780,12 @@ exports.registerInfluencer = async (req, res) => {
 
     // Attach free subscription ONLY if they don't already have a plan
     const freePlan = await subscriptionHelper.getFreePlan('Influencer');
+    console.log('[registerInfluencer] freePlan for Influencer:', freePlan && {
+      planId: freePlan.planId,
+      role: freePlan.role,
+      name: freePlan.name,
+    });
+
     if (freePlan && (!inf.subscription || !inf.subscription.planId)) {
       inf.subscription = {
         planId: freePlan.planId,

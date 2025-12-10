@@ -18,8 +18,33 @@ const { createAndEmit } = require('../utils/notifier'); // ← notifications
 // Files
 const TIMEZONES_FILE = path.join(__dirname, "..", "data", "timezones.json");
 const CURRENCIES_FILE = path.join(__dirname, "..", "data", "currencies.json");
+const DEFAULT_TZ = "America/Los_Angeles";
 
 // ============================ Helpers ============================
+
+function buildRequestedEffectiveDate(rawDate, tz) {
+  if (!rawDate) return undefined;
+
+  const zone = tz || DEFAULT_TZ;
+
+  // Normalize to "YYYY-MM-DD"
+  const dateStr = String(rawDate).split("T")[0];
+  const [year, month, day] = dateStr.split("-").map((p) => parseInt(p, 10));
+
+  if (!year || !month || !day) {
+    // Fallback to old behaviour if the format is unexpected
+    return new Date(rawDate);
+  }
+
+  // Get "now" in that timezone
+  const nowInZone = moment.tz(zone);
+
+  // Replace the calendar date, keep current local time-of-day
+  nowInZone.year(year).month(month - 1).date(day);
+
+  return nowInZone.toDate();
+}
+
 function compactJoin(parts, sep = ", ") {
   return parts
     .filter(Boolean)
@@ -871,7 +896,7 @@ process.on("exit", async () => {
       const b = await sharedBrowserPromise;
       if (b && b.close) await b.close();
     }
-  } catch (_) {}
+  } catch (_) { }
 });
 
 async function renderPDFWithPuppeteer({
@@ -964,7 +989,7 @@ async function renderPDFWithPuppeteer({
     if (page) {
       try {
         await page.close();
-      } catch (_) {}
+      } catch (_) { }
     }
   }
 }
@@ -1166,6 +1191,16 @@ async function buildResendChildContract(
     deliverablesExpanded,
   };
 
+  const effectiveTz =
+    requestedEffectiveDateTimezone ||
+    parent.requestedEffectiveDateTimezone ||
+    admin.timezone ||
+    DEFAULT_TZ;
+
+  const effectiveDateBuilt = requestedEffectiveDate
+    ? buildRequestedEffectiveDate(requestedEffectiveDate, effectiveTz)
+    : parent.requestedEffectiveDate || undefined;
+
   const baseChild = {
     brandId: parent.brandId,
     influencerId: parent.influencerId,
@@ -1194,12 +1229,8 @@ async function buildResendChildContract(
     influencerAddress: parent.influencerAddress,
     influencerHandle: enforcedHandle,
 
-    requestedEffectiveDate: requestedEffectiveDate
-      ? new Date(requestedEffectiveDate)
-      : parent.requestedEffectiveDate || undefined,
-    requestedEffectiveDateTimezone:
-      requestedEffectiveDateTimezone || parent.requestedEffectiveDateTimezone || admin.timezone,
-
+    requestedEffectiveDate: effectiveDateBuilt,
+    requestedEffectiveDateTimezone: effectiveTz,
     resendIteration: (parent.resendIteration || 0) + 1,
     resendOf: parent.contractId,
   };
@@ -1264,8 +1295,10 @@ exports.initiate = async (req, res) => {
       autoCalcs: {},
     };
 
+    const adminTimezone = campaign?.timezone || DEFAULT_TZ;
+
     const admin = {
-      timezone: campaign?.timezone || "America/Los_Angeles",
+      timezone: adminTimezone,
       jurisdiction: "USA",
       arbitrationSeat: "San Francisco, CA",
       fxSource: "ECB",
@@ -1325,6 +1358,13 @@ exports.initiate = async (req, res) => {
     other.autoCalcs.firstDraftDue = draftDue;
     other.autoCalcs.tokensExpandedAt = new Date();
 
+    const effectiveTz =
+      requestedEffectiveDateTimezone || adminTimezone || DEFAULT_TZ;
+
+    const requestedDateBuilt = requestedEffectiveDate
+      ? buildRequestedEffectiveDate(requestedEffectiveDate, effectiveTz)
+      : undefined;
+
     const base = {
       brandId,
       influencerId,
@@ -1334,9 +1374,8 @@ exports.initiate = async (req, res) => {
       other,
       admin,
       confirmations: { brand: { confirmed: false }, influencer: { confirmed: false } },
-      requestedEffectiveDate: requestedEffectiveDate || undefined,
-      requestedEffectiveDateTimezone:
-        requestedEffectiveDateTimezone || admin.timezone,
+      requestedEffectiveDate: requestedDateBuilt,
+      requestedEffectiveDateTimezone: effectiveTz,
       brandName: other.brandProfile.legalName,
       brandAddress: other.brandProfile.address,
       influencerName: other.influencerProfile.legalName,
@@ -2074,9 +2113,19 @@ exports.brandUpdateFields = async (req, res) => {
       }
 
       if (k === "requestedEffectiveDate") {
-        contract.requestedEffectiveDate = new Date(brandUpdates[k]);
+        const tz =
+          brandUpdates.requestedEffectiveDateTimezone ||
+          contract.requestedEffectiveDateTimezone ||
+          contract.admin?.timezone ||
+          DEFAULT_TZ;
+
+        contract.requestedEffectiveDate = buildRequestedEffectiveDate(
+          brandUpdates[k],
+          tz
+        );
       } else if (k === "requestedEffectiveDateTimezone") {
-        contract.requestedEffectiveDateTimezone = brandUpdates[k];
+        contract.requestedEffectiveDateTimezone =
+          brandUpdates[k] || DEFAULT_TZ;
       } else {
         contract.brand[k] = brandUpdates[k];
       }
