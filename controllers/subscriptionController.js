@@ -96,9 +96,6 @@ exports.deletePlan = async (req, res) => {
   }
 };
 
-
-
-
 exports.assignPlan = async (req, res) => {
   try {
     const { userType, userId, planId } = req.body;
@@ -151,10 +148,6 @@ exports.assignPlan = async (req, res) => {
     return res.status(500).json({ message: 'Internal server error while assigning plan.' });
   }
 };
-
-
-
-
 
 exports.renewPlan = async (req, res) => {
   const { userType, userId } = req.body;

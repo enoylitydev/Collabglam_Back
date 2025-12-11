@@ -22,6 +22,12 @@ const DEFAULT_TZ = "America/Los_Angeles";
 
 // ============================ Helpers ============================
 
+
+function nowInContractTz(contract) {
+  const zone = tzOr(contract);
+  return moment.tz(zone).toDate();
+}
+
 function buildRequestedEffectiveDate(rawDate, tz) {
   if (!rawDate) return undefined;
 
@@ -1304,11 +1310,6 @@ exports.initiate = async (req, res) => {
       },
       autoCalcs: {},
     };
-
-    function nowInContractTz(contract) {
-      const zone = tzOr(contract);
-      return moment.tz(zone).toDate();
-    }
 
     const adminTimezone =
       campaign?.timezone ||
