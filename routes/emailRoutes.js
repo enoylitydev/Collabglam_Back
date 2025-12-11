@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 const emailController = require('../controllers/emailController');
 const emailInboundController = require('../controllers/emailInboundController');
+const welcomeEmailController = require('../emails/wellcomeEmailController');
 
 // Template: load predefined template (with placeholders filled)
 router.get('/templates/:key', emailController.getTemplateByKey);
@@ -50,4 +51,11 @@ router.get(
   '/conversations/:id',
   emailController.getConversationForCurrentInfluencer
 );
+
+// Welcome Email for Brand
+router.post(
+  '/send-welcome',
+  welcomeEmailController.sendWelcomeEmail
+);
+
 module.exports = router;
