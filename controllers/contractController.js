@@ -589,13 +589,20 @@ function buildTokenMap(contract) {
   const b = contract.brand || {};
   const admin = contract.admin || {};
   const channels = (b.platforms || []).join(", ");
-  const displayDate = getBrandSelectedEffectiveDate(contract) || contract.effectiveDate || null;
+  const displayDate =
+    getBrandSelectedEffectiveDate(contract) || contract.effectiveDate || null;
 
   const tokens = {
     // Agreement dates
-    "Agreement.EffectiveDate": formatDateTZ(displayDate, tz),
-
-    "Agreement.EffectiveDateLong": displayDate ? formatDateTZ(displayDate, tz, "Do MMMM YYYY") : "",
+    "Agreement.EffectiveDate": displayDate
+      ? formatDateTZ(displayDate, tz) // e.g. "December 20, 2025"
+      : "",
+    "Agreement.EffectiveDateLong": displayDate
+      ? formatDateTZ(displayDate, tz, "Do MMMM YYYY") // e.g. "20th December 2025"
+      : "",
+    "Agreement.EffectiveDateTime": displayDate
+      ? formatDateTZ(displayDate, tz, "MMMM D, YYYY HH:mm z") // e.g. "December 20, 2025 15:30 PST"
+      : "",
 
     // Brand
     "Brand.LegalName": brandProfile.legalName || contract.brandName || "",
@@ -918,11 +925,11 @@ async function renderPDFWithPuppeteer({
         text-align: center;
       }
       .pdf-h .title { font-weight: bold; }
-      .pdf-h .date { margin-top: 1mm; }
+      .pdf-h .effdate { margin-top: 1mm; }
     </style>
     <div class="pdf-h">
       <div class="title">${esc(headerTitle || "")}</div>
-      <div class="date">Effective Date: ${esc(headerDate || "")}</div>
+      <div class="effdate">Effective Date &amp; Time: ${esc(headerDate || "")}</div>
     </div>`;
 
   try {
@@ -1102,12 +1109,15 @@ function resolveEffectiveDate(contract) {
 
 function maybeLockIfReady(contract) {
   if (bothSigned(contract)) {
+    const tz = tzOr(contract);
+    const now = nowInContractTz(contract);
+
     contract.effectiveDate =
       contract.effectiveDateOverride
       || getBrandSelectedEffectiveDate(contract)
       || resolveEffectiveDate(contract)
-      || new Date();
-    contract.effectiveDateTimezone = tzOr(contract);
+      || now;
+    contract.effectiveDateTimezone = tz;
 
     const tokens = buildTokenMap(contract);
     const templateText = contract.admin?.legalTemplateText || MASTER_TEMPLATE;
@@ -1295,7 +1305,15 @@ exports.initiate = async (req, res) => {
       autoCalcs: {},
     };
 
-    const adminTimezone = campaign?.timezone || DEFAULT_TZ;
+    function nowInContractTz(contract) {
+      const zone = tzOr(contract);
+      return moment.tz(zone).toDate();
+    }
+
+    const adminTimezone =
+      campaign?.timezone ||
+      requestedEffectiveDateTimezone ||
+      DEFAULT_TZ;
 
     const admin = {
       timezone: adminTimezone,
@@ -1392,7 +1410,10 @@ exports.initiate = async (req, res) => {
       const html = renderContractHTML({ contract: tmp, templateText: text });
       const headerTitle =
         "COLLABGLAM MASTER BRAND–INFLUENCER AGREEMENT (TRI-PARTY)";
-      const headerDate = tokens["Agreement.EffectiveDateLong"] || "Pending";
+      const headerDate =
+        tokens["Agreement.EffectiveDateTime"] ||
+        tokens["Agreement.EffectiveDateLong"] ||
+        "Pending";
 
       return await renderPDFWithPuppeteer({
         html,
@@ -1563,7 +1584,10 @@ exports.influencerConfirm = async (req, res) => {
       const html = renderContractHTML({ contract: tmp, templateText: text });
       const headerTitle =
         "COLLABGLAM MASTER BRAND–INFLUENCER AGREEMENT (TRI-PARTY)";
-      const headerDate = tokens["Agreement.EffectiveDateLong"] || "Pending";
+      const headerDate =
+        tokens["Agreement.EffectiveDateTime"] ||
+        tokens["Agreement.EffectiveDateLong"] ||
+        "Pending";
 
       return await renderPDFWithPuppeteer({
         html,
@@ -1584,7 +1608,7 @@ exports.influencerConfirm = async (req, res) => {
     contract.confirmations.influencer = {
       confirmed: true,
       byUserId: req.user?.id,
-      at: new Date(),
+      at: nowInContractTz(contract),
     };
     markEdit(contract, "influencer", editedFields);
 
@@ -1647,9 +1671,8 @@ exports.brandConfirm = async (req, res) => {
     contract.confirmations.brand = {
       confirmed: true,
       byUserId: req.user?.id,
-      at: new Date(),
+      at: nowInContractTz(contract),
     };
-
     // After brand acceptance the contract is ready for signing.
     contract.status = "finalize";
     await contract.save();
@@ -1785,6 +1808,7 @@ exports.preview = async (req, res) => {
     const headerTitle =
       "COLLABGLAM MASTER BRAND–INFLUENCER AGREEMENT (TRI-PARTY)";
     const headerDate =
+      tokens["Agreement.EffectiveDateTime"] ||
       tokens["Agreement.EffectiveDateLong"] ||
       tokens["Agreement.EffectiveDate"] ||
       "Pending";
@@ -1824,7 +1848,10 @@ exports.viewContractPdf = async (req, res) => {
     const html = renderContractHTML({ contract, templateText: text });
 
     const tokens = buildTokenMap(contract);
-    const headerDate = tokens["Agreement.EffectiveDateLong"] || "Pending";
+    const headerDate =
+      tokens["Agreement.EffectiveDateTime"] ||
+      tokens["Agreement.EffectiveDateLong"] ||
+      "Pending";
 
     return await renderPDFWithPuppeteer({
       html,
@@ -1919,7 +1946,7 @@ exports.sign = async (req, res) => {
     }
 
     contract.signatures = contract.signatures || {};
-    const now = new Date();
+    const now = nowInContractTz(contract);
     contract.signatures[role] = {
       ...(contract.signatures[role] || {}),
       signed: true,
@@ -2408,7 +2435,10 @@ exports.resend = async (req, res) => {
       const html = renderContractHTML({ contract: tmp, templateText: text });
       const headerTitle =
         "COLLABGLAM MASTER BRAND–INFLUENCER AGREEMENT (TRI-PARTY)";
-      const headerDate = tokens["Agreement.EffectiveDateLong"] || "Pending";
+      const headerDate =
+        tokens["Agreement.EffectiveDateTime"] ||
+        tokens["Agreement.EffectiveDateLong"] ||
+        "Pending";
 
       return await renderPDFWithPuppeteer({
         html,
