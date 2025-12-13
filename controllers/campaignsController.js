@@ -13,7 +13,7 @@ const getFeature = require('../utils/getFeature');
 const Milestone = require('../models/milestone');
 const Country = require('../models/country');
 const Modash = require('../models/modash'); // adjust path if needed
-
+const { CONTRACT_STATUS } = require("../constants/contract");
 
 // ✅ persisted notifications helper (creates DB row + emits via socket.io)
 const { createAndEmit } = require('../utils/notifier');
@@ -1283,29 +1283,81 @@ exports.getAcceptedInfluencers = async (req, res) => {
 };
 
 
-// ===============================
-//  INFLUENCER: CONTRACTED (assigned but no milestone)
-// ===============================
 exports.getContractedCampaignsByInfluencer = async (req, res) => {
   const { influencerId, search, page = 1, limit = 10 } = req.body;
-  if (!influencerId) return res.status(400).json({ message: 'influencerId is required' });
+  if (!influencerId) return res.status(400).json({ message: "influencerId is required" });
 
   try {
-    const CONTRACTED_STATUSES = ['sent', 'viewed', 'negotiation', 'finalize', 'signing', 'locked'];
+    // ✅ Canonical statuses (what your schema normalizes to)
+    const CANONICAL_CONTRACTED = [
+      CONTRACT_STATUS.BRAND_SENT_DRAFT,
+      CONTRACT_STATUS.BRAND_EDITED,
+      CONTRACT_STATUS.INFLUENCER_EDITED,
+      CONTRACT_STATUS.BRAND_ACCEPTED,
+      CONTRACT_STATUS.INFLUENCER_ACCEPTED,
+      CONTRACT_STATUS.READY_TO_SIGN,
+      CONTRACT_STATUS.CONTRACT_SIGNED,
+      CONTRACT_STATUS.MILESTONES_CREATED,
+    ];
+
+    // ✅ Optional: include legacy values for older rows that haven't been resaved/migrated
+    const LEGACY_CONTRACTED = ["sent", "viewed", "negotiation", "finalize", "signing", "locked"];
 
     const contracts = await Contract.find(
-      { influencerId, isRejected: { $ne: 1 }, status: { $in: CONTRACTED_STATUSES } },
-      'campaignId contractId feeAmount isAccepted status'
-    ).lean();
+      {
+        influencerId: String(influencerId),
+        isRejected: { $ne: 1 },
+        status: { $in: Array.from(new Set([...CANONICAL_CONTRACTED, ...LEGACY_CONTRACTED])) },
+      },
+      "campaignId contractId feeAmount isAccepted status lastActionAt createdAt"
+    )
+      .sort({ lastActionAt: -1, createdAt: -1 })
+      .lean();
 
-    const campaignIds = [...new Set(contracts.map(c => String(c.campaignId)).filter(Boolean))];
-    if (!campaignIds.length) return res.json({ meta: { total: 0, page: +page, limit: +limit, totalPages: 0 }, campaigns: [] });
+    if (!contracts.length) {
+      return res.json({ meta: { total: 0, page: +page, limit: +limit, totalPages: 0 }, campaigns: [] });
+    }
 
+    // Keep the newest contract per campaign
     const contractByCampaign = new Map();
-    contracts.forEach(c => { contractByCampaign.set(String(c.campaignId), { contractId: c.contractId || null, feeAmount: Number(c.feeAmount || 0), isAccepted: c.isAccepted === 1 ? 1 : 0, status: c.status }); });
+    for (const c of contracts) {
+      const key = String(c.campaignId);
+      if (!key) continue;
+      if (!contractByCampaign.has(key)) {
+        contractByCampaign.set(key, {
+          contractId: c.contractId || null,
+          feeAmount: Number(c.feeAmount || 0),
+          isAccepted: c.isAccepted === 1 ? 1 : 0,
+          status: c.status,
+        });
+      }
+    }
 
-    const filter = { campaignsId: { $in: campaignIds } };
-    if (search?.trim()) filter.$or = buildSearchOr(search.trim());
+    const campaignIds = Array.from(contractByCampaign.keys());
+    if (!campaignIds.length) {
+      return res.json({ meta: { total: 0, page: +page, limit: +limit, totalPages: 0 }, campaigns: [] });
+    }
+
+    // If some old contracts stored campaignId as ObjectId string, support both
+    const uuidIds = [];
+    const objIds = [];
+    for (const id of campaignIds) {
+      if (mongoose.Types.ObjectId.isValid(id) && String(new mongoose.Types.ObjectId(id)) === id) {
+        objIds.push(new mongoose.Types.ObjectId(id));
+      } else {
+        uuidIds.push(id);
+      }
+    }
+
+    let baseFilter;
+    if (uuidIds.length && objIds.length) baseFilter = { $or: [{ campaignsId: { $in: uuidIds } }, { _id: { $in: objIds } }] };
+    else if (uuidIds.length) baseFilter = { campaignsId: { $in: uuidIds } };
+    else baseFilter = { _id: { $in: objIds } };
+
+    let filter = baseFilter;
+    if (search?.trim()) {
+      filter = { $and: [baseFilter, { $or: buildSearchOr(search.trim()) }] };
+    }
 
     const pageNum = Math.max(1, parseInt(page, 10));
     const limNum = Math.max(1, parseInt(limit, 10));
@@ -1313,19 +1365,31 @@ exports.getContractedCampaignsByInfluencer = async (req, res) => {
 
     const [total, rawCampaigns] = await Promise.all([
       Campaign.countDocuments(filter),
-      Campaign.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limNum).lean()
+      Campaign.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limNum).lean(),
     ]);
 
-    const campaigns = rawCampaigns.map(c => {
-      const key = String(c.campaignsId);
+    const campaigns = rawCampaigns.map((c) => {
+      const key = String(c.campaignsId || c._id);
       const details = contractByCampaign.get(key) || {};
-      return { ...c, hasApplied: 1, isContracted: 1, isAccepted: details.isAccepted || 0, hasMilestone: c.hasMilestone ?? 0, contractId: details.contractId, feeAmount: details.feeAmount };
+      return {
+        ...c,
+        hasApplied: 1,
+        isContracted: 1,
+        isAccepted: details.isAccepted || 0,
+        hasMilestone: c.hasMilestone ?? 0,
+        contractId: details.contractId ?? null,
+        feeAmount: details.feeAmount ?? 0,
+        contractStatus: details.status ?? null,
+      };
     });
 
-    return res.json({ meta: { total, page: pageNum, limit: limNum, totalPages: Math.ceil(total / limNum) }, campaigns });
+    return res.json({
+      meta: { total, page: pageNum, limit: limNum, totalPages: Math.ceil(total / limNum) },
+      campaigns,
+    });
   } catch (err) {
-    console.error('Error in getContractedCampaignsByInfluencer:', err);
-    return res.status(500).json({ message: 'Internal server error' });
+    console.error("Error in getContractedCampaignsByInfluencer:", err);
+    return res.status(500).json({ message: "Internal server error" });
   }
 };
 

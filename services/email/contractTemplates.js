@@ -1,19 +1,29 @@
 "use strict";
 
-/**
- * Contract email templates (CollabGlam voice).
- * Tokens are the system tokens you listed:
- * {BrandName}, {InfluencerName}, {UserName}, {ContractName}, {ContractId}, {VersionNumber},
- * {PlatformLink}, {CTAUrl}, {ActionRequiredBy}, {SupportEmail}, {CompanyAddress}, {UnsubscribeLink}
- *
- * NOTE: We ensure {ContractName} always has a fallback in buildEmailVars().
- */
+const SITE_URL = "https://collabglam.com";
+
+const absUrl = (pathPlaceholder) =>
+  `${SITE_URL}/${String(pathPlaceholder).replace(/^\/+/, "")}`;
+
+const THEME = {
+  brand: {
+    ctaClass: "bg-gradient-to-r from-[#FFA135] to-[#FF7236] text-white",
+    // inline fallback (email clients that ignore classes)
+    ctaBg: "linear-gradient(90deg,#FFA135,#FF7236)",
+    ctaText: "#ffffff",
+  },
+  influencer: {
+    ctaClass: "bg-gradient-to-r from-[#FFBF00] to-[#FFDB58] text-gray-800",
+    ctaBg: "linear-gradient(90deg,#FFBF00,#FFDB58)",
+    ctaText: "#1F2937",
+  },
+};
 
 const baseFooterText = `
 Need help? Contact us at {SupportEmail}.
 
 {CompanyAddress}
-{UnsubscribeLink}
+${absUrl("{UnsubscribeLink}")}
 `.trim();
 
 const baseFooterHtml = `
@@ -22,11 +32,20 @@ const baseFooterHtml = `
 </p>
 <p style="margin:12px 0 0;font-size:12px;line-height:1.5;color:#777;">
   {CompanyAddress}<br/>
-  <a href="{UnsubscribeLink}" style="color:#777;">Unsubscribe</a>
+  <a href="${absUrl("{UnsubscribeLink}")}" style="color:#777;">Unsubscribe</a>
 </p>
 `.trim();
 
-function wrapHtml({ preheader, title, intro, bullets = [], ctaLabel }) {
+function wrapHtml({
+  theme = "brand",
+  preheader,
+  title,
+  intro,
+  bullets = [],
+  ctaLabel,
+}) {
+  const t = THEME[theme] || THEME.brand;
+
   const bulletHtml = bullets.length
     ? `<ul style="margin:12px 0 0;padding-left:18px;color:#111;font-size:14px;line-height:1.6;">
         ${bullets.map((b) => `<li style="margin:6px 0;">${b}</li>`).join("")}
@@ -54,14 +73,18 @@ function wrapHtml({ preheader, title, intro, bullets = [], ctaLabel }) {
       ${bulletHtml}
 
       <div style="margin-top:16px;">
-        <a href="{CTAUrl}" style="display:inline-block;background:#111;color:#fff;text-decoration:none;padding:12px 14px;border-radius:10px;font-weight:600;font-size:14px;">
+        <a
+          href="${absUrl("{CTAUrl}")}"
+          class="${t.ctaClass}"
+          style="display:inline-block;background:${t.ctaBg};color:${t.ctaText};text-decoration:none;padding:12px 14px;border-radius:10px;font-weight:600;font-size:14px;"
+        >
           ${ctaLabel}
         </a>
       </div>
 
       <p style="margin:12px 0 0;font-size:13px;line-height:1.6;color:#555;">
         If the button doesn’t work, open this link: <br/>
-        <a href="{PlatformLink}" style="color:#111;word-break:break-all;">{PlatformLink}</a>
+        <a href="${absUrl("{PlatformLink}")}" style="color:#111;word-break:break-all;">${absUrl("{PlatformLink}")}</a>
       </p>
 
       ${baseFooterHtml}
@@ -99,11 +122,12 @@ What to do next:
 - Add edits or comments if needed
 - Accept the terms when you’re ready
 
-Review here: {PlatformLink}
+Review here: ${absUrl("{PlatformLink}")}
 
 ${baseFooterText}
 `.trim(),
     body_html: wrapHtml({
+      theme: "influencer",
       preheader: "{UserName}, review and respond to keep the collaboration moving.",
       title: "New contract to review",
       intro:
@@ -134,11 +158,12 @@ Hi {UserName},
 
 Quick reminder — {ContractName} (v{VersionNumber}) is waiting on your review.
 
-Open the latest version here: {PlatformLink}
+Open the latest version here: ${absUrl("{PlatformLink}")}
 
 ${baseFooterText}
 `.trim(),
     body_html: wrapHtml({
+      theme: "influencer",
       preheader: "Open the latest version to edit or accept when ready.",
       title: "Reminder: action needed",
       intro:
@@ -169,11 +194,12 @@ Next steps:
 - Review the latest version
 - Accept the terms if everything looks good (this will lock edits once both accept)
 
-Open here: {PlatformLink}
+Open here: ${absUrl("{PlatformLink}")}
 
 ${baseFooterText}
 `.trim(),
     body_html: wrapHtml({
+      theme: "brand",
       preheader: "Review the latest version and accept when ready.",
       title: "Contract updated by influencer",
       intro:
@@ -209,11 +235,12 @@ Next steps:
 - Add edits if needed
 - Accept the terms again when you’re ready
 
-Open here: {PlatformLink}
+Open here: ${absUrl("{PlatformLink}")}
 
 ${baseFooterText}
 `.trim(),
     body_html: wrapHtml({
+      theme: "influencer",
       preheader: "Open the latest version to review and accept again.",
       title: "Contract updated by brand",
       intro:
@@ -244,11 +271,12 @@ Hi {UserName},
 
 Quick reminder — {ContractName} (v{VersionNumber}) is waiting on your action.
 
-Open here: {PlatformLink}
+Open here: ${absUrl("{PlatformLink}")}
 
 ${baseFooterText}
 `.trim(),
     body_html: wrapHtml({
+      theme: "brand",
       preheader: "Review the latest version and accept when ready.",
       title: "Reminder: action needed",
       intro:
@@ -277,11 +305,12 @@ Hi {UserName},
 
 If you’ve accepted this version too, editing is locked and signing is next.
 
-Open here: {PlatformLink}
+Open here: ${absUrl("{PlatformLink}")}
 
 ${baseFooterText}
 `.trim(),
     body_html: wrapHtml({
+      theme: "influencer",
       preheader: "If you’ve accepted too, signing will be available next.",
       title: "Brand accepted the latest version",
       intro:
@@ -313,11 +342,12 @@ Hi {UserName},
 
 Next step: review this version and accept when ready. Once both accept, editing is locked and signing can begin.
 
-Open here: {PlatformLink}
+Open here: ${absUrl("{PlatformLink}")}
 
 ${baseFooterText}
 `.trim(),
     body_html: wrapHtml({
+      theme: "brand",
       preheader: "Accept this version to lock edits and move to signing.",
       title: "Influencer accepted the terms",
       intro:
@@ -350,16 +380,22 @@ Both sides accepted {ContractName} (v{VersionNumber}). Editing is now locked.
 
 Next step: add signatures to complete the contract.
 
-Sign here: {PlatformLink}
+Sign here: ${absUrl("{PlatformLink}")}
 
 ${baseFooterText}
 `.trim(),
     body_html: wrapHtml({
+      // NOTE: if you want brand/influencer-specific gradients here too,
+      // send this template twice (once per role) OR split into two templates.
+      theme: "brand",
       preheader: "Both sides accepted the latest version. Add signatures next.",
       title: "Ready for signing",
       intro:
         "Both sides accepted <strong>{ContractName}</strong> (v{VersionNumber}). Editing is now locked.",
-      bullets: ["Open the contract to add your signature", "Once all required signatures are complete, we’ll confirm"],
+      bullets: [
+        "Open the contract to add your signature",
+        "Once all required signatures are complete, we’ll confirm",
+      ],
       ctaLabel: "Sign contract",
     }),
   },
@@ -381,11 +417,12 @@ Hi {UserName},
 
 All required signatures are complete for {ContractName}. Your contract is now signed and locked.
 
-View it here: {PlatformLink}
+View it here: ${absUrl("{PlatformLink}")}
 
 ${baseFooterText}
 `.trim(),
     body_html: wrapHtml({
+      theme: "brand",
       preheader: "Your contract is complete and locked for changes.",
       title: "Contract fully signed",
       intro:
@@ -412,11 +449,12 @@ Hi {UserName},
 
 Milestones were created for {ContractName}. You can review the milestone list and timelines in CollabGlam.
 
-Open here: {PlatformLink}
+Open here: ${absUrl("{PlatformLink}")}
 
 ${baseFooterText}
 `.trim(),
     body_html: wrapHtml({
+      theme: "brand",
       preheader: "Open the contract to review milestones and due dates.",
       title: "Milestones created",
       intro:
@@ -431,10 +469,7 @@ ${baseFooterText}
     event: "contract.declined",
     recipients: ["both"],
     subject: "Contract was declined",
-    subject_alt: [
-      "Update: contract declined",
-      "{ContractName} status update",
-    ],
+    subject_alt: ["Update: contract declined", "{ContractName} status update"],
     preheader: "Open CollabGlam to review details and next steps.",
     preheader_alt: "You can resend or revise the contract if needed.",
     cta_label: "View contract",
@@ -443,11 +478,12 @@ Hi {UserName},
 
 {ContractName} was declined. You can open CollabGlam to review details and decide next steps.
 
-Open here: {PlatformLink}
+Open here: ${absUrl("{PlatformLink}")}
 
 ${baseFooterText}
 `.trim(),
     body_html: wrapHtml({
+      theme: "brand",
       preheader: "Open CollabGlam to review details and next steps.",
       title: "Contract declined",
       intro:

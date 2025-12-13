@@ -37,7 +37,7 @@ const TIMEZONES_FILE = path.join(__dirname, "..", "data", "timezones.json");
 const CURRENCIES_FILE = path.join(__dirname, "..", "data", "currencies.json");
 const DEFAULT_TZ = "America/Los_Angeles";
 
-const ALLOWED_BRAND_KEYS = ["campaignTitle", "platforms", "goLive", "totalFee", "currency", "milestoneSplit", "usageBundle", "revisionsIncluded", "deliverablesPresetKey", "deliverablesExpanded", "requestedEffectiveDate", "requestedEffectiveDateTimezone",]; 
+const ALLOWED_BRAND_KEYS = ["campaignTitle", "platforms", "goLive", "totalFee", "currency", "milestoneSplit", "usageBundle", "revisionsIncluded", "deliverablesPresetKey", "deliverablesExpanded", "requestedEffectiveDate", "requestedEffectiveDateTimezone",];
 const ALLOWED_INFLUENCER_KEYS = ["shippingAddress", "dataAccess", "taxFormType", "legalName", "email", "phone", "taxId", "addressLine1", "addressLine2", "city", "state", "postalCode", "country", "notes",];
 
 // ============================ Response Helpers ============================
@@ -1004,7 +1004,55 @@ function bumpVersion(contract, byRole, byUserId, editedFields) {
   });
 }
 
-function markEdit(contract, byRole, editedFields) {
+function requiredSigners(contract) {
+  const r =
+    Array.isArray(contract.requiredSigners) && contract.requiredSigners.length
+      ? contract.requiredSigners
+      : ["brand", "influencer"];
+  return r.map((x) => String(x).toLowerCase());
+}
+
+function nextUnsignedRole(contract) {
+  const req = requiredSigners(contract);
+  for (const r of req) {
+    if (!contract.signatures?.[r]?.signed) return r;
+  }
+  return null;
+}
+
+function allRequiredSigned(contract) {
+  const sigs = contract.signatures || {};
+  return requiredSigners(contract).every((r) => Boolean(sigs?.[r]?.signed));
+}
+
+function hasAcceptedCurrent(contract, role) {
+  const v = Number(contract.version || 0);
+  const a = contract.acceptances?.[role];
+  return Boolean(a?.accepted && Number(a?.acceptedVersion) === v);
+}
+
+function markAccepted(contract, role, byUserId) {
+  const v = Number(contract.version || 0);
+
+  contract.acceptances = contract.acceptances || {};
+  contract.confirmations = contract.confirmations || {}; // legacy support
+
+  contract.acceptances[role] = {
+    ...(contract.acceptances[role] || {}),
+    accepted: true,
+    acceptedVersion: v,
+    at: new Date(),
+    byUserId: byUserId || "",
+  };
+
+  contract.confirmations[role] = {
+    confirmed: true,
+    byUserId: byUserId || "",
+    at: new Date(),
+  };
+}
+
+function markEdit(contract, byRole, byUserId, editedFields) {
   if (!Array.isArray(editedFields) || editedFields.length === 0) return;
 
   contract.isEdit = true;
@@ -1012,7 +1060,7 @@ function markEdit(contract, byRole, editedFields) {
   contract.editedFields = editedFields;
   contract.lastEdit = { isEdit: true, by: byRole, at: new Date(), fields: editedFields };
 
-  bumpVersion(contract, byRole, byRole ? undefined : undefined, editedFields);
+  bumpVersion(contract, byRole, byUserId, editedFields);
   addAudit(contract, byRole, "EDITED", { fields: editedFields });
 }
 
@@ -1026,15 +1074,26 @@ function resetAcceptancesForNewVersion(contract) {
   contract.confirmations.brand = { confirmed: false };
   contract.confirmations.influencer = { confirmed: false };
 
+  // When a new version exists, signing lock must be cleared
   contract.editsLockedAt = null;
+
+  // Signatures should not carry across versions; if you want to preserve, remove this:
+  contract.signatures = contract.signatures || {};
+  for (const k of Object.keys(contract.signatures)) {
+    contract.signatures[k] = { ...(contract.signatures[k] || {}), signed: false };
+  }
+
+  contract.awaitingRole = "influencer";
+  contract.statusFlags = contract.statusFlags || {};
+  contract.statusFlags.awaitingCollabglam = false;
 }
 
 function isLockedContract(contract) {
   const st = Contract.normalizeStatus ? Contract.normalizeStatus(contract.status) : contract.status;
   return Boolean(
     contract.lockedAt ||
-    st === CONTRACT_STATUS.CONTRACT_SIGNED ||
-    st === CONTRACT_STATUS.MILESTONES_CREATED
+      st === CONTRACT_STATUS.CONTRACT_SIGNED ||
+      st === CONTRACT_STATUS.MILESTONES_CREATED
   );
 }
 
@@ -1044,24 +1103,6 @@ function requireNotLocked(contract) {
     e.status = 400;
     throw e;
   }
-}
-
-function requiredSigners(contract) {
-  const r = Array.isArray(contract.requiredSigners) && contract.requiredSigners.length
-    ? contract.requiredSigners
-    : ["brand", "influencer"];
-  return r.map(String);
-}
-
-function allRequiredSigned(contract) {
-  const sigs = contract.signatures || {};
-  return requiredSigners(contract).every((r) => Boolean(sigs?.[r]?.signed));
-}
-
-function hasAcceptedCurrent(contract, role) {
-  const v = Number(contract.version || 0);
-  const a = contract.acceptances?.[role];
-  return Boolean(a?.accepted && Number(a?.acceptedVersion) === v);
 }
 
 function requireInfluencerAcceptedCurrent(contract) {
@@ -1092,6 +1133,55 @@ function requireReadyToSign(contract) {
     e.status = 400;
     throw e;
   }
+}
+
+// ✅ Single source of truth for status/awaitingRole once acceptances are touched
+function syncStatusFromAcceptances(contract) {
+  const prev = Contract.normalizeStatus ? Contract.normalizeStatus(contract.status) : contract.status;
+
+  const brandOk = hasAcceptedCurrent(contract, "brand");
+  const infOk = hasAcceptedCurrent(contract, "influencer");
+
+  contract.statusFlags = contract.statusFlags || {};
+
+  // If both accepted -> READY_TO_SIGN + edits lock
+  if (brandOk && infOk) {
+    contract.status = CONTRACT_STATUS.READY_TO_SIGN;
+    contract.editsLockedAt = contract.editsLockedAt || new Date();
+
+    const nextRole = nextUnsignedRole(contract) || "brand";
+    contract.awaitingRole = nextRole;
+    contract.statusFlags.awaitingCollabglam = nextRole === "collabglam";
+
+    return { movedToReady: prev !== CONTRACT_STATUS.READY_TO_SIGN, nextRole };
+  }
+
+  // Single-sided acceptances
+  if (infOk && !brandOk) {
+    contract.status = CONTRACT_STATUS.INFLUENCER_ACCEPTED;
+    contract.awaitingRole = "brand";
+    contract.statusFlags.awaitingCollabglam = false;
+    return { movedToReady: false, nextRole: "brand" };
+  }
+  if (brandOk && !infOk) {
+    contract.status = CONTRACT_STATUS.BRAND_ACCEPTED;
+    contract.awaitingRole = "influencer";
+    contract.statusFlags.awaitingCollabglam = false;
+    return { movedToReady: false, nextRole: "influencer" };
+  }
+
+  // Nobody accepted current version -> do not force status, but ensure flags are sane
+  contract.statusFlags.awaitingCollabglam = false;
+  contract.awaitingRole = contract.awaitingRole || "influencer";
+  return { movedToReady: false, nextRole: contract.awaitingRole };
+}
+
+function syncAwaitingFromSignatures(contract) {
+  contract.statusFlags = contract.statusFlags || {};
+  const nextRole = nextUnsignedRole(contract);
+  contract.awaitingRole = nextRole || null;
+  contract.statusFlags.awaitingCollabglam = nextRole === "collabglam";
+  return nextRole;
 }
 
 function resolveEffectiveDate(contract) {
@@ -1137,119 +1227,16 @@ function lockIfFullySigned(contract) {
 
   contract.lockedAt = new Date();
   contract.status = CONTRACT_STATUS.CONTRACT_SIGNED;
+  contract.awaitingRole = null;
+  contract.statusFlags = contract.statusFlags || {};
+  contract.statusFlags.awaitingCollabglam = false;
+
   addAudit(contract, "system", "LOCKED", { allSigned: true });
 }
 
-// ============================ Resend Builder ============================
-async function buildResendChildContract(
-  parent,
-  { brandInput = {}, requestedEffectiveDate, requestedEffectiveDateTimezone, userEmail, asPlain = false }
-) {
-  let deliverablesExpanded =
-    Array.isArray(brandInput.deliverablesExpanded) && brandInput.deliverablesExpanded.length
-      ? brandInput.deliverablesExpanded
-      : parent.brand?.deliverablesExpanded || [];
-
-  const influencerDoc = await Influencer.findOne({ influencerId: parent.influencerId }, "handle").lean();
-  const enforcedHandle = influencerDoc?.handle || "";
-
-  const draftDue = clampDraftDue(brandInput.goLive?.start || parent.brand?.goLive?.start || new Date());
-
-  deliverablesExpanded = normalizeDeliverablesArray(deliverablesExpanded, {
-    enforcedHandle,
-    draftDue,
-    defaultRevRounds: parent.brand?.revisionsIncluded ?? 1,
-    extraRevisionFee: parent.admin?.extraRevisionFee ?? 0,
-  });
-
-  const admin = {
-    ...(parent.admin || {}),
-    legalTemplateText: parent.admin?.legalTemplateText || MASTER_TEMPLATE,
-  };
-
-  const other = {
-    ...(parent.other || {}),
-    influencerProfile: {
-      ...(parent.other?.influencerProfile || {}),
-      handle: enforcedHandle,
-    },
-    autoCalcs: {
-      ...(parent.other?.autoCalcs || {}),
-      firstDraftDue: draftDue,
-      tokensExpandedAt: new Date(),
-    },
-  };
-
-  const nextBrand = {
-    ...(parent.brand || {}),
-    ...brandInput,
-    deliverablesExpanded,
-  };
-
-  const effectiveTz =
-    requestedEffectiveDateTimezone ||
-    parent.requestedEffectiveDateTimezone ||
-    admin.timezone ||
-    DEFAULT_TZ;
-
-  const effectiveDateBuilt = requestedEffectiveDate
-    ? buildRequestedEffectiveDate(requestedEffectiveDate, effectiveTz)
-    : parent.requestedEffectiveDate || undefined;
-
-  const baseChild = {
-    brandId: parent.brandId,
-    influencerId: parent.influencerId,
-    campaignId: parent.campaignId,
-
-    status: CONTRACT_STATUS.BRAND_SENT_DRAFT,
-    awaitingRole: "influencer",
-    version: 0,
-    editsLockedAt: null,
-
-    requiredSigners: ["brand", "influencer", "collabglam"],
-
-    acceptances: {
-      brand: { accepted: false },
-      influencer: { accepted: false },
-    },
-
-    confirmations: {
-      brand: { confirmed: false },
-      influencer: { confirmed: false },
-    },
-
-    brand: nextBrand,
-    influencer: {},
-
-    other,
-    admin,
-
-    lastSentAt: new Date(),
-    isAssigned: 1,
-    isAccepted: 0,
-    isRejected: 0,
-
-    feeAmount: Number((brandInput.totalFee ?? nextBrand.totalFee) || 0),
-    currency: brandInput.currency || nextBrand.currency || "USD",
-
-    brandName: parent.brandName,
-    brandAddress: parent.brandAddress,
-    influencerName: parent.influencerName,
-    influencerAddress: parent.influencerAddress,
-    influencerHandle: enforcedHandle,
-
-    requestedEffectiveDate: effectiveDateBuilt,
-    requestedEffectiveDateTimezone: effectiveTz,
-
-    resendIteration: (parent.resendIteration || 0) + 1,
-    resendOf: parent.contractId,
-  };
-
-  if (asPlain) return baseChild;
-
-  const child = new Contract(baseChild);
-  addAudit(child, "system", "RESENT_CHILD_CREATED", { from: parent.contractId, by: userEmail || "system" });
-  return child;
+// ============================ Campaign helpers (robust id field) ============================
+function campaignQuery(campaignId) {
+  return { $or: [{ campaignId }, { campaignsId: campaignId }] };
 }
 
 // ============================ Controllers ============================
@@ -1321,6 +1308,13 @@ function getEmailForRole({ contract, role, brandDoc, influencerDoc }) {
       ""
     );
   }
+  if (role === "collabglam") {
+    return (
+      (contract?.admin?.collabglamSignatoryEmail || "").trim() ||
+      (process.env.COLLABGLAM_SIGNATORY_EMAIL || "").trim() ||
+      ""
+    );
+  }
   return "";
 }
 
@@ -1343,6 +1337,9 @@ function getNameForRole({ contract, role, brandDoc, influencerDoc }) {
       "Influencer"
     );
   }
+  if (role === "collabglam") {
+    return contract?.admin?.collabglamSignatoryName || "CollabGlam";
+  }
   return "User";
 }
 
@@ -1364,7 +1361,7 @@ exports.initiate = async (req, res) => {
     assertRequired(req.body, ["brandId", "influencerId", "campaignId"]);
 
     const [campaign, brandDoc, influencerDoc] = await Promise.all([
-      Campaign.findOne({ campaignsId: campaignId }),
+      Campaign.findOne(campaignQuery(campaignId)),
       Brand.findOne({ brandId }),
       Influencer.findOne({ influencerId }),
     ]);
@@ -1418,25 +1415,25 @@ exports.initiate = async (req, res) => {
       Array.isArray(brandInput.deliverablesExpanded) && brandInput.deliverablesExpanded.length
         ? brandInput.deliverablesExpanded
         : [
-          {
-            type: "Video",
-            quantity: 1,
-            format: "MP4",
-            durationSec: 60,
-            postingWindow: { start: brandInput.goLive?.start, end: brandInput.goLive?.end },
-            draftRequired: (brandInput.revisionsIncluded ?? 1) > 0,
-            minLiveHours: 720,
-            revisionRoundsIncluded: brandInput.revisionsIncluded ?? 1,
-            additionalRevisionFee: admin.extraRevisionFee ?? 0,
-            tags: [],
-            handles: [],
-            captions: "",
-            links: [],
-            disclosures: "#ad",
-            whitelistingEnabled: false,
-            sparkAdsEnabled: false,
-          },
-        ];
+            {
+              type: "Video",
+              quantity: 1,
+              format: "MP4",
+              durationSec: 60,
+              postingWindow: { start: brandInput.goLive?.start, end: brandInput.goLive?.end },
+              draftRequired: (brandInput.revisionsIncluded ?? 1) > 0,
+              minLiveHours: 720,
+              revisionRoundsIncluded: brandInput.revisionsIncluded ?? 1,
+              additionalRevisionFee: admin.extraRevisionFee ?? 0,
+              tags: [],
+              handles: [],
+              captions: "",
+              links: [],
+              disclosures: "#ad",
+              whitelistingEnabled: false,
+              sparkAdsEnabled: false,
+            },
+          ];
 
     const draftDue = clampDraftDue(brandInput.goLive?.start || new Date());
     const enforcedHandle = influencerDoc.handle || "";
@@ -1473,6 +1470,12 @@ exports.initiate = async (req, res) => {
         influencer: { accepted: false },
       },
       confirmations: { brand: { confirmed: false }, influencer: { confirmed: false } },
+
+      signatures: {
+        brand: { signed: false },
+        influencer: { signed: false },
+        collabglam: { signed: false },
+      },
 
       brand: { ...brandInput, deliverablesExpanded },
       influencer: {},
@@ -1540,7 +1543,7 @@ exports.initiate = async (req, res) => {
       await parent.save();
 
       await Campaign.updateOne(
-        { campaignId },
+        campaignQuery(campaignId),
         { $set: { isContracted: 1, contractId: child.contractId, isAccepted: 0 } }
       );
 
@@ -1561,15 +1564,13 @@ exports.initiate = async (req, res) => {
         brandId: String(brandId),
         type: "contract.initiated.self",
         title: "Contract resent",
-        message: `You resent the contract to ${influencerDoc?.name || "Influencer"} for “${campaign?.productOrServiceName || "Campaign"
-          }”.`,
+        message: `You resent the contract to ${influencerDoc?.name || "Influencer"} for “${campaign?.productOrServiceName || "Campaign"}”.`,
         entityType: "contract",
         entityId: String(child.contractId),
         actionPath: `/brand/created-campaign/applied-inf?id=${campaignId}`,
         meta: { campaignId, influencerId, resendOf: parent.contractId },
       });
 
-      // EMAIL: New contract received (influencer) + start reminder timer
       const infEmail = getEmailForRole({ contract: child, role: "influencer", influencerDoc });
       await safeSendEmail({
         contract: child,
@@ -1579,8 +1580,6 @@ exports.initiate = async (req, res) => {
         recipientName: getNameForRole({ contract: child, role: "influencer", influencerDoc }),
       });
       await safeStartReminder(child, "influencer");
-
-      // Clear brand reminder (brand just acted by resending)
       await safeClearReminder(child.contractId, "brand");
 
       return respondOK(res, { message: "Resent contract created", contract: child }, 201);
@@ -1600,7 +1599,7 @@ exports.initiate = async (req, res) => {
     await contract.save();
 
     await Campaign.updateOne(
-      { campaignId },
+      campaignQuery(campaignId),
       { $set: { isContracted: 1, contractId: contract.contractId, isAccepted: 0 } }
     );
 
@@ -1628,7 +1627,6 @@ exports.initiate = async (req, res) => {
       meta: { campaignId, influencerId },
     });
 
-    // EMAIL: New contract received (influencer) + start reminder timer
     const infEmail = getEmailForRole({ contract, role: "influencer", influencerDoc });
     await safeSendEmail({
       contract,
@@ -1646,7 +1644,7 @@ exports.initiate = async (req, res) => {
   }
 };
 
-// -------------------- VIEWED (resets reminder timer for the awaited role) --------------------
+// -------------------- VIEWED --------------------
 exports.viewed = async (req, res) => {
   try {
     const { contractId, role } = req.body;
@@ -1664,7 +1662,6 @@ exports.viewed = async (req, res) => {
     addAudit(contract, who, "VIEWED");
     await contract.save();
 
-    // Reset 30-min timer if this user is currently awaited
     if (who === "brand" || who === "influencer") {
       await safeResetReminderOnView(contract, who);
     }
@@ -1675,7 +1672,7 @@ exports.viewed = async (req, res) => {
   }
 };
 
-// -------------------- INFLUENCER CONFIRM (accept + optional edits) --------------------
+// -------------------- INFLUENCER CONFIRM --------------------
 exports.influencerConfirm = async (req, res) => {
   try {
     const { contractId, influencer: influencerData = {}, preview = false } = req.body;
@@ -1721,39 +1718,25 @@ exports.influencerConfirm = async (req, res) => {
     const editedFields = computeEditedFields(before, after, ["influencer"]);
 
     if (editedFields.length) {
-      markEdit(contract, "influencer", editedFields);
+      markEdit(contract, "influencer", req.user?.id, editedFields);
       contract.status = CONTRACT_STATUS.INFLUENCER_EDITED;
       contract.awaitingRole = "brand";
       resetAcceptancesForNewVersion(contract);
     }
 
-    const v = Number(contract.version || 0);
+    // ✅ Unified acceptance write
+    markAccepted(contract, "influencer", req.user?.id);
 
-    contract.acceptances = contract.acceptances || {};
-    contract.acceptances.influencer = {
-      accepted: true,
-      byUserId: req.user?.id,
-      at: nowInContractTz(contract),
-      acceptedVersion: v,
-    };
-
-    contract.confirmations = contract.confirmations || {};
-    contract.confirmations.influencer = {
-      confirmed: true,
-      byUserId: req.user?.id,
-      at: nowInContractTz(contract),
-    };
+    // ✅ Sync status/awaitingRole
+    const sync = syncStatusFromAcceptances(contract);
 
     contract.isAccepted = 1;
-    if (!contract.awaitingRole) contract.awaitingRole = "brand";
-    contract.status = CONTRACT_STATUS.INFLUENCER_ACCEPTED;
-
-    addAudit(contract, "influencer", "INFLUENCER_ACCEPTED", { editedFields });
+    addAudit(contract, "influencer", "INFLUENCER_ACCEPTED", { editedFields, version: contract.version, nextRole: sync.nextRole });
 
     await contract.save();
 
     await Campaign.updateOne(
-      { campaignId: contract.campaignId },
+      campaignQuery(contract.campaignId),
       { $set: { isAccepted: 1, isContracted: 1, contractId: contract.contractId } }
     );
 
@@ -1780,7 +1763,7 @@ exports.influencerConfirm = async (req, res) => {
       meta: { campaignId: contract.campaignId, brandId: contract.brandId },
     });
 
-    // EMAIL: influencer accepted -> brand notified + start brand reminder (brand action required)
+    // Email + reminders
     const brandEmail = getEmailForRole({ contract, role: "brand" });
     await safeSendEmail({
       contract,
@@ -1789,9 +1772,11 @@ exports.influencerConfirm = async (req, res) => {
       recipientRole: "brand",
       recipientName: getNameForRole({ contract, role: "brand" }),
     });
-    await safeStartReminder(contract, "brand");
 
-    // Influencer acted; clear influencer reminder
+    // Awaited role reminder (typically brand)
+    if (contract.awaitingRole === "brand") {
+      await safeStartReminder(contract, "brand");
+    }
     await safeClearReminder(contract.contractId, "influencer");
 
     return respondOK(res, { message: "Influencer acceptance saved", contract });
@@ -1800,7 +1785,7 @@ exports.influencerConfirm = async (req, res) => {
   }
 };
 
-// -------------------- BRAND CONFIRM (accept -> ready to sign + emails) --------------------
+// -------------------- BRAND CONFIRM --------------------
 exports.brandConfirm = async (req, res) => {
   try {
     const { contractId } = req.body;
@@ -1812,38 +1797,18 @@ exports.brandConfirm = async (req, res) => {
 
     if (contract.editsLockedAt) return respondError(res, "Contract is already locked for signing", 400);
 
+    // Brand acceptance requires influencer already accepted current
     requireInfluencerAcceptedCurrent(contract);
 
-    const v = Number(contract.version || 0);
+    markAccepted(contract, "brand", req.user?.id);
 
-    contract.acceptances = contract.acceptances || {};
-    contract.acceptances.brand = {
-      accepted: true,
-      byUserId: req.user?.id,
-      at: nowInContractTz(contract),
-      acceptedVersion: v,
-    };
+    const sync = syncStatusFromAcceptances(contract);
 
-    contract.confirmations = contract.confirmations || {};
-    contract.confirmations.brand = {
-      confirmed: true,
-      byUserId: req.user?.id,
-      at: nowInContractTz(contract),
-    };
-
-    contract.status = CONTRACT_STATUS.BRAND_ACCEPTED;
-
-    const bothAccepted = hasAcceptedCurrent(contract, "brand") && hasAcceptedCurrent(contract, "influencer");
-    if (bothAccepted) {
-      contract.status = CONTRACT_STATUS.READY_TO_SIGN;
-      contract.editsLockedAt = new Date();
-      contract.awaitingRole = null;
-      addAudit(contract, "system", "READY_TO_SIGN", { version: v });
-    } else {
-      contract.awaitingRole = "influencer";
+    if (sync.movedToReady) {
+      addAudit(contract, "system", "READY_TO_SIGN", { version: contract.version, nextRole: sync.nextRole });
     }
+    addAudit(contract, "brand", "BRAND_ACCEPTED", { version: contract.version });
 
-    addAudit(contract, "brand", "BRAND_ACCEPTED", { version: v });
     await contract.save();
 
     await createAndEmit({
@@ -1851,8 +1816,9 @@ exports.brandConfirm = async (req, res) => {
       influencerId: String(contract.influencerId),
       type: "contract.confirm.brand",
       title: "Brand accepted",
-      message: `${contract.brandName || "Brand"} accepted the contract. ${bothAccepted ? "Both parties can sign now." : "Awaiting influencer review."
-        }`,
+      message: `${contract.brandName || "Brand"} accepted the contract. ${
+        contract.status === CONTRACT_STATUS.READY_TO_SIGN ? "Both parties can sign now." : "Awaiting next step."
+      }`,
       entityType: "contract",
       entityId: String(contract.contractId),
       actionPath: `/influencer/my-campaign`,
@@ -1863,16 +1829,16 @@ exports.brandConfirm = async (req, res) => {
       brandId: String(contract.brandId),
       type: "contract.confirm.brand.self",
       title: "You accepted the contract",
-      message: bothAccepted
-        ? `You accepted the contract for “${contract.brand?.campaignTitle || "Campaign"}”. Both parties can proceed to sign.`
-        : `You accepted the contract for “${contract.brand?.campaignTitle || "Campaign"}”. Awaiting influencer review.`,
+      message:
+        contract.status === CONTRACT_STATUS.READY_TO_SIGN
+          ? `You accepted the contract for “${contract.brand?.campaignTitle || "Campaign"}”. Signing is open.`
+          : `You accepted the contract for “${contract.brand?.campaignTitle || "Campaign"}”.`,
       entityType: "contract",
       entityId: String(contract.contractId),
       actionPath: `/brand/created-campaign/applied-inf?id=${contract.campaignId}`,
       meta: { campaignId: contract.campaignId, influencerId: contract.influencerId },
     });
 
-    // EMAIL: brand accepted -> influencer notified
     const influencerEmail = getEmailForRole({ contract, role: "influencer" });
     await safeSendEmail({
       contract,
@@ -1882,8 +1848,8 @@ exports.brandConfirm = async (req, res) => {
       recipientName: getNameForRole({ contract, role: "influencer" }),
     });
 
-    // EMAIL: ready to sign -> both (if both accepted)
-    if (bothAccepted && contract.status === CONTRACT_STATUS.READY_TO_SIGN && contract.editsLockedAt) {
+    // If ready to sign -> email both and stop reminders
+    if (contract.status === CONTRACT_STATUS.READY_TO_SIGN && contract.editsLockedAt) {
       const brandEmail = getEmailForRole({ contract, role: "brand" });
 
       await safeSendEmail({
@@ -1893,7 +1859,6 @@ exports.brandConfirm = async (req, res) => {
         recipientRole: "brand",
         recipientName: getNameForRole({ contract, role: "brand" }),
       });
-
       await safeSendEmail({
         contract,
         templateKey: "contract_ready_to_sign_both",
@@ -1902,13 +1867,8 @@ exports.brandConfirm = async (req, res) => {
         recipientName: getNameForRole({ contract, role: "influencer" }),
       });
 
-      // stop reminders once edits are locked
       await safeClearReminder(contract.contractId, "brand");
       await safeClearReminder(contract.contractId, "influencer");
-    } else {
-      // If ever pending influencer again (rare path), start influencer reminder
-      await safeStartReminder(contract, "influencer");
-      await safeClearReminder(contract.contractId, "brand");
     }
 
     return respondOK(res, { message: "Brand acceptance saved", contract });
@@ -1917,7 +1877,7 @@ exports.brandConfirm = async (req, res) => {
   }
 };
 
-// -------------------- ADMIN UPDATE (no emails here by default) --------------------
+// -------------------- ADMIN UPDATE --------------------
 exports.adminUpdate = async (req, res) => {
   try {
     const { contractId, adminUpdates = {}, newLegalText } = req.body;
@@ -1962,7 +1922,6 @@ exports.adminUpdate = async (req, res) => {
 
     await contract.save();
 
-    // If admin changes created a new version, influencer is awaited; start reminder
     if (editedFields.length) {
       await safeStartReminder(contract, "influencer");
       await safeClearReminder(contract.contractId, "brand");
@@ -1974,7 +1933,7 @@ exports.adminUpdate = async (req, res) => {
   }
 };
 
-// -------------------- FINALIZE (ready to sign -> email both + clear reminders) --------------------
+// -------------------- FINALIZE --------------------
 exports.finalize = async (req, res) => {
   try {
     const { contractId } = req.body;
@@ -1991,10 +1950,15 @@ exports.finalize = async (req, res) => {
       return respondOK(res, { message: "Already ready to sign", contract });
     }
 
+    const prev = Contract.normalizeStatus ? Contract.normalizeStatus(contract.status) : contract.status;
+
     contract.status = CONTRACT_STATUS.READY_TO_SIGN;
     contract.editsLockedAt = new Date();
-    contract.awaitingRole = null;
-    addAudit(contract, "system", "READY_TO_SIGN", { version: contract.version });
+
+    // awaitingRole should be first unsigned signer
+    syncAwaitingFromSignatures(contract);
+
+    addAudit(contract, "system", "READY_TO_SIGN", { version: contract.version, prevStatus: prev, awaitingRole: contract.awaitingRole });
 
     await contract.save();
 
@@ -2025,7 +1989,7 @@ exports.finalize = async (req, res) => {
   }
 };
 
-// -------------------- PREVIEW PDF (no emails) --------------------
+// -------------------- PREVIEW PDF --------------------
 exports.preview = async (req, res) => {
   try {
     const { contractId } = req.query;
@@ -2062,11 +2026,11 @@ exports.preview = async (req, res) => {
       headerDate,
     });
   } catch (err) {
-    return respondError(res, err.message || "preview error", err.status || 500, err);
+    return respondError(res, err.message || "preview error", 500, err);
   }
 };
 
-// -------------------- VIEW CONTRACT PDF (no emails) --------------------
+// -------------------- VIEW CONTRACT PDF --------------------
 exports.viewContractPdf = async (req, res) => {
   let contract;
   try {
@@ -2126,7 +2090,7 @@ exports.viewContractPdf = async (req, res) => {
   }
 };
 
-// -------------------- SIGN (if locked -> email both) --------------------
+// -------------------- SIGN --------------------
 exports.sign = async (req, res) => {
   try {
     const {
@@ -2141,13 +2105,23 @@ exports.sign = async (req, res) => {
     } = req.body;
 
     assertRequired(req.body, ["contractId", "role"]);
-    if (!["brand", "influencer", "collabglam"].includes(role)) return respondError(res, "Invalid role", 400);
 
     const contract = await Contract.findOne({ contractId });
     if (!contract) return respondError(res, "Contract not found", 404);
     requireNotLocked(contract);
 
+    const signerRole = String(role).toLowerCase();
+    const allowed = requiredSigners(contract);
+    if (!allowed.includes(signerRole)) {
+      return respondError(res, `Invalid role. Allowed signers: ${allowed.join(", ")}`, 400);
+    }
+
     requireReadyToSign(contract);
+
+    // ✅ block double-sign
+    if (contract.signatures?.[signerRole]?.signed) {
+      return respondError(res, "Already signed for this role", 400);
+    }
 
     let sigImageDataUrl = null;
 
@@ -2156,7 +2130,9 @@ exports.sign = async (req, res) => {
       let base64 = "";
 
       if (signatureImageDataUrl) {
-        const m = String(signatureImageDataUrl).match(/^data:(image\/(png|jpeg|jpg));base64,([A-Za-z0-9+/=]+)$/i);
+        const m = String(signatureImageDataUrl).match(
+          /^data:(image\/(png|jpeg|jpg));base64,([A-Za-z0-9+/=]+)$/i
+        );
         if (!m) return respondError(res, "Invalid signatureImageDataUrl. Must be data URL with base64.", 400);
         mime = m[1].toLowerCase();
         base64 = m[3];
@@ -2176,8 +2152,8 @@ exports.sign = async (req, res) => {
     contract.signatures = contract.signatures || {};
     const now = nowInContractTz(contract);
 
-    contract.signatures[role] = {
-      ...(contract.signatures[role] || {}),
+    contract.signatures[signerRole] = {
+      ...(contract.signatures[signerRole] || {}),
       signed: true,
       byUserId: req.user?.id,
       name,
@@ -2185,17 +2161,23 @@ exports.sign = async (req, res) => {
       at: now,
       ...(sigImageDataUrl
         ? {
-          sigImageDataUrl,
-          sigImageBytes: Buffer.from(sigImageDataUrl.split(",")[1], "base64").length,
-        }
+            sigImageDataUrl,
+            sigImageBytes: Buffer.from(sigImageDataUrl.split(",")[1], "base64").length,
+          }
         : {}),
     };
 
-    if (effectiveDateOverride && req.user?.isAdmin) contract.effectiveDateOverride = new Date(effectiveDateOverride);
+    if (effectiveDateOverride && req.user?.isAdmin) {
+      contract.effectiveDateOverride = new Date(effectiveDateOverride);
+    }
 
-    addAudit(contract, role, "SIGNED", { role, name, email });
+    addAudit(contract, signerRole, "SIGNED", { role: signerRole, name, email });
+
+    // Update awaitingRole before locking check (UI wants to see "Awaiting CollabGlam" etc.)
+    const nextRole = syncAwaitingFromSignatures(contract);
 
     lockIfFullySigned(contract);
+
     await contract.save();
 
     const locked = isLockedContract(contract);
@@ -2203,14 +2185,24 @@ exports.sign = async (req, res) => {
     const campaignSync = { isContracted: 1, contractId: contract.contractId };
     if (contract.isAccepted === 1) campaignSync.isAccepted = 1;
     if (locked) campaignSync.contractLockedAt = contract.lockedAt || new Date();
-    await Campaign.updateOne({ campaignId: contract.campaignId }, { $set: campaignSync });
+    await Campaign.updateOne(campaignQuery(contract.campaignId), { $set: campaignSync });
 
-    // Existing notifications
+    // Notify opposite party
     const opp =
-      role === "brand"
-        ? { recipientType: "influencer", influencerId: String(contract.influencerId), type: "contract.signed.brand", path: `/influencer/my-campaign` }
-        : role === "influencer"
-          ? { recipientType: "brand", brandId: String(contract.brandId), type: "contract.signed.influencer", path: `/brand/created-campaign/applied-inf?id=${contract.campaignId}` }
+      signerRole === "brand"
+        ? {
+            recipientType: "influencer",
+            influencerId: String(contract.influencerId),
+            type: "contract.signed.brand",
+            path: `/influencer/my-campaign`,
+          }
+        : signerRole === "influencer"
+          ? {
+              recipientType: "brand",
+              brandId: String(contract.brandId),
+              type: "contract.signed.influencer",
+              path: `/brand/created-campaign/applied-inf?id=${contract.campaignId}`,
+            }
           : null;
 
     if (opp) {
@@ -2219,15 +2211,16 @@ exports.sign = async (req, res) => {
         brandId: opp.brandId,
         influencerId: opp.influencerId,
         type: opp.type,
-        title: `${role === "brand" ? "Brand" : "Influencer"} signed`,
-        message: `${role === "brand" ? contract.brandName || "Brand" : contract.influencerName || "Influencer"} added a signature.`,
+        title: `${signerRole === "brand" ? "Brand" : "Influencer"} signed`,
+        message: `${signerRole === "brand" ? contract.brandName || "Brand" : contract.influencerName || "Influencer"} added a signature.`,
         entityType: "contract",
         entityId: String(contract.contractId),
         actionPath: opp.path,
       });
     }
 
-    if (role === "brand") {
+    // Self notify
+    if (signerRole === "brand") {
       await createAndEmit({
         recipientType: "brand",
         brandId: String(contract.brandId),
@@ -2238,7 +2231,7 @@ exports.sign = async (req, res) => {
         entityId: String(contract.contractId),
         actionPath: `/brand/created-campaign/applied-inf?id=${contract.campaignId}`,
       });
-    } else if (role === "influencer") {
+    } else if (signerRole === "influencer") {
       await createAndEmit({
         recipientType: "influencer",
         influencerId: String(contract.influencerId),
@@ -2251,6 +2244,21 @@ exports.sign = async (req, res) => {
       });
     }
 
+    // ✅ Reminders: clear signer, start next (brand/influencer), none for collabglam unless you want
+    if (signerRole === "brand" || signerRole === "influencer") {
+      await safeClearReminder(contract.contractId, signerRole);
+    }
+    if (!locked) {
+      if (nextRole === "brand" || nextRole === "influencer") {
+        await safeStartReminder(contract, nextRole);
+      } else {
+        // awaiting collabglam -> stop brand+influencer reminders
+        await safeClearReminder(contract.contractId, "brand");
+        await safeClearReminder(contract.contractId, "influencer");
+      }
+    }
+
+    // Fully locked flow
     if (locked) {
       await Promise.all([
         createAndEmit({
@@ -2275,7 +2283,6 @@ exports.sign = async (req, res) => {
         }),
       ]);
 
-      // EMAIL: fully signed -> both
       const brandEmail = getEmailForRole({ contract, role: "brand" });
       const influencerEmail = getEmailForRole({ contract, role: "influencer" });
 
@@ -2297,6 +2304,16 @@ exports.sign = async (req, res) => {
 
       await safeClearReminder(contract.contractId, "brand");
       await safeClearReminder(contract.contractId, "influencer");
+    } else if (nextRole === "collabglam") {
+      // Optional: notify CollabGlam signatory if you have an email configured
+      const cgEmail = getEmailForRole({ contract, role: "collabglam" });
+      await safeSendEmail({
+        contract,
+        templateKey: "contract_ready_for_collabglam_signature",
+        to: cgEmail,
+        recipientRole: "collabglam",
+        recipientName: getNameForRole({ contract, role: "collabglam" }),
+      });
     }
 
     return respondOK(res, { message: locked ? "Signed & locked" : "Signature recorded", contract });
@@ -2306,7 +2323,7 @@ exports.sign = async (req, res) => {
   }
 };
 
-// -------------------- BRAND UPDATE FIELDS (email influencer + reminder influencer) --------------------
+// -------------------- BRAND UPDATE FIELDS --------------------
 exports.brandUpdateFields = async (req, res) => {
   try {
     const { contractId, brandId, brandUpdates = {}, type = 0 } = req.body;
@@ -2319,8 +2336,6 @@ exports.brandUpdateFields = async (req, res) => {
 
     requireNotLocked(contract);
     if (contract.editsLockedAt) return respondError(res, "Contract is locked for signing; edits are disabled", 400);
-
-    requireInfluencerAcceptedCurrent(contract);
 
     const before = { brand: contract.brand?.toObject?.() || contract.brand };
     contract.brand = contract.brand || {};
@@ -2414,7 +2429,6 @@ exports.brandUpdateFields = async (req, res) => {
       meta: { editedFields },
     });
 
-    // EMAIL: brand updated -> influencer notified + start influencer reminder
     const influencerEmail = getEmailForRole({ contract, role: "influencer" });
     await safeSendEmail({
       contract,
@@ -2433,7 +2447,7 @@ exports.brandUpdateFields = async (req, res) => {
   }
 };
 
-// -------------------- INFLUENCER UPDATE FIELDS (email brand + reminder brand) --------------------
+// -------------------- INFLUENCER UPDATE FIELDS --------------------
 exports.influencerUpdateFields = async (req, res) => {
   try {
     const { contractId, influencerUpdates = {} } = req.body;
@@ -2491,7 +2505,6 @@ exports.influencerUpdateFields = async (req, res) => {
       meta: { editedFields },
     });
 
-    // EMAIL: influencer updated -> brand notified + start brand reminder
     const brandEmail = getEmailForRole({ contract, role: "brand" });
     await safeSendEmail({
       contract,
@@ -2522,7 +2535,7 @@ exports.getContract = async (req, res) => {
   }
 };
 
-// -------------------- REJECT (email both + clear reminders) --------------------
+// -------------------- REJECT --------------------
 exports.reject = async (req, res) => {
   try {
     const { contractId, influencerId, reason } = req.body;
@@ -2540,12 +2553,14 @@ exports.reject = async (req, res) => {
     contract.status = CONTRACT_STATUS.REJECTED;
     contract.awaitingRole = null;
     contract.editsLockedAt = null;
+    contract.statusFlags = contract.statusFlags || {};
+    contract.statusFlags.awaitingCollabglam = false;
 
     addAudit(contract, "influencer", "REJECTED", { reason });
     await contract.save();
 
     await Campaign.updateOne(
-      { campaignId: contract.campaignId },
+      campaignQuery(contract.campaignId),
       { $set: { isContracted: 0, contractId: null, isAccepted: 0 } }
     );
 
@@ -2560,7 +2575,6 @@ exports.reject = async (req, res) => {
       actionPath: `/brand/created-campaign/applied-inf?id=${contract.campaignId}`,
     });
 
-    // EMAIL: declined -> both
     const brandEmail = getEmailForRole({ contract, role: "brand" });
     const influencerEmail = getEmailForRole({ contract, role: "influencer" });
 
@@ -2588,51 +2602,7 @@ exports.reject = async (req, res) => {
   }
 };
 
-// -------------------- Timezone/Currency helpers unchanged --------------------
-exports.listTimezones = async (_req, res) => {
-  try {
-    return respondOK(res, { timezones: loadTimezones() });
-  } catch (err) {
-    return respondError(res, "listTimezones error", 500, err);
-  }
-};
-
-exports.getTimezone = async (req, res) => {
-  try {
-    const { key } = req.query;
-    assertRequired(req.query, ["key"]);
-    const tz = findTimezoneByValueOrUTC(key);
-    if (!tz) return respondError(res, "Timezone not found", 404);
-    return respondOK(res, { timezone: tz });
-  } catch (err) {
-    return respondError(res, "getTimezone error", 500, err);
-  }
-};
-
-exports.listCurrencies = async (_req, res) => {
-  try {
-    const data = loadCurrencies();
-    const arr = Object.keys(data).map((code) => ({ code, ...data[code] }));
-    return respondOK(res, { currencies: arr });
-  } catch (err) {
-    return respondError(res, "listCurrencies error", 500, err);
-  }
-};
-
-exports.getCurrency = async (req, res) => {
-  try {
-    const { code } = req.query;
-    assertRequired(req.query, ["code"]);
-    const data = loadCurrencies();
-    const cur = data[String(code).toUpperCase()];
-    if (!cur) return respondError(res, "Currency not found", 404);
-    return respondOK(res, { currency: { code: String(code).toUpperCase(), ...cur } });
-  } catch (err) {
-    return respondError(res, "getCurrency error", 500, err);
-  }
-};
-
-// -------------------- RESEND (email influencer + start reminder) --------------------
+// -------------------- RESEND --------------------
 exports.resend = async (req, res) => {
   try {
     const { contractId, brandUpdates = {}, requestedEffectiveDate, requestedEffectiveDateTimezone, preview = false } = req.body;
@@ -2683,7 +2653,7 @@ exports.resend = async (req, res) => {
     await parent.save();
 
     await Campaign.updateOne(
-      { campaignId: parent.campaignId },
+      campaignQuery(parent.campaignId),
       { $set: { isContracted: 1, contractId: child.contractId, isAccepted: 0 } }
     );
 
@@ -2720,7 +2690,6 @@ exports.resend = async (req, res) => {
       },
     });
 
-    // EMAIL: New contract received (influencer) + start reminder timer
     const influencerEmail = getEmailForRole({ contract: child, role: "influencer" });
     await safeSendEmail({
       contract: child,
@@ -2735,5 +2704,49 @@ exports.resend = async (req, res) => {
     return respondOK(res, { message: "Resent contract created", contract: child }, 201);
   } catch (err) {
     return respondError(res, err.message || "resend error", err.status || 500, err);
+  }
+};
+
+// -------------------- Timezone/Currency helpers unchanged --------------------
+exports.listTimezones = async (_req, res) => {
+  try {
+    return respondOK(res, { timezones: loadTimezones() });
+  } catch (err) {
+    return respondError(res, "listTimezones error", 500, err);
+  }
+};
+
+exports.getTimezone = async (req, res) => {
+  try {
+    const { key } = req.query;
+    assertRequired(req.query, ["key"]);
+    const tz = findTimezoneByValueOrUTC(key);
+    if (!tz) return respondError(res, "Timezone not found", 404);
+    return respondOK(res, { timezone: tz });
+  } catch (err) {
+    return respondError(res, "getTimezone error", 500, err);
+  }
+};
+
+exports.listCurrencies = async (_req, res) => {
+  try {
+    const data = loadCurrencies();
+    const arr = Object.keys(data).map((code) => ({ code, ...data[code] }));
+    return respondOK(res, { currencies: arr });
+  } catch (err) {
+    return respondError(res, "listCurrencies error", 500, err);
+  }
+};
+
+exports.getCurrency = async (req, res) => {
+  try {
+    const { code } = req.query;
+    assertRequired(req.query, ["code"]);
+    const data = loadCurrencies();
+    const cur = data[String(code).toUpperCase()];
+    if (!cur) return respondError(res, "Currency not found", 404);
+    return respondOK(res, { currency: { code: String(code).toUpperCase(), ...cur } });
+  } catch (err) {
+    return respondError(res, "getCurrency error", 500, err);
   }
 };

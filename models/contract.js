@@ -41,7 +41,7 @@ const AuditEventSchema = new mongoose.Schema(
   {
     at: { type: Date, default: Date.now },
     byUserId: { type: String, default: "" },
-    role: { type: String, enum: ["brand", "influencer", "admin", "system"], default: "system" },
+    role: { type: String, enum: ["brand", "influencer", "collabglam", "admin", "system"], default: "system" },
     type: { type: String },
     details: { type: Object, default: {} },
   },
@@ -182,7 +182,7 @@ const contractSchema = new mongoose.Schema({
 
   // Spec additions
   version: { type: Number, default: 0 },
-  awaitingRole: { type: String, enum: ["brand", "influencer", null], default: null },
+  awaitingRole: { type: String, enum: ["brand", "influencer", "collabglam"], default: null },
 
   acceptances: {
     brand: { type: AcceptanceSchema, default: () => ({ accepted: false }) },

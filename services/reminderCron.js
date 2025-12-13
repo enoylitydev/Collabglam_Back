@@ -7,7 +7,6 @@ function startReminderCron() {
   // Every minute
   cron.schedule("* * * * *", async () => {
     try {
-      console.log('running');
       await runReminderSweep();
     } catch (e) {
       console.error("[ReminderCron] sweep failed:", e);
