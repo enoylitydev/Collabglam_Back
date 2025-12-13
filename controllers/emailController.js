@@ -875,18 +875,53 @@ exports.getThreadsForInfluencer = async (req, res) => {
   }
 };
 
-/**
- * GET /api/email/messages/:threadId
- * to list all messages in a thread (for showing chat-like view).
- */
+function extractCampaignLinkFromText(text = '') {
+  // Example in your textBody:
+  // "View Campaign: https://collabglam.com/influencer/new-collab/view-campaign?id=..."
+  const m = String(text).match(/View\s*Campaign:\s*(https?:\/\/\S+)/i);
+  return m?.[1] || '';
+}
+
+function extractCampaignLinkFromHtml(html = '') {
+  const str = String(html);
+
+  // Prefer the influencer view-campaign link if present
+  let m = str.match(/href="(https?:\/\/[^"]*\/influencer\/new-collab\/view-campaign\?id=[^"]+)"/i);
+  if (m?.[1]) return m[1];
+
+  // Otherwise allow /campaigns/... link
+  m = str.match(/href="(https?:\/\/[^"]*\/campaigns\/[^"]+)"/i);
+  if (m?.[1]) return m[1];
+
+  // Last resort: first href
+  m = str.match(/href="(https?:\/\/[^"]+)"/i);
+  return m?.[1] || '';
+}
+
+function getCampaignLinkForMessage(m) {
+  // If you later store campaignLink in DB, this will be used automatically
+  return (
+    m.campaignLink ||
+    extractCampaignLinkFromText(m.textBody) ||
+    extractCampaignLinkFromHtml(m.htmlBody) ||
+    ''
+  );
+}
+
 exports.getMessagesForThread = async (req, res) => {
   try {
     const { threadId } = req.params;
-    const messages = await EmailMessage.find({ thread: threadId }).sort({
-      createdAt: 1,
-    });
 
-    return res.status(200).json({ messages });
+    const messages = await EmailMessage.find({ thread: threadId })
+      .sort({ createdAt: 1 })
+      .lean();
+
+    const enriched = messages.map((m) => ({
+      ...m,
+      campaignLink: getCampaignLinkForMessage(m) || null, // ✅ separate key
+    }));
+
+    return res.status(200).json({ messages: enriched });
   } catch (err) {
     console.error('getMessagesForThread error:', err);
     return res.status(500).json({ error: 'Internal server error' });
@@ -1073,7 +1108,7 @@ exports.getCampaignInvitationPreview = async (req, res) => {
     const link =
       campaignLink ||
       (baseUrl
-        ? `${baseUrl.replace(/\/$/, '')}/campaigns/${campaign.campaignsId}`
+        ? `${baseUrl.replace(/\/$/, '')}/influencer/new-collab/view-campaign?id=${campaign.campaignsId}`
         : '#');
 
     // Build full invitation email (same as sendCampaignInvitation)
@@ -1472,7 +1507,7 @@ async function sendCampaignInvitationInternal(payload = {}) {
     const link =
       campaignLink ||
       (baseUrl
-        ? `${baseUrl.replace(/\/$/, '')}/campaigns/${campaign.campaignsId}`
+        ? `${baseUrl.replace(/\/$/, '')}/influencer/new-collab/view-campaign?id=${campaign.campaignsId}`
         : '#');
 
     // Build full campaign invitation email
