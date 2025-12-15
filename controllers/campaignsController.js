@@ -129,6 +129,31 @@ const upload = multer({
 // ===============================
 //  Helpers
 // ===============================
+
+function activeAcceptedFilter() {
+  return {
+    isAccepted: 1,
+    isRejected: { $ne: 1 },
+    status: { $nin: [CONTRACT_STATUS.REJECTED, CONTRACT_STATUS.SUPERSEDED] },
+    $or: [
+      { supersededBy: { $exists: false } },
+      { supersededBy: null },
+      { supersededBy: "" }
+    ]
+  };
+}
+
+function campaignIdFilter(campaignId) {
+  const id = String(campaignId);
+  const or = [{ campaignId: id }, { campaignsId: id }];
+
+  // optional robustness if some rows stored ObjectId
+  if (mongoose.Types.ObjectId.isValid(id)) {
+    or.push({ campaignId: new mongoose.Types.ObjectId(id) });
+  }
+  return { $or: or };
+}
+
 function computeIsActive(timeline) {
   if (!timeline || !timeline.endDate) return 1;
   const now = new Date();
@@ -1062,9 +1087,11 @@ exports.getAcceptedCampaigns = async (req, res) => {
 
   try {
     const contracts = await Contract.find(
-      { brandId, isAccepted: 1 },
-      'campaignId contractId influencerId feeAmount'
-    ).lean();
+      { brandId, ...activeAcceptedFilter() },
+      "campaignId contractId influencerId feeAmount lastActionAt createdAt"
+    )
+      .sort({ lastActionAt: -1, createdAt: -1 })
+      .lean();
 
     const campaignIds = contracts.map((c) => c.campaignId);
     if (campaignIds.length === 0) return res.status(200).json({ meta: { total: 0, page, limit, totalPages: 0 }, campaigns: [] });
@@ -1123,10 +1150,25 @@ exports.getAcceptedInfluencers = async (req, res) => {
   }
 
   try {
+    // ✅ Only contracts that represent an active / working collaboration
+    const workingStatuses = [
+      CONTRACT_STATUS.INFLUENCER_ACCEPTED,
+      CONTRACT_STATUS.BRAND_ACCEPTED,
+      CONTRACT_STATUS.READY_TO_SIGN,
+      CONTRACT_STATUS.CONTRACT_SIGNED,
+      CONTRACT_STATUS.MILESTONES_CREATED
+    ];
+
     const contracts = await Contract.find(
-      { campaignId, isAccepted: 1 },
-      'influencerId contractId feeAmount'
-    ).lean();
+      {
+        ...campaignIdFilter(campaignId),
+        isRejected: { $ne: 1 },             // not rejected
+        status: { $in: workingStatuses }    // only working statuses
+      },
+      "influencerId contractId feeAmount lastActionAt createdAt status isAccepted isAssigned isRejected"
+    )
+      .sort({ lastActionAt: -1, createdAt: -1 })
+      .lean();
 
     const influencerIds = contracts.map((c) => c.influencerId);
     if (!influencerIds.length) {
@@ -1136,14 +1178,18 @@ exports.getAcceptedInfluencers = async (req, res) => {
       });
     }
 
+    // Keep latest contract per influencer (because of sort above)
     const contractMap = new Map();
     const feeMap = new Map();
     contracts.forEach((c) => {
-      contractMap.set(String(c.influencerId), c.contractId);
-      feeMap.set(String(c.influencerId), c.feeAmount);
+      const key = String(c.influencerId);
+      if (!contractMap.has(key)) {
+        contractMap.set(key, c.contractId);
+        feeMap.set(key, c.feeAmount);
+      }
     });
 
-    const filter = { influencerId: { $in: influencerIds } };
+    const filter = { influencerId: { $in: Array.from(contractMap.keys()) } };
     if (search && search.trim()) {
       const term = search.trim();
       const regex = new RegExp(term, 'i');
@@ -1165,7 +1211,6 @@ exports.getAcceptedInfluencers = async (req, res) => {
     const needPostSort = sortField === 'feeAmount';
     const mongoSort = needPostSort ? {} : { [sortField]: sortDir };
 
-    // 1️⃣ Fetch influencers (paged)
     const [total, rawInfluencers] = await Promise.all([
       Influencer.countDocuments(filter),
       Influencer.find(filter)
@@ -1183,14 +1228,14 @@ exports.getAcceptedInfluencers = async (req, res) => {
       });
     }
 
-    // 2️⃣ Fetch Modash profiles for ONLY these paged influencers
+    // ... 👇 rest of your existing Modash / merge logic stays the same
     const pageInfluencerIds = rawInfluencers.map((i) => String(i.influencerId));
+
     const modashProfiles = await Modash.find(
       { influencerId: { $in: pageInfluencerIds } },
       'influencerId username handle followers provider'
     ).lean();
 
-    // Group Modash docs by influencerId
     const modashByInfluencerId = new Map();
     modashProfiles.forEach((m) => {
       const key = String(m.influencerId);
@@ -1202,22 +1247,17 @@ exports.getAcceptedInfluencers = async (req, res) => {
 
     const ALLOWED_PROVIDERS = ['youtube', 'instagram', 'tiktok'];
 
-    // Helper: pick "primary" Modash profile
     function pickPrimaryProfile(influencerDoc, profilesForInfluencer) {
       if (!Array.isArray(profilesForInfluencer) || profilesForInfluencer.length === 0) {
         return null;
       }
-
       const primaryPlatform = (influencerDoc.primaryPlatform || '').toLowerCase();
-
       if (ALLOWED_PROVIDERS.includes(primaryPlatform)) {
         const direct = profilesForInfluencer.find(
           (p) => (p.provider || '').toLowerCase() === primaryPlatform
         );
         if (direct) return direct;
       }
-
-      // Fallback → profile with highest followers
       return profilesForInfluencer.reduce((best, current) => {
         if (!best) return current;
         const bestFollowers =
@@ -1228,7 +1268,6 @@ exports.getAcceptedInfluencers = async (req, res) => {
       }, null);
     }
 
-    // 3️⃣ Merge in contract info + **primary** social handle + **primary** audience size
     let influencers = rawInfluencers.map((inf) => {
       const key = String(inf.influencerId);
       const profiles = modashByInfluencerId.get(key) || [];
@@ -1243,22 +1282,21 @@ exports.getAcceptedInfluencers = async (req, res) => {
         primaryProfile && typeof primaryProfile.followers === 'number'
           ? primaryProfile.followers
           : typeof inf.followerCount === 'number'
-          ? inf.followerCount
-          : 0;
+            ? inf.followerCount
+            : 0;
 
       return {
         ...inf,
         contractId: contractMap.get(key) || null,
         feeAmount: feeMap.get(key) || 0,
         isAccepted: 1,
-        socialHandle,        // handle of primary account
-        audienceSize,        // followers of primary account
+        socialHandle,
+        audienceSize,
         primaryPlatform: inf.primaryPlatform || null,
         primaryProvider: primaryProfile ? primaryProfile.provider : null
       };
     });
 
-    // 4️⃣ Optional post-sort by feeAmount (unchanged)
     if (needPostSort) {
       influencers.sort((a, b) =>
         sortDir === 1 ? a.feeAmount - b.feeAmount : b.feeAmount - a.feeAmount
@@ -1281,7 +1319,6 @@ exports.getAcceptedInfluencers = async (req, res) => {
       .json({ message: 'Internal server error' });
   }
 };
-
 
 exports.getContractedCampaignsByInfluencer = async (req, res) => {
   const { influencerId, search, page = 1, limit = 10 } = req.body;

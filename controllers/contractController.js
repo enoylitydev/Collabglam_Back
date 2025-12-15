@@ -1092,8 +1092,8 @@ function isLockedContract(contract) {
   const st = Contract.normalizeStatus ? Contract.normalizeStatus(contract.status) : contract.status;
   return Boolean(
     contract.lockedAt ||
-      st === CONTRACT_STATUS.CONTRACT_SIGNED ||
-      st === CONTRACT_STATUS.MILESTONES_CREATED
+    st === CONTRACT_STATUS.CONTRACT_SIGNED ||
+    st === CONTRACT_STATUS.MILESTONES_CREATED
   );
 }
 
@@ -1232,6 +1232,136 @@ function lockIfFullySigned(contract) {
   contract.statusFlags.awaitingCollabglam = false;
 
   addAudit(contract, "system", "LOCKED", { allSigned: true });
+}
+
+// -------------------- RESEND helper --------------------
+function buildResendChildContract(
+  parentDoc,
+  {
+    brandInput = {},
+    requestedEffectiveDate,
+    requestedEffectiveDateTimezone,
+    userEmail,
+    asPlain = false,
+  } = {}
+) {
+  const parent = parentDoc?.toObject ? parentDoc.toObject() : parentDoc;
+
+  const tz =
+    requestedEffectiveDateTimezone ||
+    parent?.requestedEffectiveDateTimezone ||
+    parent?.admin?.timezone ||
+    DEFAULT_TZ;
+
+  const requestedDateBuilt = requestedEffectiveDate
+    ? buildRequestedEffectiveDate(requestedEffectiveDate, tz)
+    : parent?.requestedEffectiveDate;
+
+  // Merge brand changes onto parent brand snapshot
+  const mergedBrand = { ...(parent?.brand || {}), ...(brandInput || {}) };
+
+  // Deliverables normalization (keep handle + draft due logic consistent)
+  const enforcedHandle =
+    parent?.influencerHandle ||
+    parent?.other?.influencerProfile?.handle ||
+    "";
+
+  const goLiveStart = mergedBrand?.goLive?.start || parent?.brand?.goLive?.start || new Date();
+  const draftDue = clampDraftDue(goLiveStart);
+
+  let deliverablesExpanded = Array.isArray(mergedBrand.deliverablesExpanded)
+    ? mergedBrand.deliverablesExpanded
+    : (parent?.brand?.deliverablesExpanded || []);
+
+  deliverablesExpanded = normalizeDeliverablesArray(deliverablesExpanded, {
+    enforcedHandle,
+    draftDue,
+    defaultRevRounds: mergedBrand.revisionsIncluded ?? parent?.brand?.revisionsIncluded ?? 1,
+    extraRevisionFee: parent?.admin?.extraRevisionFee ?? 0,
+  });
+
+  mergedBrand.deliverablesExpanded = deliverablesExpanded;
+
+  // Carry other/admin, but refresh auto-calcs
+  const other = { ...(parent?.other || {}) };
+  other.autoCalcs = { ...(parent?.other?.autoCalcs || {}) };
+  other.autoCalcs.firstDraftDue = draftDue;
+  other.autoCalcs.tokensExpandedAt = new Date();
+
+  const childData = {
+    brandId: parent.brandId,
+    influencerId: parent.influencerId,
+    campaignId: parent.campaignId,
+
+    status: CONTRACT_STATUS.BRAND_SENT_DRAFT,
+    awaitingRole: "influencer",
+
+    version: 0,
+    editsLockedAt: null,
+    versions: [],
+
+    requiredSigners: parent.requiredSigners || ["brand", "influencer", "collabglam"],
+
+    acceptances: { brand: { accepted: false }, influencer: { accepted: false } },
+    confirmations: { brand: { confirmed: false }, influencer: { confirmed: false } },
+
+    signatures: {
+      brand: { signed: false },
+      influencer: { signed: false },
+      collabglam: { signed: false },
+    },
+
+    brand: mergedBrand,
+    influencer: {},
+
+    other,
+    admin: parent.admin,
+
+    requestedEffectiveDate: requestedDateBuilt,
+    requestedEffectiveDateTimezone: tz,
+
+    // Denorms
+    brandName: parent.brandName,
+    brandAddress: parent.brandAddress,
+    influencerName: parent.influencerName,
+    influencerAddress: parent.influencerAddress,
+    influencerHandle: parent.influencerHandle,
+
+    // Fresh activity state
+    lastSentAt: new Date(),
+    lastViewedAt: { brand: null, influencer: null },
+    reminders: { brand: {}, influencer: {} },
+    emailLog: [],
+    milestonesCreatedAt: null,
+    milestones: [],
+
+    // Legacy convenience flags
+    isAssigned: 1,
+    isAccepted: 0,
+    isRejected: 0,
+    feeAmount: Number(mergedBrand.totalFee ?? parent.feeAmount ?? 0),
+    currency: mergedBrand.currency || parent.currency || "USD",
+
+    // Resend lineage
+    resendIteration: Number(parent.resendIteration || 0) + 1,
+    resendOf: parent.contractId,
+    supersededBy: null,
+    resentAt: null,
+
+    // Ensure not locked
+    lockedAt: null,
+    effectiveDate: null,
+    effectiveDateOverride: null,
+  };
+
+  if (asPlain) return childData;
+
+  const child = new Contract(childData);
+  addAudit(child, "system", "RESENT_CHILD_CREATED", {
+    resendOf: parent.contractId,
+    by: userEmail || "system",
+  });
+  return child;
 }
 
 // ============================ Campaign helpers (robust id field) ============================
@@ -1415,25 +1545,25 @@ exports.initiate = async (req, res) => {
       Array.isArray(brandInput.deliverablesExpanded) && brandInput.deliverablesExpanded.length
         ? brandInput.deliverablesExpanded
         : [
-            {
-              type: "Video",
-              quantity: 1,
-              format: "MP4",
-              durationSec: 60,
-              postingWindow: { start: brandInput.goLive?.start, end: brandInput.goLive?.end },
-              draftRequired: (brandInput.revisionsIncluded ?? 1) > 0,
-              minLiveHours: 720,
-              revisionRoundsIncluded: brandInput.revisionsIncluded ?? 1,
-              additionalRevisionFee: admin.extraRevisionFee ?? 0,
-              tags: [],
-              handles: [],
-              captions: "",
-              links: [],
-              disclosures: "#ad",
-              whitelistingEnabled: false,
-              sparkAdsEnabled: false,
-            },
-          ];
+          {
+            type: "Video",
+            quantity: 1,
+            format: "MP4",
+            durationSec: 60,
+            postingWindow: { start: brandInput.goLive?.start, end: brandInput.goLive?.end },
+            draftRequired: (brandInput.revisionsIncluded ?? 1) > 0,
+            minLiveHours: 720,
+            revisionRoundsIncluded: brandInput.revisionsIncluded ?? 1,
+            additionalRevisionFee: admin.extraRevisionFee ?? 0,
+            tags: [],
+            handles: [],
+            captions: "",
+            links: [],
+            disclosures: "#ad",
+            whitelistingEnabled: false,
+            sparkAdsEnabled: false,
+          },
+        ];
 
     const draftDue = clampDraftDue(brandInput.goLive?.start || new Date());
     const enforcedHandle = influencerDoc.handle || "";
@@ -1816,9 +1946,8 @@ exports.brandConfirm = async (req, res) => {
       influencerId: String(contract.influencerId),
       type: "contract.confirm.brand",
       title: "Brand accepted",
-      message: `${contract.brandName || "Brand"} accepted the contract. ${
-        contract.status === CONTRACT_STATUS.READY_TO_SIGN ? "Both parties can sign now." : "Awaiting next step."
-      }`,
+      message: `${contract.brandName || "Brand"} accepted the contract. ${contract.status === CONTRACT_STATUS.READY_TO_SIGN ? "Both parties can sign now." : "Awaiting next step."
+        }`,
       entityType: "contract",
       entityId: String(contract.contractId),
       actionPath: `/influencer/my-campaign`,
@@ -2161,9 +2290,9 @@ exports.sign = async (req, res) => {
       at: now,
       ...(sigImageDataUrl
         ? {
-            sigImageDataUrl,
-            sigImageBytes: Buffer.from(sigImageDataUrl.split(",")[1], "base64").length,
-          }
+          sigImageDataUrl,
+          sigImageBytes: Buffer.from(sigImageDataUrl.split(",")[1], "base64").length,
+        }
         : {}),
     };
 
@@ -2191,18 +2320,18 @@ exports.sign = async (req, res) => {
     const opp =
       signerRole === "brand"
         ? {
-            recipientType: "influencer",
-            influencerId: String(contract.influencerId),
-            type: "contract.signed.brand",
-            path: `/influencer/my-campaign`,
-          }
+          recipientType: "influencer",
+          influencerId: String(contract.influencerId),
+          type: "contract.signed.brand",
+          path: `/influencer/my-campaign`,
+        }
         : signerRole === "influencer"
           ? {
-              recipientType: "brand",
-              brandId: String(contract.brandId),
-              type: "contract.signed.influencer",
-              path: `/brand/created-campaign/applied-inf?id=${contract.campaignId}`,
-            }
+            recipientType: "brand",
+            brandId: String(contract.brandId),
+            type: "contract.signed.influencer",
+            path: `/brand/created-campaign/applied-inf?id=${contract.campaignId}`,
+          }
           : null;
 
     if (opp) {
@@ -2549,6 +2678,7 @@ exports.reject = async (req, res) => {
       return respondError(res, "Forbidden", 403);
     }
 
+    contract.isAccepted = 0;
     contract.isRejected = 1;
     contract.status = CONTRACT_STATUS.REJECTED;
     contract.awaitingRole = null;
