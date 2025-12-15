@@ -16,6 +16,18 @@ const razorpay = new Razorpay({
 
 
 exports.createOrder = async (req, res) => {
+
+  console.log('RZP ID   =>', process.env.RAZORPAY_KEY_ID || 'MISSING');
+  console.log('RZP SEC  =>', process.env.RAZORPAY_KEY_SECRET || 'MISSING');
+
+  console.log(
+    'All Razorpay envs =>',
+    Object.fromEntries(
+      Object.entries(process.env).filter(([k]) => k.includes('RAZORPAY'))
+    )
+  );
+
+
   try {
     console.log(razorpay);
     const { amount, currency = 'USD', receipt, userId, role, planId } = req.body;
@@ -41,7 +53,7 @@ exports.createOrder = async (req, res) => {
 
     // Check if this is a FREE plan selection (role-scoped)
     const isInfluencerFree = role === 'Influencer' && planId === "a58683f0-8d6e-41b0-addd-a718c2622142";
-    const isBrandFree      = role === 'Brand'      && planId === "ca41f2c1-7fbd-4e22-b27c-d537ecbaf02a";
+    const isBrandFree = role === 'Brand' && planId === "ca41f2c1-7fbd-4e22-b27c-d537ecbaf02a";
 
     // If planId matches the FREE plan for the given role → apply free plan directly
     if (isInfluencerFree || isBrandFree) {
@@ -119,8 +131,8 @@ exports.verifyPayment = async (req, res) => {
 
     // validate signature
     const hmac = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
-                       .update(`${razorpay_order_id}|${razorpay_payment_id}`)
-                       .digest('hex');
+      .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+      .digest('hex');
 
     if (hmac !== razorpay_signature) {
       await Payment.findOneAndUpdate({ orderId: razorpay_order_id }, { status: 'failed' });
@@ -140,8 +152,8 @@ exports.verifyPayment = async (req, res) => {
       {
         paymentId: razorpay_payment_id,
         signature: razorpay_signature,
-        status:    'paid',
-        paidAt:    new Date()
+        status: 'paid',
+        paidAt: new Date()
       },
       { new: true }
     );
