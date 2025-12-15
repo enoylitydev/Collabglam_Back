@@ -16,18 +16,6 @@ const razorpay = new Razorpay({
 
 
 exports.createOrder = async (req, res) => {
-
-  console.log('RZP ID   =>', process.env.RAZORPAY_KEY_ID || 'MISSING');
-  console.log('RZP SEC  =>', process.env.RAZORPAY_KEY_SECRET || 'MISSING');
-
-  console.log(
-    'All Razorpay envs =>',
-    Object.fromEntries(
-      Object.entries(process.env).filter(([k]) => k.includes('RAZORPAY'))
-    )
-  );
-
-
   try {
     console.log(razorpay);
     const { amount, currency = 'USD', receipt, userId, role, planId } = req.body;
