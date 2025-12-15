@@ -14,11 +14,10 @@ const razorpay = new Razorpay({
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
-console.log(razorpay);
-
 
 exports.createOrder = async (req, res) => {
   try {
+    console.log(razorpay);
     const { amount, currency = 'USD', receipt, userId, role, planId } = req.body;
 
     // Basic validations
