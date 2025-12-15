@@ -6,6 +6,7 @@ const GridFSBucket = mongoose.mongo.GridFSBucket;
 const { Types } = mongoose;
 const http = require('http');
 const path = require('path');
+const { startReminderCron } = require("./services/reminderCron");
 
 // routes
 const influencerRoutes = require('./routes/influencerRoutes');
@@ -110,6 +111,7 @@ app.use((err, req, res, next) => {
 
 /* Mongo & start */
 const PORT = process.env.PORT || 5000;
+startReminderCron();
 
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => {

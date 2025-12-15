@@ -13,77 +13,49 @@ function slugifyName(name) {
   );
 }
 
-// ---------------- Email Thread Schema ----------------
-// One thread per Brand + Influencer pair. Stores alias emails.
-const emailThreadSchema = new Schema(
-  {
-    brand: {
-      type: Schema.Types.ObjectId,
-      ref: 'Brand',
-      required: true,
-    },
-    influencer: {
-      type: Schema.Types.ObjectId,
-      ref: 'Influencer',
-      required: true,
-    },
+const emailThreadSchema = new mongoose.Schema({
+  brand: { type: mongoose.Schema.Types.ObjectId, ref: 'Brand', index: true },
+  influencer: { type: mongoose.Schema.Types.ObjectId, ref: 'Influencer', index: true },
 
-    brandSnapshot: {
-      name: { type: String, required: true },
-      email: { type: String, required: true },
-    },
-    influencerSnapshot: {
-      name: { type: String, required: true },
-      email: { type: String, required: true },
-    },
+  // NEW: conversation-level info
+  subject: { type: String },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now },
 
-    /**
-     * BRAND ALIAS ADDRESS (UNIQUE PER BRAND)
-     * Example: adidas@collabglam.cloud
-     * Used as From + Reply-To and inbound routing.
-     */
-    brandAliasEmail: {
-      type: String,
-      required: true,
-      lowercase: true,
-      trim: true,
-    },
-
-    /**
-     * GLOBAL INFLUENCER ALIAS (SAME FOR EVERYONE)
-     * Example: influencer@collabglam.cloud
-     * Not unique, only used as visible "from" for influencers.
-     */
-    influencerAliasEmail: {
-      type: String,
-      required: true,
-      lowercase: true,
-      trim: true,
-      // NOTE: intentionally NOT unique
-    },
-
-    /**
-     * Optional prettier aliases to show in UI
-     * brandDisplayAlias: adidas@collabglam.cloud
-     * influencerDisplayAlias: influencer@collabglam.cloud
-     */
-    brandDisplayAlias: { type: String, trim: true },
-    influencerDisplayAlias: { type: String, trim: true },
-
-    status: {
-      type: String,
-      enum: ['active', 'archived'],
-      default: 'active',
-    },
-
-    createdBy: {
-      type: String,
-      enum: ['brand', 'influencer', 'system'],
-      default: 'system',
-    },
+  lastMessageAt: { type: Date, index: true },
+  lastMessageDirection: {
+    type: String,
+    enum: ['brand_to_influencer', 'influencer_to_brand', null],
+    default: null,
   },
-  { timestamps: true }
-);
+  lastMessageSnippet: { type: String },
+
+  // Proxy emails in use for this pair
+  brandAliasEmail: { type: String, lowercase: true, index: true },
+  influencerAliasEmail: { type: String, lowercase: true, index: true },
+
+  // What we display as "From" in UI
+  brandDisplayAlias: { type: String },
+  influencerDisplayAlias: { type: String },
+
+  // Snapshots for UI
+  brandSnapshot: {
+    name: String,
+    email: String,
+  },
+  influencerSnapshot: {
+    name: String,
+    email: String,
+  },
+
+  status: {
+    type: String,
+    enum: ['active', 'archived'],
+    default: 'active',
+  },
+
+  createdBy: { type: String }, // 'brand' | 'influencer' | 'system'
+}, { timestamps: true });
 
 // Only one thread per brand + influencer pair
 emailThreadSchema.index({ brand: 1, influencer: 1 }, { unique: true });
@@ -98,60 +70,55 @@ emailThreadSchema.statics.generateAliasEmail = function (displayName) {
 emailThreadSchema.statics.generatePrettyAlias =
   emailThreadSchema.statics.generateAliasEmail;
 
-// ---------------- Email Message Schema ----------------
-// One document per sent email (brand->influencer or influencer->brand)
-const emailMessageSchema = new Schema(
-  {
-    thread: {
-      type: Schema.Types.ObjectId,
-      ref: 'EmailThread',
-      required: true,
-    },
-    direction: {
-      type: String,
-      enum: ['brand_to_influencer', 'influencer_to_brand'],
-      required: true,
-    },
-    fromUser: {
-      type: Schema.Types.ObjectId,
-      refPath: 'fromUserModel',
-      required: true,
-    },
-    fromUserModel: {
-      type: String,
-      enum: ['Brand', 'Influencer'],
-      required: true,
-    },
-
-    // The alias used in the outbound email (pretty brand alias or influencer@...)
-    fromAliasEmail: { type: String, required: true },
-
-    // The real destination address (brand or influencer Gmail)
-    toRealEmail: { type: String, required: true },
-
-    subject: { type: String, required: true },
-    htmlBody: { type: String },
-    textBody: { type: String },
-
-    attachments: [
-      {
-        filename: { type: String, required: true },
-        contentType: { type: String, required: true },
-        size: { type: Number, required: true },
-        storageKey: { type: String },
-        url: { type: String },
-      },
-    ],
-
-
-    template: {
-      type: Schema.Types.ObjectId,
-      ref: 'EmailTemplate',
-      default: null,
-    },
+// models/email.js (excerpt)
+const emailMessageSchema = new mongoose.Schema({
+  thread: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'EmailThread',
+    required: true,
+    index: true,
   },
-  { timestamps: true }
-);
+
+  direction: {
+    type: String,
+    enum: ['brand_to_influencer', 'influencer_to_brand', 'system'],
+    required: true,
+  },
+
+  fromUser: { type: mongoose.Schema.Types.ObjectId, refPath: 'fromUserModel' },
+  fromUserModel: { type: String, enum: ['Brand', 'Influencer', 'System'] },
+
+  // Existing field (keep)
+  fromAliasEmail: { type: String }, // proxy used in From:
+  toRealEmail: { type: String },
+
+  // NEW: explicit proxy/real addressing
+  fromProxyEmail: { type: String, lowercase: true, index: true },
+  toProxyEmail: { type: String, lowercase: true, index: true },
+  fromRealEmail: { type: String, lowercase: true, index: true },
+
+  subject: String,
+  htmlBody: String,
+  textBody: String,
+
+  // Email threading fields
+  messageId: { type: String, index: true },   // Message-ID header
+  inReplyTo: { type: String, index: true },   // In-Reply-To header
+  references: [String],
+
+  // Timestamps from the email’s perspective
+  sentAt: { type: Date },
+  receivedAt: { type: Date },
+
+  // Attachments metadata (you already have something similar)
+  attachments: [{
+    filename: String,
+    contentType: String,
+    size: Number,
+    storageKey: String,
+    url: String,
+  }],
+}, { timestamps: true });
 
 // ---------------- Email Template Schema ----------------
 // Predefined templates that you load on frontend and edit.

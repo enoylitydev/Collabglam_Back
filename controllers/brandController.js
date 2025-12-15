@@ -361,14 +361,15 @@ exports.register = async (req, res) => {
       instagramHandle,
       companySize,
       referralCode,
-      isVerifiedRepresentative // required: must be true
+      isVerifiedRepresentative, // required: must be true
+      pocName,
     } = req.body;
 
     // 💾 logo file from multipart/form-data (via uploadLogoMiddleware)
     const logoFile = req.file;
 
     // required checks
-    if (!name || !email || !password || !phone || !countryId || !callingId) {
+    if (!name || !email || !password || !phone || !countryId || !callingId || !pocName) {
       return res.status(400).json({ message: 'All fields are required' });
     }
 
@@ -498,7 +499,7 @@ exports.register = async (req, res) => {
       callingcode: callingDoc.callingCode,
       countryId,
       callingId,
-
+      pocName: String(pocName).trim(),
       // DB-backed references + snapshots
       category: categoryDoc._id,
       categoryName: categoryDoc.name,
@@ -917,7 +918,7 @@ exports.searchBrands = async (req, res) => {
 // ---------- 12) Update profile ----------
 exports.updateProfile = async (req, res) => {
   try {
-    const { brandId, name, phone, countryId, callingId, logoUrl } = req.body || {};
+    const { brandId, name, phone, countryId, callingId, logoUrl, pocName } = req.body || {};
 
     if (!brandId) {
       return res.status(400).json({ message: 'brandId is required' });
@@ -934,7 +935,8 @@ exports.updateProfile = async (req, res) => {
       phone == null &&
       countryId == null &&
       callingId == null &&
-      typeof logoUrl === 'undefined'
+      typeof logoUrl === 'undefined' &&
+      pocName == null
     ) {
       return res.status(400).json({ message: 'No changes provided' });
     }
@@ -1009,6 +1011,14 @@ exports.updateProfile = async (req, res) => {
 
     if (typeof logoUrl !== 'undefined') {
       brand.logoUrl = normalizeUrl(logoUrl);
+    }
+
+    if (pocName != null) {
+      const trimmedPoc = String(pocName).trim();
+      if (!trimmedPoc) {
+        return res.status(400).json({ message: 'POC name cannot be empty' });
+      }
+      brand.pocName = trimmedPoc;
     }
 
     await brand.save();

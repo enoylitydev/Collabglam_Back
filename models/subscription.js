@@ -35,14 +35,14 @@ const subscriptionPlanSchema = new mongoose.Schema({
   label:       { type: String },                      // accent like 'Best Value'
 
   /** Pricing */
-  monthlyCost:    { type: Number, required: true, min: 0 },
-  currency:       { type: String, default: 'USD' },
-  isCustomPricing:{ type: Boolean, default: false },  // Enterprise-style plans
+  monthlyCost:     { type: Number, required: true, min: 0 },
+  currency:        { type: String, default: 'USD' },
+  isCustomPricing: { type: Boolean, default: false },  // Enterprise-style plans
 
   /** Descriptions */
   overview:   { type: String },                       // short plan overview text
 
-  /** Feature catalogue */
+  /** Feature catalogue – ONLY THIS FIELD */
   features:   { type: [featureSchema], default: [] },
 
   /** Optional add-ons */
@@ -53,7 +53,10 @@ const subscriptionPlanSchema = new mongoose.Schema({
   status:     { type: String, enum: ['active', 'archived'], default: 'active' },
 
   /** Cycle length (mins) – useful for local testing */
-  durationMins: { type: Number, default: 43200 },     // 30 days
+  durationMins:    { type: Number, default: 43200 },     // 30 days
+  // optional extra duration fields – keep if you use them
+  durationMinutes: { type: Number },
+  durationDays:    { type: Number },
 
   /** Sorting in price table (lower first). Enterprise kept last with a higher number */
   sortOrder:  { type: Number, default: 100 },

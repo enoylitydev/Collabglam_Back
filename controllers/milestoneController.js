@@ -446,9 +446,8 @@ exports.releaseMilestone = async (req, res) => {
     createAndEmit({
       influencerId: entry.influencerId,
       type: 'milestone.initiated',
-      title: `Milestone payout initiated${
-        entry.milestoneTitle ? `: ${entry.milestoneTitle}` : ''
-      }`,
+      title: `Milestone payout initiated${entry.milestoneTitle ? `: ${entry.milestoneTitle}` : ''
+        }`,
       message:
         `Brand has released $${Number(entry.amount).toFixed(
           2
@@ -463,9 +462,8 @@ exports.releaseMilestone = async (req, res) => {
     createAndEmit({
       brandId: doc.brandId,
       type: 'milestone.released',
-      title: `Milestone released${
-        entry.milestoneTitle ? `: ${entry.milestoneTitle}` : ''
-      }`,
+      title: `Milestone released${entry.milestoneTitle ? `: ${entry.milestoneTitle}` : ''
+        }`,
       message: `You released $${Number(entry.amount).toFixed(
         2
       )} for this campaign.`,
@@ -708,9 +706,8 @@ exports.adminMarkMilestonePaid = async (req, res) => {
     createAndEmit({
       influencerId: entry.influencerId,
       type: 'milestone.paid',
-      title: `Milestone paid${
-        entry.milestoneTitle ? `: ${entry.milestoneTitle}` : ''
-      }`,
+      title: `Milestone paid${entry.milestoneTitle ? `: ${entry.milestoneTitle}` : ''
+        }`,
       message: `Your payout of $${Number(entry.amount).toFixed(
         2
       )} has been approved and marked as paid.`,
@@ -724,9 +721,8 @@ exports.adminMarkMilestonePaid = async (req, res) => {
       brandId: doc.brandId,
       type: 'milestone.paid',
       title: `Payout completed`,
-      message: `${
-        entry.milestoneTitle || 'Milestone'
-      } of $${Number(entry.amount).toFixed(2)} has been marked as paid.`,
+      message: `${entry.milestoneTitle || 'Milestone'
+        } of $${Number(entry.amount).toFixed(2)} has been marked as paid.`,
       entityType: 'campaign',
       entityId: String(entry.campaignId),
       actionPath: `/brand/active-campaign`,

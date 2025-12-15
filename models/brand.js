@@ -64,6 +64,12 @@ const brandSchema = new mongoose.Schema(
       trim: true,
     },
 
+    pocName: {
+      type: String,
+      trim: true,
+      required: true,
+    },
+
     createdAt: { type: Date, default: Date.now },
 
     // ---------------- REFERENCES + SNAPSHOTS ----------------

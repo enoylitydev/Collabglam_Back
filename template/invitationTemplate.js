@@ -9,21 +9,17 @@ function escapeHtml(str = '') {
     .replace(/'/g, '&#39;');
 }
 
-/**
- * Build subject + HTML + plain text for the campaign invitation email.
- *
- * ctx = {
- *   brandName,
- *   influencerName,
- *   campaignTitle,
- *   campaignObjective,
- *   deliverables,
- *   compensation,
- *   timeline,
- *   additionalNotes,
- *   campaignLink
- * }
- */
+// Prevent javascript: links etc.
+function safeUrl(url, fallback = '#') {
+  try {
+    const u = new URL(String(url || ''));
+    if (u.protocol === 'http:' || u.protocol === 'https:') return u.toString();
+    return fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 function buildInvitationEmail(ctx) {
   const brandName = ctx.brandName || 'Brand';
   const influencerName = ctx.influencerName || 'Creator';
@@ -33,8 +29,8 @@ function buildInvitationEmail(ctx) {
   const compensation = ctx.compensation || 'To be discussed based on scope.';
   const timeline = ctx.timeline || 'Flexible / To be discussed';
   const additionalNotes = ctx.additionalNotes || '';
-  const campaignLink = ctx.campaignLink || '#';
 
+  const campaignLink = safeUrl(ctx.campaignLink, '#'); // ✅ use it
   const subject = `Invitation to Collaborate on "${campaignTitle}" – ${brandName}`;
 
   const htmlBody = `
@@ -84,25 +80,41 @@ function buildInvitationEmail(ctx) {
               <td style="padding:6px 0;font-weight:bold;color:#374151;">Campaign Timeline:</td>
               <td style="padding:6px 0;color:#111827;">${escapeHtml(timeline)}</td>
             </tr>
-            ${additionalNotes
-      ? `<tr>
+            ${additionalNotes ? `<tr>
               <td style="padding:6px 0;font-weight:bold;color:#374151;">Additional Notes:</td>
               <td style="padding:6px 0;color:#111827;">${escapeHtml(additionalNotes)}</td>
-            </tr>`
-      : ''
-    }
+            </tr>` : ''}
           </tbody>
         </table>
 
         <p style="margin-top:20px;">
-          To proceed, please review the full brief and respond to the invitation using the link below:
+          To proceed, please review the full brief using the button below:
         </p>
 
-        <p style="margin:16px 0;">
-          <a href="${campaignLink}"
-             style="display:inline-block;padding:10px 18px;background:#111827;color:#ffffff;text-decoration:none;border-radius:999px;font-weight:600;font-size:14px;">
-            👉 View Campaign & Respond
+        <!-- ✅ CTA Button -->
+        <div style="margin:16px 0 8px;text-align:center;">
+          <a
+            href="${escapeHtml(campaignLink)}"
+            target="_blank"
+            rel="noopener noreferrer"
+            style="
+              display:inline-block;
+              background:#FFBF00;
+              color:#111827;
+              padding:12px 18px;
+              border-radius:10px;
+              text-decoration:none;
+              font-weight:700;
+            "
+          >
+            View Campaign
           </a>
+        </div>
+
+        <!-- ✅ Fallback link -->
+        <p style="margin:0 0 14px;font-size:12px;color:#6b7280;text-align:center;word-break:break-word;">
+          If the button doesn’t work, copy and paste this link:<br/>
+          <a href="${escapeHtml(campaignLink)}" style="color:#2563eb;">${escapeHtml(campaignLink)}</a>
         </p>
 
         <p>If you have any questions or need further clarification, feel free to contact the brand or reach out to CollabGlam Support.</p>
@@ -132,7 +144,7 @@ function buildInvitationEmail(ctx) {
     '',
     'I hope you are doing well.',
     '',
-    `We are reaching out to formally invite you to collaborate with ${brandName} for our upcoming campaign, "${campaignTitle}". Based on your creative work and audience alignment, we believe you would be an excellent fit for this project.`,
+    `We are reaching out to formally invite you to collaborate with ${brandName} for our upcoming campaign, "${campaignTitle}".`,
     '',
     'Campaign Details',
     `Campaign Name: ${campaignTitle}`,
@@ -143,17 +155,11 @@ function buildInvitationEmail(ctx) {
     `Campaign Timeline: ${timeline}`,
     additionalNotes ? `Additional Notes: ${additionalNotes}` : '',
     '',
-    `View Campaign & Respond: ${campaignLink}`,
-    '',
-    'If you have any questions or need further clarification, feel free to contact the brand or reach out to CollabGlam Support.',
-    '',
-    'We look forward to the opportunity of working together and hope to have you onboard for this campaign.',
+    `View Campaign: ${campaignLink}`, // ✅ add link to text email too
     '',
     'Warm regards,',
     'Team CollabGlam',
-  ]
-    .filter(Boolean)
-    .join('\n');
+  ].filter(Boolean).join('\n');
 
   return { subject, htmlBody, textBody };
 }
