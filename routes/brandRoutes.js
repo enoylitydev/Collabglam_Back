@@ -52,7 +52,7 @@ router.post(
   searchInfluencers
 );
 
-router.post('/update', verifyToken, updateProfile);
+router.post('/update', uploadLogoMiddleware, verifyToken, updateProfile);
 
 router.post('/requestEmailUpdate', verifyToken, requestEmailUpdate);
 

@@ -937,76 +937,74 @@ exports.searchBrands = async (req, res) => {
   }
 };
 
-// ---------- 12) Update profile ----------
 exports.updateProfile = async (req, res) => {
   try {
-    const { brandId, name, phone, countryId, callingId, logoUrl, pocName } = req.body || {};
+    const body = req.body || {};
+    const {
+      brandId,
 
-    if (!brandId) {
-      return res.status(400).json({ message: 'brandId is required' });
-    }
+      // identity/contact
+      name,
+      pocName,
+      phone,
+      countryId,
+      callingId,
 
-    // OPTIONAL: if you still use verifyToken, ensure the body brandId matches the token
-    if (req.brand && req.brand.brandId && req.brand.brandId !== brandId) {
-      return res.status(403).json({ message: 'Forbidden: brandId mismatch' });
-    }
+      // business
+      website,
+      instagramHandle,
+      companySize,
+      referralCode,
 
-    // require at least one change
-    if (
-      name == null &&
-      phone == null &&
-      countryId == null &&
-      callingId == null &&
-      typeof logoUrl === 'undefined' &&
-      pocName == null
-    ) {
-      return res.status(400).json({ message: 'No changes provided' });
+      // meta
+      category,        // can be ObjectId | numeric id | name
+      categoryId,
+      businessType,    // can be ObjectId | name
+      businessTypeId,
+
+      // optional legacy removal support
+      removeLogo,      // "true" to remove logo
+      logoUrl,         // optional legacy fallback
+    } = body;
+
+    if (!brandId) return res.status(400).json({ message: "brandId is required" });
+
+    // ensure token brandId matches
+    if (req.brand?.brandId && req.brand.brandId !== brandId) {
+      return res.status(403).json({ message: "Forbidden: brandId mismatch" });
     }
 
     const brand = await Brand.findOne({ brandId });
-    if (!brand) return res.status(404).json({ message: 'Brand not found' });
+    if (!brand) return res.status(404).json({ message: "Brand not found" });
 
-    // Track if we changed name / alias to sync threads after save
+    // Track name change for alias + thread sync
     let nameChanged = false;
 
-    if (name != null) {
-      const trimmedName = String(name).trim();
-      if (!trimmedName) {
-        return res.status(400).json({ message: 'Name cannot be empty' });
-      }
+    // ---------------- name (+ alias regenerate) ----------------
+    if (typeof name !== "undefined") {
+      const trimmedName = String(name || "").trim();
+      if (!trimmedName) return res.status(400).json({ message: "Name cannot be empty" });
 
-      // Ensure no other brand already uses this name
       const existingByName = await Brand.findOne(
         { name: trimmedName, brandId: { $ne: brandId } },
-        '_id'
+        "_id"
       );
-      if (existingByName) {
-        return res.status(400).json({ message: 'Brand name already taken' });
-      }
+      if (existingByName) return res.status(400).json({ message: "Brand name already taken" });
 
-      // Generate new alias from new brand name
-      // Generate new alias from new brand name
       const newAlias = EmailThread.generateAliasEmail(trimmedName);
-
-      if (
-        !newAlias ||
-        typeof newAlias !== 'string' ||
-        !newAlias.includes('@')
-      ) {
+      if (!newAlias || typeof newAlias !== "string" || !newAlias.includes("@")) {
         return res.status(400).json({
-          message: 'Unable to generate brand alias for that name. Please choose a different brand name.',
+          message: "Unable to generate brand alias for that name. Please choose a different brand name.",
         });
       }
 
-      // Ensure alias is unique across brands
       const aliasExists = await Brand.findOne(
         { brandAliasEmail: newAlias, brandId: { $ne: brandId } },
-        '_id'
+        "_id"
       );
-
       if (aliasExists) {
         return res.status(400).json({
-          message: 'Brand name not available, please choose a different name',
+          message: "Brand name not available, please choose a different name",
         });
       }
 
@@ -1015,37 +1013,134 @@ exports.updateProfile = async (req, res) => {
       nameChanged = true;
     }
 
-    if (phone != null) brand.phone = String(phone).trim();
-
-    if (countryId) {
-      const countryDoc = await Country.findById(countryId);
-      if (!countryDoc) return res.status(400).json({ message: 'Invalid countryId' });
-      brand.countryId = countryId;
-      brand.country = countryDoc.countryName;
-    }
-
-    if (callingId) {
-      const callingDoc = await Country.findById(callingId);
-      if (!callingDoc) return res.status(400).json({ message: 'Invalid callingId' });
-      brand.callingId = callingId;
-      brand.callingcode = callingDoc.callingCode;
-    }
-
-    if (typeof logoUrl !== 'undefined') {
-      brand.logoUrl = normalizeUrl(logoUrl);
-    }
-
-    if (pocName != null) {
-      const trimmedPoc = String(pocName).trim();
-      if (!trimmedPoc) {
-        return res.status(400).json({ message: 'POC name cannot be empty' });
-      }
+    // ---------------- pocName ----------------
+    if (typeof pocName !== "undefined") {
+      const trimmedPoc = String(pocName || "").trim();
+      if (!trimmedPoc) return res.status(400).json({ message: "POC name cannot be empty" });
       brand.pocName = trimmedPoc;
+    }
+
+    // ---------------- phone ----------------
+    if (typeof phone !== "undefined") {
+      brand.phone = String(phone || "").trim();
+    }
+
+    // ---------------- country / calling ----------------
+    if (typeof countryId !== "undefined") {
+      const cid = String(countryId || "").trim();
+      if (cid) {
+        const countryDoc = await Country.findById(cid);
+        if (!countryDoc) return res.status(400).json({ message: "Invalid countryId" });
+        brand.countryId = cid;
+        brand.country = countryDoc.countryName;
+      } else {
+        brand.countryId = undefined;
+        brand.country = undefined;
+      }
+    }
+
+    if (typeof callingId !== "undefined") {
+      const ccid = String(callingId || "").trim();
+      if (ccid) {
+        const callingDoc = await Country.findById(ccid);
+        if (!callingDoc) return res.status(400).json({ message: "Invalid callingId" });
+        brand.callingId = ccid;
+        brand.callingcode = callingDoc.callingCode;
+      } else {
+        brand.callingId = undefined;
+        brand.callingcode = undefined;
+      }
+    }
+
+    // ---------------- website / instagram ----------------
+    if (typeof website !== "undefined") {
+      const w = String(website || "").trim();
+      brand.website = w ? normalizeUrl(w) : undefined;
+    }
+
+    if (typeof instagramHandle !== "undefined") {
+      const ig = String(instagramHandle || "").trim();
+      brand.instagramHandle = ig ? normalizeInsta(ig) : undefined;
+    }
+
+    // ---------------- company size ----------------
+    if (typeof companySize !== "undefined") {
+      const cs = String(companySize || "").trim();
+      if (cs && !COMPANY_SIZE_ENUM.includes(cs)) {
+        return res.status(400).json({ message: "Invalid company size" });
+      }
+      brand.companySize = cs || undefined;
+    }
+
+    // ---------------- referral code ----------------
+    if (typeof referralCode !== "undefined") {
+      const rc = String(referralCode || "").trim();
+      brand.referralCode = rc || undefined;
+    }
+
+    // ---------------- category (DB backed) ----------------
+    const catInput = typeof categoryId !== "undefined" ? categoryId : category;
+    if (typeof catInput !== "undefined") {
+      const raw = String(catInput || "").trim();
+      if (!raw) {
+        brand.category = undefined;
+        brand.categoryName = undefined;
+      } else {
+        const categoryDoc = await resolveCategory(raw);
+        if (!categoryDoc) return res.status(400).json({ message: "Invalid category" });
+        brand.category = categoryDoc._id;
+        brand.categoryName = categoryDoc.name;
+      }
+    }
+
+    // ---------------- business type (store NAME string) ----------------
+    const btInput = typeof businessTypeId !== "undefined" ? businessTypeId : businessType;
+    if (typeof btInput !== "undefined") {
+      const raw = String(btInput || "").trim();
+      if (!raw) {
+        brand.businessType = undefined;
+      } else {
+        const btDoc = await resolveBusinessType(raw);
+        if (!btDoc) return res.status(400).json({ message: "Invalid business type" });
+        brand.businessType = btDoc.name;
+      }
+    }
+
+    // ---------------- Logo: remove / upload / legacy url ----------------
+    if (String(removeLogo || "").toLowerCase() === "true") {
+      brand.logoFileId = undefined;
+      brand.logoFilename = undefined;
+      brand.logoUrl = undefined;
+    }
+
+    // ✅ If file exists -> upload to GridFS (like register)
+    if (req.file) {
+      const normalizedEmail = toNormEmail(brand.email);
+
+      const [saved] = await uploadToGridFS(req.file, {
+        prefix: "brand_logo",
+        metadata: {
+          kind: "brand_logo",
+          email: normalizedEmail,
+          brandId: brand.brandId,
+        },
+        req,
+      });
+
+      brand.logoFileId = saved.id;
+      brand.logoFilename = saved.filename;
+
+      // optional: clear legacy public url when GridFS is used
+      brand.logoUrl = undefined;
+    } else if (typeof logoUrl !== "undefined") {
+      // optional: only if you still want to support saving public URL
+      const lu = String(logoUrl || "").trim();
+      brand.logoUrl = lu ? normalizeUrl(lu) : undefined;
     }
 
     await brand.save();
 
-    // 🔁 If name/alias changed, update all threads for this brand to use the new alias
+    // Sync EmailThread alias if name changed
     if (nameChanged) {
       const newAlias = brand.brandAliasEmail;
       await EmailThread.updateMany(
@@ -1054,26 +1149,20 @@ exports.updateProfile = async (req, res) => {
           $set: {
             brandAliasEmail: newAlias,
             brandDisplayAlias: newAlias,
-            'brandSnapshot.name': brand.name,
+            "brandSnapshot.name": brand.name,
           },
         }
-      ).catch((err) => {
-        console.error(
-          'Failed to update EmailThread brandAliasEmail for brandId',
-          brandId,
-          err
-        );
-      });
+      ).catch(() => {});
     }
 
     const safe = brand.toObject();
     delete safe.password;
     delete safe.__v;
 
-    return res.status(200).json({ message: 'Profile updated', brand: safe });
+    return res.status(200).json({ message: "Profile updated", brand: safe });
   } catch (err) {
-    console.error('Error in updateProfile:', err);
-    return res.status(500).json({ message: 'Internal server error' });
+    console.error("Error in updateProfile:", err);
+    return res.status(500).json({ message: "Internal server error" });
   }
 };
 
