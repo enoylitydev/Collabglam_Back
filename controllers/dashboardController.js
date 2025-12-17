@@ -201,11 +201,12 @@ exports.getBrandDashboardHome = async (req, res) => {
     const allCampaigns = await Campaign.find(
       { brandId, isDraft: { $ne: 1 } },
       "campaignsId productOrServiceName goal budget isActive createdAt"
-    ).sort({ createdAt: -1 }).lean();
+    )
+      .sort({ createdAt: -1 })
+      .lean();
 
     const totalCreatedCampaigns = allCampaigns.length;
 
-    // IMPORTANT: Use campaignsId only (ApplyCampaign + Contract use campaignId = campaignsId)
     const campaignIds = allCampaigns
       .map((c) => String(c.campaignsId || ""))
       .filter(Boolean);
@@ -214,7 +215,9 @@ exports.getBrandDashboardHome = async (req, res) => {
     const acceptedContracts = await Contract.find(
       { brandId, ...activeAcceptedFilter() },
       "campaignId contractId influencerId lastActionAt createdAt"
-    ).sort({ lastActionAt: -1, createdAt: -1 }).lean();
+    )
+      .sort({ lastActionAt: -1, createdAt: -1 })
+      .lean();
 
     const contractByCampaign = new Map(); // campaignId -> { contractId, influencerId }
     for (const c of acceptedContracts) {
@@ -231,35 +234,62 @@ exports.getBrandDashboardHome = async (req, res) => {
     const acceptedCampaignIds = new Set(Array.from(contractByCampaign.keys()));
     const acceptedCount = acceptedCampaignIds.size;
 
-    // ✅ 4) Applied Influencers PER CAMPAIGN (distinct)
-    const appliedCountMap = new Map(); // campaignId -> appliedCount
-    let totalAppliedInfluencers = 0;   // distinct across all campaigns (optional)
+    // ✅ 4) Applied influencers per campaign + total sum across campaigns
+    const appliedCountMap = new Map(); // campaignId -> appliedInfluencersCount
+    let totalAppliedInfluencers = 0;   // ✅ SUM across campaigns (not unique across all)
 
     if (campaignIds.length) {
-      // overall distinct (optional card)
-      const [totalAppliedAgg] = await ApplyCampaign.aggregate([
+      // This counts UNIQUE influencers per campaign (campaignId + influencerId)
+      const agg = await ApplyCampaign.aggregate([
         { $match: { campaignId: { $in: campaignIds } } },
         { $unwind: "$applicants" },
-        { $group: { _id: "$applicants.influencerId" } },
-        { $count: "total" },
-      ]);
-      totalAppliedInfluencers = totalAppliedAgg?.total || 0;
 
-      // per campaign distinct count
-      const perCampaignAgg = await ApplyCampaign.aggregate([
-        { $match: { campaignId: { $in: campaignIds } } },
-        { $unwind: "$applicants" },
+        // unique per campaign
         {
           $group: {
-            _id: "$campaignId",
-            influencers: { $addToSet: "$applicants.influencerId" },
+            _id: {
+              campaignId: "$campaignId",
+              influencerId: "$applicants.influencerId",
+            },
           },
         },
-        { $project: { appliedInfluencersCount: { $size: "$influencers" } } },
+
+        // count per campaign
+        {
+          $group: {
+            _id: "$_id.campaignId",
+            appliedInfluencersCount: { $sum: 1 },
+          },
+        },
+
+        // compute total as sum of per-campaign counts
+        {
+          $facet: {
+            perCampaign: [
+              { $project: { _id: 1, appliedInfluencersCount: 1 } },
+            ],
+            total: [
+              {
+                $group: {
+                  _id: null,
+                  totalAppliedInfluencers: { $sum: "$appliedInfluencersCount" },
+                },
+              },
+            ],
+          },
+        },
       ]);
 
-      perCampaignAgg.forEach((row) => {
-        appliedCountMap.set(String(row._id), Number(row.appliedInfluencersCount || 0));
+      const perCampaign = agg?.[0]?.perCampaign || [];
+      const total = agg?.[0]?.total?.[0]?.totalAppliedInfluencers || 0;
+
+      totalAppliedInfluencers = Number(total) || 0;
+
+      perCampaign.forEach((row) => {
+        appliedCountMap.set(
+          String(row._id),
+          Number(row.appliedInfluencersCount || 0)
+        );
       });
     }
 
@@ -274,7 +304,9 @@ exports.getBrandDashboardHome = async (req, res) => {
 
     const baseList = showAll
       ? allCampaigns
-      : allCampaigns.filter((c) => acceptedCampaignIds.has(String(c.campaignsId || "")));
+      : allCampaigns.filter((c) =>
+          acceptedCampaignIds.has(String(c.campaignsId || ""))
+        );
 
     const campaigns = baseList.map((c) => {
       const id = String(c.campaignsId || "");
@@ -292,7 +324,6 @@ exports.getBrandDashboardHome = async (req, res) => {
         influencerId: meta.influencerId ?? null,
         contractId: meta.contractId ?? null,
 
-        // ✅ per campaign applied count
         appliedInfluencersCount: appliedCountMap.get(id) || 0,
       };
     });
@@ -321,7 +352,10 @@ exports.getBrandDashboardHome = async (req, res) => {
     }
 
     // 7) Budget remaining
-    const milestone = await Milestone.findOne({ brandId }, "walletBalance").lean();
+    const milestone = await Milestone.findOne(
+      { brandId },
+      "walletBalance"
+    ).lean();
     const budgetRemaining = Number(milestone?.walletBalance ?? 0);
 
     return res.status(200).json({
@@ -329,7 +363,7 @@ exports.getBrandDashboardHome = async (req, res) => {
       totalCreatedCampaigns,
       totalHiredInfluencers,
 
-      // optional overall card (keep/remove as you like)
+      // ✅ NOW: sum across campaigns (so same influencer on 2 campaigns = 2)
       totalAppliedInfluencers,
 
       budgetRemaining,
