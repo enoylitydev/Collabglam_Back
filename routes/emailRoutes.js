@@ -58,4 +58,6 @@ router.post(
   welcomeEmailController.sendWelcomeEmail
 );
 
+router.post("/brand/influencer-list", emailController.getInfluencerEmailListForBrand);
+
 module.exports = router;

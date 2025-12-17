@@ -1892,3 +1892,140 @@ exports.getConversationForCurrentInfluencer = async (req, res) => {
     return res.status(500).json({ error: 'Internal server error' });
   }
 };
+
+exports.getInfluencerEmailListForBrand = async (req, res) => {
+  try {
+    const brandId = req.body?.brandId || req.query?.brandId;
+    const limitRaw = req.body?.limit || req.query?.limit || 20;
+    const limit = Math.max(1, Math.min(Number(limitRaw) || 20, 100));
+
+    if (!brandId) return res.status(400).json({ error: "brandId is required." });
+
+    const brand = await findBrandByIdOrBrandId(brandId);
+    if (!brand) return res.status(404).json({ error: "Brand not found" });
+
+    const threads = await EmailThread.aggregate([
+      { $match: { brand: brand._id } },
+      { $sort: { lastMessageAt: -1, updatedAt: -1, createdAt: -1 } },
+      { $limit: limit },
+
+      // influencer doc (NO email)
+      {
+        $lookup: {
+          from: "influencers",
+          localField: "influencer",
+          foreignField: "_id",
+          as: "influencerDoc",
+        },
+      },
+      { $addFields: { influencerDoc: { $arrayElemAt: ["$influencerDoc", 0] } } },
+
+      // ✅ ALL messages for each thread (oldest -> newest)
+      {
+        $lookup: {
+          from: "emailmessages",
+          let: { threadId: "$_id" },
+          pipeline: [
+            { $match: { $expr: { $eq: ["$thread", "$$threadId"] } } },
+            { $sort: { createdAt: 1 } },
+            {
+              // ✅ ONLY INCLUDE SAFE FIELDS (no exclusion here)
+              $project: {
+                _id: 1,
+                direction: 1,
+                createdAt: 1,
+                sentAt: 1,
+                receivedAt: 1,
+                subject: 1,
+                textBody: 1,
+                htmlBody: 1,
+                attachments: 1,
+              },
+            },
+          ],
+          as: "messages",
+        },
+      },
+
+      // last message fallback
+      { $addFields: { lastMsg: { $arrayElemAt: ["$messages", -1] } } },
+
+      {
+        $project: {
+          _id: 1,
+          subject: 1,
+          lastMessageSnippet: 1,
+          lastMessageAt: 1,
+          lastMessageDirection: 1,
+          status: 1,
+          createdAt: 1,
+          updatedAt: 1,
+
+          influencerSnapshot: 1,
+          influencerDoc: { name: 1, influencerId: 1 },
+
+          messages: 1,
+          lastMsg: 1,
+        },
+      },
+    ]);
+
+    const conversations = (threads || []).map((t) => {
+      const influencerName =
+        t?.influencerDoc?.name ||
+        t?.influencerSnapshot?.name ||
+        "Influencer";
+
+      const subject = (t.subject || t.lastMsg?.subject || "").trim();
+      const snippet =
+        (t.lastMessageSnippet ||
+          (t.lastMsg?.textBody || "").slice(0, 200) ||
+          "").trim();
+
+      const lastAt =
+        t.lastMessageAt ||
+        t.lastMsg?.createdAt ||
+        t.updatedAt ||
+        t.createdAt ||
+        null;
+
+      const lastDir = t.lastMessageDirection || t.lastMsg?.direction || null;
+
+      return {
+        threadId: String(t._id),
+        influencer: {
+          influencerId: t?.influencerDoc?.influencerId || null,
+          name: influencerName,
+        },
+        subject,
+        snippet,
+        lastMessageAt: lastAt,
+        lastMessageDirection: lastDir,
+        status: t.status || "active",
+
+        // ✅ ALL messages list
+        messages: Array.isArray(t.messages)
+          ? t.messages.map((m) => ({
+              id: String(m._id),
+              direction: m.direction,
+              createdAt: m.createdAt,
+              sentAt: m.sentAt,
+              receivedAt: m.receivedAt,
+              subject: (m.subject || "").trim(),
+              textBody: m.textBody || "",
+              htmlBody: m.htmlBody || "",
+              attachments: m.attachments || [],
+            }))
+          : [],
+      };
+    });
+
+    return res.status(200).json({
+      brand: { brandId: brand.brandId || String(brand._id), name: brand.name },
+      conversations,
+    });
+  } catch (err) {
+    console.error("getInfluencerEmailListForBrand (threads+messages) error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+};
