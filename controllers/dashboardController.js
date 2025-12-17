@@ -9,6 +9,7 @@ const Influencer = require('../models/influencer');
 const Milestone = require('../models/milestone');
 const Contract = require('../models/contract');
 const { CONTRACT_STATUS } = require("../constants/contract");
+const ApplyCampaign = require('../models/applyCampaign');
 
 /**
  * Generic JWT verifier — populates req.user with the decoded token.
@@ -196,26 +197,26 @@ exports.getBrandDashboardHome = async (req, res) => {
     const brand = await Brand.findOne({ brandId }, "name brandId").lean();
     if (!brand) return res.status(404).json({ error: "Brand not found" });
 
-    // 2) All created campaigns (non-draft)
+    // 2) All campaigns (non-draft)
     const allCampaigns = await Campaign.find(
       { brandId, isDraft: { $ne: 1 } },
       "campaignsId productOrServiceName goal budget isActive createdAt"
-    )
-      .sort({ createdAt: -1 })
-      .lean();
+    ).sort({ createdAt: -1 }).lean();
 
     const totalCreatedCampaigns = allCampaigns.length;
 
-    // 3) Accepted contracts -> map by campaignId
+    // IMPORTANT: Use campaignsId only (ApplyCampaign + Contract use campaignId = campaignsId)
+    const campaignIds = allCampaigns
+      .map((c) => String(c.campaignsId || ""))
+      .filter(Boolean);
+
+    // 3) Accepted contracts → latest per campaign
     const acceptedContracts = await Contract.find(
       { brandId, ...activeAcceptedFilter() },
       "campaignId contractId influencerId lastActionAt createdAt"
-    )
-      .sort({ lastActionAt: -1, createdAt: -1 })
-      .lean();
+    ).sort({ lastActionAt: -1, createdAt: -1 }).lean();
 
-    // Keep latest accepted contract per campaign
-    const contractByCampaign = new Map();
+    const contractByCampaign = new Map(); // campaignId -> { contractId, influencerId }
     for (const c of acceptedContracts) {
       const key = String(c.campaignId || "");
       if (!key) continue;
@@ -230,12 +231,41 @@ exports.getBrandDashboardHome = async (req, res) => {
     const acceptedCampaignIds = new Set(Array.from(contractByCampaign.keys()));
     const acceptedCount = acceptedCampaignIds.size;
 
-    // 4) Apply your rule:
-    // - if acceptedCount === 0 => show ALL
-    // - if ANY campaign has no accepted influencer => show ALL
-    // - else show accepted only
+    // ✅ 4) Applied Influencers PER CAMPAIGN (distinct)
+    const appliedCountMap = new Map(); // campaignId -> appliedCount
+    let totalAppliedInfluencers = 0;   // distinct across all campaigns (optional)
+
+    if (campaignIds.length) {
+      // overall distinct (optional card)
+      const [totalAppliedAgg] = await ApplyCampaign.aggregate([
+        { $match: { campaignId: { $in: campaignIds } } },
+        { $unwind: "$applicants" },
+        { $group: { _id: "$applicants.influencerId" } },
+        { $count: "total" },
+      ]);
+      totalAppliedInfluencers = totalAppliedAgg?.total || 0;
+
+      // per campaign distinct count
+      const perCampaignAgg = await ApplyCampaign.aggregate([
+        { $match: { campaignId: { $in: campaignIds } } },
+        { $unwind: "$applicants" },
+        {
+          $group: {
+            _id: "$campaignId",
+            influencers: { $addToSet: "$applicants.influencerId" },
+          },
+        },
+        { $project: { appliedInfluencersCount: { $size: "$influencers" } } },
+      ]);
+
+      perCampaignAgg.forEach((row) => {
+        appliedCountMap.set(String(row._id), Number(row.appliedInfluencersCount || 0));
+      });
+    }
+
+    // 5) Show list rule
     const anyUnaccepted = allCampaigns.some((camp) => {
-      const id = String(camp.campaignsId || camp._id || "");
+      const id = String(camp.campaignsId || "");
       return id && !acceptedCampaignIds.has(id);
     });
 
@@ -244,14 +274,14 @@ exports.getBrandDashboardHome = async (req, res) => {
 
     const baseList = showAll
       ? allCampaigns
-      : allCampaigns.filter((c) => acceptedCampaignIds.has(String(c.campaignsId || c._id || "")));
+      : allCampaigns.filter((c) => acceptedCampaignIds.has(String(c.campaignsId || "")));
 
     const campaigns = baseList.map((c) => {
-      const id = String(c.campaignsId || c._id || "");
+      const id = String(c.campaignsId || "");
       const meta = contractByCampaign.get(id) || {};
       return {
-        id, // normalized id for frontend key
-        campaignsId: c.campaignsId || id,
+        id,
+        campaignsId: id,
         productOrServiceName: c.productOrServiceName || "",
         goal: c.goal || "",
         budget: Number(c.budget || 0),
@@ -261,13 +291,17 @@ exports.getBrandDashboardHome = async (req, res) => {
         hasAcceptedInfluencer: acceptedCampaignIds.has(id),
         influencerId: meta.influencerId ?? null,
         contractId: meta.contractId ?? null,
+
+        // ✅ per campaign applied count
+        appliedInfluencersCount: appliedCountMap.get(id) || 0,
       };
     });
 
-    // 5) Total hired influencers (distinct) from ACTIVE campaigns only
+    // 6) Total hired influencers (distinct) from ACTIVE campaigns only
     const activeCampaignIds = allCampaigns
       .filter((c) => Number(c.isActive) === 1)
-      .map((c) => String(c.campaignsId || c._id || ""));
+      .map((c) => String(c.campaignsId || ""))
+      .filter(Boolean);
 
     let totalHiredInfluencers = 0;
     if (activeCampaignIds.length) {
@@ -286,7 +320,7 @@ exports.getBrandDashboardHome = async (req, res) => {
       totalHiredInfluencers = hiredAgg?.[0]?.total || 0;
     }
 
-    // 6) Budget remaining (brand walletBalance from milestone doc)
+    // 7) Budget remaining
     const milestone = await Milestone.findOne({ brandId }, "walletBalance").lean();
     const budgetRemaining = Number(milestone?.walletBalance ?? 0);
 
@@ -294,6 +328,10 @@ exports.getBrandDashboardHome = async (req, res) => {
       brandName: brand.name,
       totalCreatedCampaigns,
       totalHiredInfluencers,
+
+      // optional overall card (keep/remove as you like)
+      totalAppliedInfluencers,
+
       budgetRemaining,
       campaignsMode,
       campaigns,
