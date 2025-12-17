@@ -4,7 +4,7 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
 const multer = require('multer');
-const { uploadToGridFS } = require('../utils/gridfs');
+const { uploadToGridFS, buildFileUrl, getFileMetaById } = require('../utils/gridfs');
 
 const Brand = require('../models/brand');
 const Influencer = require('../models/influencer'); // needed by requestOtp
@@ -710,7 +710,6 @@ exports.verifyToken = (req, res, next) => {
   });
 };
 
-// ---------- 6) Get Brand by ID ----------
 exports.getBrandById = async (req, res) => {
   try {
     const brandId = req.query.id;
@@ -718,7 +717,7 @@ exports.getBrandById = async (req, res) => {
 
     const brandDoc = await Brand.findOne({ brandId })
       .select('-password -_id -__v')
-      .populate('category', 'name id') // still useful to return full category object
+      .populate('category', 'name id')
       .lean();
 
     if (!brandDoc) return res.status(404).json({ message: 'Brand not found.' });
@@ -726,7 +725,30 @@ exports.getBrandById = async (req, res) => {
     const milestoneDoc = await Milestone.findOne({ brandId }).lean();
     const walletBalance = milestoneDoc ? milestoneDoc.walletBalance : 0;
 
-    return res.status(200).json({ ...brandDoc, walletBalance });
+    // ✅ Build logo URL via GridFS (preferred)
+    let logoUrl = '';
+
+    if (brandDoc.logoFilename) {
+      logoUrl = buildFileUrl(req, brandDoc.logoFilename);
+    } else if (brandDoc.logoFileId) {
+      // fallback: if filename missing but fileId exists, fetch meta to get filename
+      const meta = await getFileMetaById(brandDoc.logoFileId, { req }).catch(() => null);
+      if (meta?.filename) logoUrl = buildFileUrl(req, meta.filename);
+    }
+
+    // fallback for very old records that only have a public URL saved
+    if (!logoUrl && brandDoc.logoUrl) {
+      logoUrl = brandDoc.logoUrl;
+    }
+
+    // ✅ Backward compatible keys (your old frontend might be reading these)
+    return res.status(200).json({
+      ...brandDoc,
+      walletBalance,
+      logoUrl,                 // recommended new field
+      logoProfileUrl: logoUrl, // common camelCase legacy
+      logoProfileurl: logoUrl, // exact legacy casing you mentioned
+    });
   } catch (error) {
     console.error('Error in getBrandById:', error);
     return res.status(500).json({ message: 'Internal server error while fetching brand.' });
