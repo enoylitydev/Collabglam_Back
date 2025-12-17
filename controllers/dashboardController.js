@@ -8,7 +8,7 @@ const Campaign = require('../models/campaign');
 const Influencer = require('../models/influencer');
 const Milestone = require('../models/milestone');
 const Contract = require('../models/contract');
-
+const { CONTRACT_STATUS } = require("../constants/contract");
 
 /**
  * Generic JWT verifier — populates req.user with the decoded token.
@@ -171,5 +171,135 @@ exports.getDashboardInf = async (req, res) => {
   } catch (err) {
     console.error('Error in getDashboardInf:', err);
     return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+function activeAcceptedFilter() {
+  return {
+    isAccepted: 1,
+    isRejected: { $ne: 1 },
+    status: { $nin: [CONTRACT_STATUS.REJECTED, CONTRACT_STATUS.SUPERSEDED] },
+    $or: [
+      { supersededBy: { $exists: false } },
+      { supersededBy: null },
+      { supersededBy: "" },
+    ],
+  };
+}
+
+exports.getBrandDashboardHome = async (req, res) => {
+  try {
+    const { brandId } = req.body || {};
+    if (!brandId) return res.status(400).json({ error: "brandId is required" });
+
+    // 1) Brand
+    const brand = await Brand.findOne({ brandId }, "name brandId").lean();
+    if (!brand) return res.status(404).json({ error: "Brand not found" });
+
+    // 2) All created campaigns (non-draft)
+    const allCampaigns = await Campaign.find(
+      { brandId, isDraft: { $ne: 1 } },
+      "campaignsId productOrServiceName goal budget isActive createdAt"
+    )
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const totalCreatedCampaigns = allCampaigns.length;
+
+    // 3) Accepted contracts -> map by campaignId
+    const acceptedContracts = await Contract.find(
+      { brandId, ...activeAcceptedFilter() },
+      "campaignId contractId influencerId lastActionAt createdAt"
+    )
+      .sort({ lastActionAt: -1, createdAt: -1 })
+      .lean();
+
+    // Keep latest accepted contract per campaign
+    const contractByCampaign = new Map();
+    for (const c of acceptedContracts) {
+      const key = String(c.campaignId || "");
+      if (!key) continue;
+      if (!contractByCampaign.has(key)) {
+        contractByCampaign.set(key, {
+          contractId: c.contractId || null,
+          influencerId: c.influencerId || null,
+        });
+      }
+    }
+
+    const acceptedCampaignIds = new Set(Array.from(contractByCampaign.keys()));
+    const acceptedCount = acceptedCampaignIds.size;
+
+    // 4) Apply your rule:
+    // - if acceptedCount === 0 => show ALL
+    // - if ANY campaign has no accepted influencer => show ALL
+    // - else show accepted only
+    const anyUnaccepted = allCampaigns.some((camp) => {
+      const id = String(camp.campaignsId || camp._id || "");
+      return id && !acceptedCampaignIds.has(id);
+    });
+
+    const showAll = acceptedCount === 0 || anyUnaccepted;
+    const campaignsMode = showAll ? "all" : "accepted";
+
+    const baseList = showAll
+      ? allCampaigns
+      : allCampaigns.filter((c) => acceptedCampaignIds.has(String(c.campaignsId || c._id || "")));
+
+    const campaigns = baseList.map((c) => {
+      const id = String(c.campaignsId || c._id || "");
+      const meta = contractByCampaign.get(id) || {};
+      return {
+        id, // normalized id for frontend key
+        campaignsId: c.campaignsId || id,
+        productOrServiceName: c.productOrServiceName || "",
+        goal: c.goal || "",
+        budget: Number(c.budget || 0),
+        isActive: Number(c.isActive || 0),
+        createdAt: c.createdAt || null,
+
+        hasAcceptedInfluencer: acceptedCampaignIds.has(id),
+        influencerId: meta.influencerId ?? null,
+        contractId: meta.contractId ?? null,
+      };
+    });
+
+    // 5) Total hired influencers (distinct) from ACTIVE campaigns only
+    const activeCampaignIds = allCampaigns
+      .filter((c) => Number(c.isActive) === 1)
+      .map((c) => String(c.campaignsId || c._id || ""));
+
+    let totalHiredInfluencers = 0;
+    if (activeCampaignIds.length) {
+      const hiredAgg = await Contract.aggregate([
+        {
+          $match: {
+            brandId,
+            campaignId: { $in: activeCampaignIds },
+            isAssigned: 1,
+            isAccepted: 1,
+          },
+        },
+        { $group: { _id: "$influencerId" } },
+        { $count: "total" },
+      ]);
+      totalHiredInfluencers = hiredAgg?.[0]?.total || 0;
+    }
+
+    // 6) Budget remaining (brand walletBalance from milestone doc)
+    const milestone = await Milestone.findOne({ brandId }, "walletBalance").lean();
+    const budgetRemaining = Number(milestone?.walletBalance ?? 0);
+
+    return res.status(200).json({
+      brandName: brand.name,
+      totalCreatedCampaigns,
+      totalHiredInfluencers,
+      budgetRemaining,
+      campaignsMode,
+      campaigns,
+    });
+  } catch (err) {
+    console.error("getBrandDashboardHome error:", err);
+    return res.status(500).json({ error: "Server error" });
   }
 };
