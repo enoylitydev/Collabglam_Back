@@ -869,75 +869,81 @@ exports.checkApplied = async (req, res) => {
 };
 
 // ===============================
-//  INFLUENCER: DISCOVER CAMPAIGNS
+//  INFLUENCER: DISCOVER CAMPAIGNS (3 latest)
 // ===============================
 exports.getCampaignsByInfluencer = async (req, res) => {
-  const { influencerId, search, page = 1, limit = 10 } = req.body;
-  if (!influencerId) return res.status(400).json({ message: 'influencerId is required' });
+  const { influencerId, search } = req.body;
+  if (!influencerId) return res.status(400).json({ message: "influencerId is required" });
 
   try {
     const inf = await Influencer.findOne({ influencerId }).lean();
-    if (!inf) return res.status(404).json({ message: 'Influencer not found' });
+    if (!inf) return res.status(404).json({ message: "Influencer not found" });
 
-    const subIdToParentNum = await buildSubToParentNumMap();
+    const FIXED_LIMIT = 5;
 
-    const selectedSubIds = new Set((inf.onboarding?.subcategories || [])
-      .map(s => s?.subcategoryId).filter(Boolean).map(String));
+    const filter = {
+      isActive: 1,
+      isDraft: { $ne: 1 }, // exclude drafts
+    };
 
-    const selectedCatNumIds = new Set();
-    if (typeof inf.onboarding?.categoryId === 'number') selectedCatNumIds.add(inf.onboarding.categoryId);
-
-    for (const subId of selectedSubIds) {
-      const parentNum = subIdToParentNum.get(subId);
-      if (typeof parentNum === 'number') selectedCatNumIds.add(parentNum);
+    if (search?.trim()) {
+      filter.$or = buildSearchOr(search.trim());
     }
-
-    if (selectedSubIds.size === 0 && selectedCatNumIds.size === 0) {
-      return res.json({ meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 }, campaigns: [] });
-    }
-
-    const subIdsArr = Array.from(selectedSubIds);
-    const catNumArr = Array.from(selectedCatNumIds);
-
-    const orClauses = [];
-    if (subIdsArr.length) orClauses.push({ 'categories.subcategoryId': { $in: subIdsArr } });
-    if (catNumArr.length) orClauses.push({ 'categories.categoryId': { $in: catNumArr } });
-
-    const filter = { isActive: 1, $or: orClauses };
-    if (search?.trim()) filter.$and = [{ $or: buildSearchOr(search.trim()) }];
-
-    const pageNum = Math.max(1, parseInt(page, 10));
-    const limNum = Math.max(1, parseInt(limit, 10));
-    const skip = (pageNum - 1) * limNum;
 
     const [total, campaigns] = await Promise.all([
       Campaign.countDocuments(filter),
-      Campaign.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limNum).lean()
+      Campaign.find(filter)
+        .sort({ createdAt: -1 })
+        .limit(FIXED_LIMIT)
+        .lean(),
     ]);
 
+    // ---- canApply calculation (same as your current code) ----
     let canApply = true;
-    const applyF = (inf.subscription?.features || []).find(f => f.key === 'apply_to_campaigns_quota');
+
+    const applyF = (inf.subscription?.features || []).find(
+      (f) => f.key === "apply_to_campaigns_quota"
+    );
     if (applyF) {
-      const fReset = await ensureMonthlyWindow(influencerId, 'apply_to_campaigns_quota', applyF);
+      const fReset = await ensureMonthlyWindow(influencerId, "apply_to_campaigns_quota", applyF);
       const lim = readLimit(fReset);
       if (lim > 0 && Number(fReset.used || 0) >= lim) canApply = false;
     }
-    const capF = (inf.subscription?.features || []).find(f => f.key === 'active_collaborations_limit');
+
+    const capF = (inf.subscription?.features || []).find(
+      (f) => f.key === "active_collaborations_limit"
+    );
     const cap = readLimit(capF);
     if (cap > 0) {
       const activeNow = await countActiveCollaborationsForInfluencer(influencerId);
       if (activeNow >= cap) canApply = false;
     }
 
-    const totalPages = Math.ceil(total / limNum);
-    const annotated = campaigns.map((c) => ({ ...c, hasApplied: 0, hasApproved: 0, isContracted: 0, contractId: null, isAccepted: 0, canApply }));
+    const annotated = campaigns.map((c) => ({
+      ...c,
+      hasApplied: 0,
+      hasApproved: 0,
+      isContracted: 0,
+      contractId: null,
+      isAccepted: 0,
+      canApply,
+    }));
 
-    return res.json({ meta: { total, page: pageNum, limit: limNum, totalPages }, campaigns: annotated });
+    return res.json({
+      meta: {
+        total,
+        page: 1,
+        limit: FIXED_LIMIT,
+        totalPages: Math.ceil(total / FIXED_LIMIT),
+      },
+      campaigns: annotated,
+    });
   } catch (err) {
-    console.error('Error in getCampaignsByInfluencer:', err);
-    return res.status(500).json({ message: 'Internal server error' });
+    console.error("Error in getCampaignsByInfluencer:", err);
+    return res.status(500).json({ message: "Internal server error" });
   }
 };
+
 
 // ===============================
 //  INFLUENCER: APPROVED (milestone + contract)
