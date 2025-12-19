@@ -29,7 +29,7 @@ const { escapeRegExp } = require('../utils/searchTokens');
 
 const UUIDv4Regex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-const BASE_API_URL = process.env.INTERNAL_API_URL || 'http://localhost:4000';
+const BASE_API_URL = 'https://api.collabglam.com';
 const WELCOME_EMAIL_API_URL = `${BASE_API_URL}/emails/send-welcome`;
 
 /* ========================= SMTP / Mailer (brand-style) ========================= */
