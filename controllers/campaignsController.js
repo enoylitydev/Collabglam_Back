@@ -748,39 +748,60 @@ exports.deleteCampaign = async (req, res) => {
 // ===============================
 exports.getActiveCampaignsByBrand = async (req, res) => {
   try {
-    const { brandId, page = 1, limit = 10, search = '', sortBy = 'createdAt', sortOrder = 'desc' } = req.query;
+    const {
+      brandId,
+      page = 1,
+      limit = 10,
+      search = "",
+      sortBy = "createdAt",
+      sortOrder = "desc",
+    } = req.query;
 
-    if (!brandId) return res.status(400).json({ message: 'Query parameter brandId is required.' });
+    if (!brandId) return res.status(400).json({ message: "brandId is required." });
 
+    // 1) get accepted campaign ids for this brand
+    const acceptedIds = await Contract.distinct("campaignId", {
+      brandId,
+      ...activeAcceptedFilter(),
+    });
+
+    // 2) active campaigns filter, excluding accepted
     const filter = { brandId, isActive: 1 };
-    if (search) filter.$or = buildSearchOr(search);
+    if (acceptedIds.length) filter.campaignsId = { $nin: acceptedIds }; // adjust field if needed
+    if (search?.trim()) filter.$or = buildSearchOr(search.trim());
 
     const pageNum = Math.max(parseInt(page, 10), 1);
     const perPage = Math.max(parseInt(limit, 10), 1);
     const skip = (pageNum - 1) * perPage;
 
-    const sortDir = String(sortOrder).toLowerCase() === 'asc' ? 1 : -1;
+    const sortDir = String(sortOrder).toLowerCase() === "asc" ? 1 : -1;
     const sortObj = { [sortBy]: sortDir };
 
     const [campaigns, totalCount] = await Promise.all([
       Campaign.find(filter)
-        .select('-description') // ← exclude description
+        .select("-description")
         .sort(sortObj)
         .skip(skip)
         .limit(perPage)
         .lean(),
-      Campaign.countDocuments(filter)
+      Campaign.countDocuments(filter),
     ]);
 
     return res.json({
       data: campaigns,
-      pagination: { total: totalCount, page: pageNum, limit: perPage, totalPages: Math.ceil(totalCount / perPage) }
+      pagination: {
+        total: totalCount,
+        page: pageNum,
+        limit: perPage,
+        totalPages: Math.ceil(totalCount / perPage),
+      },
     });
   } catch (error) {
-    console.error('Error in getActiveCampaignsByBrand:', error);
-    return res.status(500).json({ message: 'Internal server error while fetching active campaigns.' });
+    console.error("Error in getActiveCampaignsByBrand:", error);
+    return res.status(500).json({ message: "Internal server error." });
   }
 };
+
 
 // ===============================
 //  BRAND: PREVIOUS (INACTIVE) CAMPAIGNS (paginated)
@@ -1088,6 +1109,7 @@ exports.getAppliedCampaignsByInfluencer = async (req, res) => {
 //  BRAND: ACCEPTED CAMPAIGNS
 // ===============================
 exports.getAcceptedCampaigns = async (req, res) => {
+ 
   const { brandId, search, page = 1, limit = 10 } = req.body;
   if (!brandId) return res.status(400).json({ message: 'brandId is required' });
 
@@ -1098,7 +1120,7 @@ exports.getAcceptedCampaigns = async (req, res) => {
     )
       .sort({ lastActionAt: -1, createdAt: -1 })
       .lean();
-
+     console.log(contracts)
     const campaignIds = contracts.map((c) => c.campaignId);
     if (campaignIds.length === 0) return res.status(200).json({ meta: { total: 0, page, limit, totalPages: 0 }, campaigns: [] });
 
@@ -1128,7 +1150,8 @@ exports.getAcceptedCampaigns = async (req, res) => {
       contractId: contractMap.get(c.campaignsId),
       influencerId: influencerMap.get(c.campaignsId),
       feeAmount: feeMap.get(c.campaignsId),
-      isAccepted: 1
+      isAccepted: 1,
+      totalAcceptedMembers : contracts.length
     }));
 
     return res.json({ meta: { total, page: pageNum, limit: limNum, totalPages: Math.ceil(total / limNum) }, campaigns: annotated });

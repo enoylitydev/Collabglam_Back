@@ -474,9 +474,12 @@ exports.getListByCampaign = async (req, res) => {
       }
 
       // 2) Fallback: profile with most followers
-      return profiles
-        .slice()
-        .sort((a, b) => (Number(b.followers) || 0) - (Number(a.followers) || 0))[0] || null;
+      return (
+        profiles
+          .slice()
+          .sort((a, b) => (Number(b.followers) || 0) - (Number(a.followers) || 0))[0] ||
+        null
+      );
     }
 
     const contracts = await Contract.find({ campaignId }).lean();
@@ -545,7 +548,10 @@ exports.getListByCampaign = async (req, res) => {
       };
     });
 
-    // Sorting
+    // ✅ FILTER OUT ACCEPTED (isAccepted === 1) BEFORE sort/pagination/response
+    const filtered = condensed.filter(i => i.isAccepted !== 1);
+
+    // Sorting (same logic, just applied to filtered)
     const dir = sortOrder === 1 ? -1 : 1;
     if (sortField) {
       const allowed = new Set([
@@ -557,7 +563,7 @@ exports.getListByCampaign = async (req, res) => {
         'createdAt'
       ]);
       if (allowed.has(sortField)) {
-        condensed.sort((a, b) => {
+        filtered.sort((a, b) => {
           const av = a[sortField];
           const bv = b[sortField];
 
@@ -580,12 +586,12 @@ exports.getListByCampaign = async (req, res) => {
     const start = (pageNum - 1) * limNum;
     const end = start + limNum;
 
-    const total = condensed.length;
-    const paged = condensed.slice(start, end);
+    const total = filtered.length;
+    const paged = filtered.slice(start, end);
 
     return res.status(200).json({
       meta: { total, page: pageNum, limit: limNum, totalPages: Math.ceil(total / limNum) },
-      applicantCount: record.applicants.length,
+      applicantCount: record.applicants.length, // kept same as your original
       isContracted: isContractedCampaign,
       contractId: null,
       influencers: paged
@@ -596,6 +602,7 @@ exports.getListByCampaign = async (req, res) => {
     return res.status(500).json({ message: 'Internal server error' });
   }
 };
+
 
 /**
  * POST /ApplyCampaigns/approve
