@@ -1,10 +1,11 @@
+// controllers/campaign.js
 const mongoose = require('mongoose');
 const multer = require('multer');
 const { uploadToGridFS } = require('../utils/gridfs');
 
 const Campaign = require('../models/campaign');
 const Brand = require('../models/brand');
-const Category = require('../models/categories'); // categories collection with subcategories[]
+const Category = require('../models/categories');
 const ApplyCampaign = require('../models/applyCampaign');
 const Influencer = require('../models/influencer');
 const Contract = require('../models/contract');
@@ -12,7 +13,7 @@ const SubscriptionPlan = require('../models/subscription');
 const getFeature = require('../utils/getFeature');
 const Milestone = require('../models/milestone');
 const Country = require('../models/country');
-const Modash = require('../models/modash'); // adjust path if needed
+const Modash = require('../models/modash');
 const { CONTRACT_STATUS } = require("../constants/contract");
 
 // ✅ persisted notifications helper (creates DB row + emits via socket.io)
@@ -33,7 +34,6 @@ const DOC_MIMES = new Set([
 // ===============================
 //  Subscription / Quota helpers
 // ===============================
-
 async function ensureBrandQuota(brandId, featureKey, amount = 1) {
   if (!brandId) {
     throw new Error('brandId is required for quota checks');
@@ -129,7 +129,6 @@ const upload = multer({
 // ===============================
 //  Helpers
 // ===============================
-
 function activeAcceptedFilter() {
   return {
     isAccepted: 1,
@@ -277,6 +276,98 @@ async function findMatchingInfluencers({ subIds = [], catNumIds = [] }) {
 
   return influencers || [];
 }
+
+function addInfluencerOpenStatusGate(filter) {
+  filter.$and = filter.$and || [];
+  filter.$and.push({
+    $or: [{ campaignStatus: 'open' },
+    { campaignStatus: { $exists: false } }]
+  });
+  return filter;
+}
+
+// ✅ STATUS: closed removed
+const CAMPAIGN_STATUS = Object.freeze({
+  OPEN: "open",
+  PAUSED: "paused",
+});
+
+const ALLOWED_CAMPAIGN_STATUSES = new Set([
+  CAMPAIGN_STATUS.OPEN,
+  CAMPAIGN_STATUS.PAUSED,
+]);
+
+function normalizeStatus(v) {
+  return String(v || "").toLowerCase().trim();
+}
+
+exports.updateCampaignStatus = async (req, res) => {
+  try {
+    const { brandId, campaignId, status } = req.body || {};
+
+    if (!brandId) {
+      return res.status(400).json({ message: "brandId is required." });
+    }
+    if (!campaignId) {
+      return res.status(400).json({ message: "campaignId is required." });
+    }
+
+    const next = normalizeStatus(status);
+    if (!ALLOWED_CAMPAIGN_STATUSES.has(next)) {
+      return res.status(400).json({
+        message: "Invalid status. Use: open | paused",
+      });
+    }
+
+    // ✅ Robust: supports campaignsId / campaignId / ObjectId (via helper you already have)
+    const campaign = await Campaign.findOne({
+      brandId,
+      ...campaignIdFilter(campaignId),
+    });
+
+    if (!campaign) {
+      return res.status(404).json({ message: "Campaign not found." });
+    }
+
+    // ✅ Legacy cleanup: if DB has "closed", treat it as "paused"
+    const current = normalizeStatus(campaign.campaignStatus || CAMPAIGN_STATUS.OPEN);
+    if (current === "closed") {
+      campaign.campaignStatus = CAMPAIGN_STATUS.PAUSED;
+    }
+
+    // ✅ If opening, ensure timeline not ended
+    if (next === CAMPAIGN_STATUS.OPEN) {
+      const activeFlag = computeIsActive(campaign.timeline);
+      if (activeFlag === 0) {
+        return res.status(400).json({
+          message: "Campaign timeline ended. Extend endDate to reopen.",
+        });
+      }
+      // optional: clear pausedAt when opening
+      campaign.pausedAt = undefined;
+    }
+
+    // ✅ Update status (no closed / no isActive changes)
+    campaign.campaignStatus = next;
+    campaign.statusUpdatedAt = new Date();
+
+    if (next === CAMPAIGN_STATUS.PAUSED) {
+      campaign.pausedAt = new Date();
+    }
+
+    await campaign.save();
+
+    return res.json({
+      message: "Campaign status updated successfully.",
+      campaign,
+    });
+  } catch (error) {
+    console.error("Error in updateCampaignStatus:", error);
+    return res.status(500).json({
+      message: "Internal server error while updating campaign status.",
+    });
+  }
+};
 
 // ===============================
 //  CREATE CAMPAIGN
@@ -461,6 +552,10 @@ exports.createCampaign = (req, res) => {
         additionalNotes,
         isActive: isActiveFlag,
         isDraft: 0, // 🔹 mark as final campaign
+
+        // ✅ NEW: open by default
+        campaignStatus: 'open',
+        statusUpdatedAt: new Date(),
       };
 
       let campaignDoc;
@@ -639,6 +734,12 @@ exports.updateCampaign = (req, res) => {
       delete updates.createdAt;
       delete updates.interestId;
       delete updates.interestName;
+
+      // ✅ NEW: protect status fields (must use updateCampaignStatus)
+      delete updates.campaignStatus;
+      delete updates.statusUpdatedAt;
+      delete updates.pausedAt;
+      delete updates.closedAt;
 
       // targetAudience
       if (updates.targetAudience) {
@@ -828,7 +929,13 @@ exports.getActiveCampaignsByCategories = async (req, res) => {
     }
     subcategoryIds = subcategoryIds.map((s) => String(s));
 
-    const filter = { isActive: 1, 'categories.subcategoryId': { $in: subcategoryIds } };
+    // ✅ NEW: open only + exclude drafts (influencer side)
+    const filter = addInfluencerOpenStatusGate({
+      isActive: 1,
+      isDraft: { $ne: 1 },
+      'categories.subcategoryId': { $in: subcategoryIds }
+    });
+
     if (search && typeof search === 'string' && search.trim()) filter.$or = buildSearchOr(search.trim());
 
     const pageNum = Math.max(1, parseInt(page, 10));
@@ -881,10 +988,11 @@ exports.getCampaignsByInfluencer = async (req, res) => {
 
     const FIXED_LIMIT = 5;
 
-    const filter = {
+    // ✅ NEW: open only (and legacy open) + exclude drafts
+    const filter = addInfluencerOpenStatusGate({
       isActive: 1,
       isDraft: { $ne: 1 }, // exclude drafts
-    };
+    });
 
     if (search?.trim()) {
       filter.$or = buildSearchOr(search.trim());
@@ -943,7 +1051,6 @@ exports.getCampaignsByInfluencer = async (req, res) => {
     return res.status(500).json({ message: "Internal server error" });
   }
 };
-
 
 // ===============================
 //  INFLUENCER: APPROVED (milestone + contract)
@@ -1234,7 +1341,6 @@ exports.getAcceptedInfluencers = async (req, res) => {
       });
     }
 
-    // ... 👇 rest of your existing Modash / merge logic stays the same
     const pageInfluencerIds = rawInfluencers.map((i) => String(i.influencerId));
 
     const modashProfiles = await Modash.find(
@@ -1462,7 +1568,11 @@ exports.getCampaignsByFilter = async (req, res) => {
       sortOrder = 'desc'
     } = req.body;
 
-    const filter = {};
+    // ✅ NEW: open only + exclude drafts + active only (influencer side)
+    const filter = addInfluencerOpenStatusGate({
+      isActive: 1,
+      isDraft: { $ne: 1 }
+    });
 
     if (Array.isArray(subcategoryIds) && subcategoryIds.length) {
       filter['categories.subcategoryId'] = { $in: subcategoryIds.map(String) };

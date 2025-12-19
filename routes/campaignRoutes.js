@@ -79,4 +79,6 @@ router.get('/campaignSummary', brandController.verifyToken,campaignController.ge
 router.post('/save-draft', brandController.verifyToken, campaignController.saveDraftCampaign);
 router.get('/draft', brandController.verifyToken, campaignController.getDraftCampaignByBrand);
 
+router.post("/status", campaignController.updateCampaignStatus);
+
 module.exports = router;
