@@ -3,6 +3,9 @@
 const Invitation = require('../models/NewInvitations');
 const MissingEmail = require('../models/MissingEmail');
 const Campaign = require('../models/campaign');
+const Influencer = require('../models/influencer');
+const { EmailThread, EmailMessage } = require('../models/email')
+const Brand = require('../models/brand');
 
 const HANDLE_RX = /^@[A-Za-z0-9._\-]+$/;
 const PLATFORM_MAP = new Map([
@@ -28,11 +31,11 @@ const STATUS_ENUM = new Set(['invited', 'available']);
  * - No duplicate per (brandId, handle, platform)
  */
 exports.createInvitation = async (req, res) => {
-  const rawHandle      = (req.body?.handle      || '').trim();
-  const rawBrandId     = (req.body?.brandId     || '').trim();
-  const rawPlatform    = (req.body?.platform    || '').trim();
-  const rawStatus      = (req.body?.status      || '').trim().toLowerCase();
-  const rawCampaignId  = (req.body?.campaignId  || '').trim();  // 🔥 NEW (optional)
+  const rawHandle = (req.body?.handle || '').trim();
+  const rawBrandId = (req.body?.brandId || '').trim();
+  const rawPlatform = (req.body?.platform || '').trim();
+  const rawStatus = (req.body?.status || '').trim().toLowerCase();
+  const rawCampaignId = (req.body?.campaignId || '').trim();  // 🔥 NEW (optional)
 
   if (!rawHandle) {
     return res.status(400).json({
@@ -151,11 +154,11 @@ exports.createInvitation = async (req, res) => {
  */
 exports.updateInvitationStatus = async (req, res) => {
   try {
-    const rawHandle         = (req.body?.handle || '').trim();
-    const rawPlatformInput  = (req.body?.platform || '').trim().toLowerCase();
-    const rawStatus         = (req.body?.status || '').trim().toLowerCase();
+    const rawHandle = (req.body?.handle || '').trim();
+    const rawPlatformInput = (req.body?.platform || '').trim().toLowerCase();
+    const rawStatus = (req.body?.status || '').trim().toLowerCase();
     const rawMissingEmailId = (req.body?.missingEmailId || '').trim();
-    const rawBrandId        = (req.body?.brandId || '').trim(); // optional, if you ever send it
+    const rawBrandId = (req.body?.brandId || '').trim(); // optional, if you ever send it
 
     // 1) Validate handle
     if (!rawHandle) {
@@ -256,16 +259,16 @@ exports.updateInvitationStatus = async (req, res) => {
 exports.listInvitations = async (req, res) => {
   const body = req.body || {};
 
-  const page  = Math.max(1, parseInt(body.page  ?? '1', 10));
+  const page = Math.max(1, parseInt(body.page ?? '1', 10));
   const limit = Math.min(200, Math.max(1, parseInt(body.limit ?? '50', 10)));
 
-  const rawBrandId     = typeof body.brandId     === 'string' ? body.brandId.trim()     : '';
-  const rawHandle      = typeof body.handle      === 'string' ? body.handle.trim()      : '';
-  const rawPlatform    = typeof body.platform    === 'string' ? body.platform.trim()    : '';
-  const rawStatus      = typeof body.status      === 'string'
+  const rawBrandId = typeof body.brandId === 'string' ? body.brandId.trim() : '';
+  const rawHandle = typeof body.handle === 'string' ? body.handle.trim() : '';
+  const rawPlatform = typeof body.platform === 'string' ? body.platform.trim() : '';
+  const rawStatus = typeof body.status === 'string'
     ? body.status.trim().toLowerCase()
     : '';
-  const rawCampaignId  = typeof body.campaignId  === 'string' ? body.campaignId.trim()  : ''; // 🔥 NEW
+  const rawCampaignId = typeof body.campaignId === 'string' ? body.campaignId.trim() : ''; // 🔥 NEW
 
   const query = {};
 
@@ -476,6 +479,184 @@ exports.getInvitationList = async (req, res) => {
     return res.status(500).json({
       status: 'error',
       message: 'Internal server error',
+    });
+  }
+};
+
+const COOLDOWN_MS = 48 * 60 * 60 * 1000; // 48 hours
+
+async function computeBrandEligibilityForThread(threadId) {
+  const messages = await EmailMessage.find({ thread: threadId })
+    .select('direction createdAt sentAt')
+    .sort({ createdAt: 1 })
+    .lean();
+
+  const hasIncoming = messages.some((m) => m.direction === 'influencer_to_brand');
+  if (hasIncoming) {
+    return {
+      canSend: true,
+      state: 'allowed',
+      reason: 'Influencer replied — messaging is unlocked.',
+      nextAllowedAt: null,
+      outgoingCount: messages.filter(m => m.direction === 'brand_to_influencer').length,
+    };
+  }
+
+  const outgoing = messages.filter((m) => m.direction === 'brand_to_influencer');
+  const outgoingCount = outgoing.length;
+
+  if (outgoingCount === 0) {
+    return {
+      canSend: true,
+      state: 'allowed',
+      reason: 'First email allowed.',
+      nextAllowedAt: null,
+      outgoingCount,
+    };
+  }
+
+  if (outgoingCount === 1) {
+    const firstAt = new Date(outgoing[0].sentAt || outgoing[0].createdAt).getTime();
+    const nextAllowedAt = new Date(firstAt + COOLDOWN_MS);
+
+    if (Date.now() >= nextAllowedAt.getTime()) {
+      return {
+        canSend: true,
+        state: 'allowed',
+        reason: '48 hours passed — follow-up allowed.',
+        nextAllowedAt: null,
+        outgoingCount,
+      };
+    }
+
+    return {
+      canSend: false,
+      state: 'cooldown',
+      reason: 'Wait 48 hours before sending a follow-up (no reply yet).',
+      nextAllowedAt: nextAllowedAt.toISOString(),
+      outgoingCount,
+    };
+  }
+
+  return {
+    canSend: false,
+    state: 'blocked',
+    reason: 'You already sent 2 emails without a reply. You can message again only after the influencer replies.',
+    nextAllowedAt: null,
+    outgoingCount,
+  };
+}
+
+// ✅ POST /emails/invitation/eligibility
+exports.getInvitationSendEligibility = async (req, res) => {
+  try {
+    const brandId = String(req.body?.brandId || '').trim();
+    const invitationId = String(req.body?.invitationId || '').trim();
+
+    if (!brandId || !invitationId) {
+      return res.status(400).json({
+        canSend: false,
+        state: 'missing_email',
+        reason: 'brandId and invitationId are required.',
+        nextAllowedAt: null,
+      });
+    }
+
+    const brand = await Brand.findOne({ brandId }).lean();
+    if (!brand) {
+      return res.status(404).json({
+        canSend: false,
+        state: 'missing_email',
+        reason: 'Brand not found.',
+        nextAllowedAt: null,
+      });
+    }
+
+    const invitation = await Invitation.findOne({ invitationId }).lean();
+    if (!invitation) {
+      return res.status(404).json({
+        canSend: false,
+        state: 'missing_email',
+        reason: 'Invitation not found.',
+        nextAllowedAt: null,
+      });
+    }
+
+    // Ensure this invitation belongs to this brand
+    if (invitation.brandId && invitation.brandId !== (brand.brandId || String(brand._id))) {
+      return res.status(403).json({
+        canSend: false,
+        state: 'missing_email',
+        reason: 'Invitation does not belong to this brand.',
+        nextAllowedAt: null,
+      });
+    }
+
+    if (!invitation.missingEmailId) {
+      return res.status(200).json({
+        canSend: false,
+        state: 'missing_email',
+        reason: 'No email resolved yet for this invitation.',
+        nextAllowedAt: null,
+        threadId: null,
+      });
+    }
+
+    const missing = await MissingEmail.findOne({ missingEmailId: invitation.missingEmailId }).lean();
+    const recipientEmail = (missing?.email || '').toLowerCase().trim();
+
+    if (!recipientEmail) {
+      return res.status(200).json({
+        canSend: false,
+        state: 'missing_email',
+        reason: 'Recipient email not found yet for this invitation.',
+        nextAllowedAt: null,
+        threadId: null,
+      });
+    }
+
+    // Find influencer by email WITHOUT creating new docs
+    const influencer = await Influencer.findOne({ email: recipientEmail }).select('_id').lean();
+    if (!influencer) {
+      // no thread yet => first email allowed
+      return res.status(200).json({
+        canSend: true,
+        state: 'allowed',
+        reason: 'First email allowed.',
+        nextAllowedAt: null,
+        threadId: null,
+        outgoingCount: 0,
+      });
+    }
+
+    const thread = await EmailThread.findOne({ brand: brand._id, influencer: influencer._id })
+      .select('_id')
+      .lean();
+
+    if (!thread) {
+      return res.status(200).json({
+        canSend: true,
+        state: 'allowed',
+        reason: 'First email allowed.',
+        nextAllowedAt: null,
+        threadId: null,
+        outgoingCount: 0,
+      });
+    }
+
+    const eligibility = await computeBrandEligibilityForThread(thread._id);
+
+    return res.status(200).json({
+      ...eligibility,
+      threadId: String(thread._id),
+    });
+  } catch (err) {
+    console.error('getInvitationSendEligibility error:', err);
+    return res.status(500).json({
+      canSend: false,
+      state: 'missing_email',
+      reason: 'Internal server error.',
+      nextAllowedAt: null,
     });
   }
 };

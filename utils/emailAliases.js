@@ -1,28 +1,50 @@
 // utils/emailAliases.js
 
-const EmailAlias = require('../models/emailAlias');
-const { EmailThread } = require('../models/email'); // destructure from module.exports
-const Brand       = require('../models/brand');
-const Influencer  = require('../models/influencer');
+const crypto = require("crypto");
+const EmailAlias = require("../models/emailAlias");
 
-const RELAY_DOMAIN = process.env.EMAIL_RELAY_DOMAIN || 'collabglam.com';
+const RELAY_DOMAIN = String(process.env.EMAIL_RELAY_DOMAIN || "mail.collabglam.com")
+  .trim()
+  .toLowerCase();
 
-function slugify(str) {
-  return String(str || '')
-    .toLowerCase()
-    .trim()
-    .replace(/^@/, '')
-    .replace(/[^a-z0-9]+/g, '')
-    .replace(/^-+|-+$/g, '');
+// ---------- helpers ----------
+function normEmail(e) {
+  return String(e || "").trim().toLowerCase();
 }
 
-async function reserveProxyEmail(base) {
-  const local = slugify(base) || 'user';
+function slugifyStrict(str) {
+  // For brand aliases: only a-z0-9, no "+", no "."
+  return String(str || "")
+    .toLowerCase()
+    .trim()
+    .replace(/^@/, "")
+    .replace(/[^a-z0-9]+/g, "")
+    .replace(/^-+|-+$/g, "");
+}
+
+function cleanLocalAllowPlus(str) {
+  // For influencer aliases: allow "+"
+  // (so we can do influencer+<token>@domain)
+  return String(str || "")
+    .toLowerCase()
+    .trim()
+    .replace(/^@/, "")
+    .replace(/[^a-z0-9+]+/g, "")
+    .slice(0, 50);
+}
+
+function makeToken(bytes = 4) {
+  // 8 bytes => 16 hex chars
+  return crypto.randomBytes(bytes).toString("hex");
+}
+
+async function reserveProxyEmail({ localPart }) {
+  const local = cleanLocalAllowPlus(localPart) || "user";
   let alias = `${local}@${RELAY_DOMAIN}`;
   let n = 1;
 
   // ensure uniqueness across EmailAlias
-  while (await EmailAlias.findOne({ proxyEmail: alias })) {
+  while (await EmailAlias.exists({ proxyEmail: alias })) {
     alias = `${local}${n}@${RELAY_DOMAIN}`;
     n += 1;
   }
@@ -30,13 +52,14 @@ async function reserveProxyEmail(base) {
 }
 
 /**
- * Brand aliases: brandname@collabglam.com
+ * Brand aliases: brandname@mail.collabglam.com
  */
 async function getOrCreateBrandAlias(brand) {
-  if (brand.brandAliasEmail) return brand.brandAliasEmail;
+  if (brand.brandAliasEmail) return normEmail(brand.brandAliasEmail);
 
   const base = brand.slug || brand.name || brand.brandId || brand._id.toString();
-  const alias = await reserveProxyEmail(base);
+  const local = slugifyStrict(base) || "brand";
+  const alias = await reserveProxyEmail({ localPart: local });
 
   brand.brandAliasEmail = alias;
   await brand.save();
@@ -45,13 +68,13 @@ async function getOrCreateBrandAlias(brand) {
     { proxyEmail: alias },
     {
       $setOnInsert: {
-        ownerModel: 'Brand',
+        ownerModel: "Brand",
         owner: brand._id,
         proxyEmail: alias,
       },
       $set: {
-        externalEmail: String(brand.email || '').toLowerCase(),
-        status: 'active',
+        externalEmail: normEmail(brand.email),
+        status: "active",
       },
     },
     { upsert: true, new: true }
@@ -60,22 +83,12 @@ async function getOrCreateBrandAlias(brand) {
   return alias;
 }
 
-/**
- * Influencer aliases: influencerhandle@collabglam.com
- * Prefer a public handle if you store one, fallback to name/email/id.
- */
 async function getOrCreateInfluencerAlias(influencer) {
-  if (influencer.influencerAliasEmail) return influencer.influencerAliasEmail;
+  if (influencer.influencerAliasEmail) return normEmail(influencer.influencerAliasEmail);
 
-  const base =
-    influencer.publicHandle ||
-    influencer.username ||
-    influencer.name ||
-    (influencer.email || '').split('@')[0] ||
-    influencer.influencerId ||
-    influencer._id.toString();
-
-  const alias = await reserveProxyEmail(base);
+  // Opaque, non-identifying routing alias
+  const local = `influencer${makeToken(4)}`; // influencer+16hexchars
+  const alias = await reserveProxyEmail({ localPart: local });
 
   influencer.influencerAliasEmail = alias;
   await influencer.save();
@@ -84,13 +97,13 @@ async function getOrCreateInfluencerAlias(influencer) {
     { proxyEmail: alias },
     {
       $setOnInsert: {
-        ownerModel: 'Influencer',
+        ownerModel: "Influencer",
         owner: influencer._id,
         proxyEmail: alias,
       },
       $set: {
-        externalEmail: String(influencer.email || '').toLowerCase(),
-        status: 'active',
+        externalEmail: normEmail(influencer.email),
+        status: "active",
       },
     },
     { upsert: true, new: true }
@@ -101,25 +114,27 @@ async function getOrCreateInfluencerAlias(influencer) {
 
 /** Lookup alias record by proxy email (used by inbound handler). */
 async function findAliasByProxy(proxyEmail) {
-  if (!proxyEmail) return null;
+  const p = normEmail(proxyEmail);
+  if (!p) return null;
+
   return EmailAlias.findOne({
-    proxyEmail: String(proxyEmail).trim().toLowerCase(),
-    status: 'active',
+    proxyEmail: p,
+    status: "active",
   });
 }
 
 /** For “claim external email” flow – attach external emails to an influencer. */
 async function attachExternalEmailToInfluencer(influencer, externalEmail) {
-  const normalized = String(externalEmail || '').trim().toLowerCase();
+  const normalized = normEmail(externalEmail);
   if (!normalized) return;
 
   // Update all existing alias docs that already reference this external email
   await EmailAlias.updateMany(
-    { externalEmail: normalized, ownerModel: 'Influencer' },
+    { externalEmail: normalized, ownerModel: "Influencer" },
     {
       $set: {
         owner: influencer._id,
-        status: 'active',
+        status: "active",
         verifiedAt: new Date(),
       },
     }
@@ -127,18 +142,19 @@ async function attachExternalEmailToInfluencer(influencer, externalEmail) {
 
   // If there is no alias yet for this external email, create a “secondary” mapping
   const existing = await EmailAlias.findOne({
-    ownerModel: 'Influencer',
+    ownerModel: "Influencer",
     owner: influencer._id,
     externalEmail: normalized,
   });
+
   if (!existing) {
     // We do NOT create a new proxy address here; we just store the mapping
     await EmailAlias.create({
-      ownerModel: 'Influencer',
+      ownerModel: "Influencer",
       owner: influencer._id,
-      proxyEmail: influencer.influencerAliasEmail, // re-use their main alias
+      proxyEmail: influencer.influencerAliasEmail, // re-use their main routing alias
       externalEmail: normalized,
-      status: 'active',
+      status: "active",
       verifiedAt: new Date(),
     });
   }
