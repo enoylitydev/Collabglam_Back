@@ -141,7 +141,20 @@ function activeAcceptedFilter() {
     ]
   };
 }
-
+function activeAcceptedFilter2() {
+  return {
+    isAccepted: 1,
+    isRejected: { $ne: 1 },
+    awaitingRole: "collabglam",
+    status: "READY_TO_SIGN",
+    status: { $nin: [CONTRACT_STATUS.REJECTED, CONTRACT_STATUS.SUPERSEDED] },
+    $or: [
+      { supersededBy: { $exists: false } },
+      { supersededBy: null },
+      { supersededBy: "" }
+    ]
+  };
+}
 function campaignIdFilter(campaignId) {
   const id = String(campaignId);
   const or = [{ campaignId: id }, { campaignsId: id }];
@@ -858,17 +871,30 @@ exports.getActiveCampaignsByBrand = async (req, res) => {
       sortOrder = "desc",
     } = req.query;
 
-    if (!brandId) return res.status(400).json({ message: "brandId is required." });
+    if (!brandId) {
+      return res.status(400).json({ message: "brandId is required." });
+    }
 
     // 1) get accepted campaign ids for this brand
     const acceptedIds = await Contract.distinct("campaignId", {
       brandId,
-      ...activeAcceptedFilter(),
+      ...activeAcceptedFilter2(),
     });
+  
+    // Make lookup fast + safe (ObjectId vs string)
+    const acceptedSet = new Set(acceptedIds.map((id) => String(id)));
+     const now = new Date();
+    const startOfTodayUTC = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
+    );
 
-    // 2) active campaigns filter, excluding accepted
-    const filter = { brandId, isActive: 1 };
-    if (acceptedIds.length) filter.campaignsId = { $nin: acceptedIds }; // adjust field if needed
+    // 2) active campaigns filter
+    const filter = {
+      brandId,
+      isActive: 1,
+      "timeline.endDate": { $gte: startOfTodayUTC }, // ✅ expired filter
+    };
+
     if (search?.trim()) filter.$or = buildSearchOr(search.trim());
 
     const pageNum = Math.max(parseInt(page, 10), 1);
@@ -888,8 +914,14 @@ exports.getActiveCampaignsByBrand = async (req, res) => {
       Campaign.countDocuments(filter),
     ]);
 
+    // Add influencerWorking field
+    const campaignsWithFlag = campaigns.map((c) => ({
+      ...c,
+      influencerWorking: acceptedSet.has(String(c.campaignsId)),
+    }));
+
     return res.json({
-      data: campaigns,
+      data: campaignsWithFlag,
       pagination: {
         total: totalCount,
         page: pageNum,
@@ -997,79 +1029,73 @@ exports.checkApplied = async (req, res) => {
 };
 
 // ===============================
-//  INFLUENCER: DISCOVER CAMPAIGNS (3 latest)
+//  INFLUENCER: DISCOVER CAMPAIGNS
 // ===============================
 exports.getCampaignsByInfluencer = async (req, res) => {
-  const { influencerId, search } = req.body;
-  if (!influencerId) return res.status(400).json({ message: "influencerId is required" });
+  const { influencerId, search, page = 1, limit = 10 } = req.body;
+  if (!influencerId) return res.status(400).json({ message: 'influencerId is required' });
 
   try {
     const inf = await Influencer.findOne({ influencerId }).lean();
-    if (!inf) return res.status(404).json({ message: "Influencer not found" });
+    if (!inf) return res.status(404).json({ message: 'Influencer not found' });
 
-    const FIXED_LIMIT = 5;
+    const subIdToParentNum = await buildSubToParentNumMap();
 
-    // ✅ NEW: open only (and legacy open) + exclude drafts
-    const filter = addInfluencerOpenStatusGate({
-      isActive: 1,
-      isDraft: { $ne: 1 }, // exclude drafts
-    });
+    const selectedSubIds = new Set((inf.onboarding?.subcategories || [])
+      .map(s => s?.subcategoryId).filter(Boolean).map(String));
 
-    if (search?.trim()) {
-      filter.$or = buildSearchOr(search.trim());
+    const selectedCatNumIds = new Set();
+    if (typeof inf.onboarding?.categoryId === 'number') selectedCatNumIds.add(inf.onboarding.categoryId);
+
+    for (const subId of selectedSubIds) {
+      const parentNum = subIdToParentNum.get(subId);
+      if (typeof parentNum === 'number') selectedCatNumIds.add(parentNum);
     }
+
+    if (selectedSubIds.size === 0 && selectedCatNumIds.size === 0) {
+      return res.json({ meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 }, campaigns: [] });
+    }
+
+    const subIdsArr = Array.from(selectedSubIds);
+    const catNumArr = Array.from(selectedCatNumIds);
+
+    const orClauses = [];
+    if (subIdsArr.length) orClauses.push({ 'categories.subcategoryId': { $in: subIdsArr } });
+    if (catNumArr.length) orClauses.push({ 'categories.categoryId': { $in: catNumArr } });
+
+    const filter = { isActive: 1, $or: orClauses };
+    if (search?.trim()) filter.$and = [{ $or: buildSearchOr(search.trim()) }];
+
+    const pageNum = Math.max(1, parseInt(page, 10));
+    const limNum = Math.max(1, parseInt(limit, 10));
+    const skip = (pageNum - 1) * limNum;
 
     const [total, campaigns] = await Promise.all([
       Campaign.countDocuments(filter),
-      Campaign.find(filter)
-        .sort({ createdAt: -1 })
-        .limit(FIXED_LIMIT)
-        .lean(),
+      Campaign.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limNum).lean()
     ]);
 
-    // ---- canApply calculation (same as your current code) ----
     let canApply = true;
-
-    const applyF = (inf.subscription?.features || []).find(
-      (f) => f.key === "apply_to_campaigns_quota"
-    );
+    const applyF = (inf.subscription?.features || []).find(f => f.key === 'apply_to_campaigns_quota');
     if (applyF) {
-      const fReset = await ensureMonthlyWindow(influencerId, "apply_to_campaigns_quota", applyF);
+      const fReset = await ensureMonthlyWindow(influencerId, 'apply_to_campaigns_quota', applyF);
       const lim = readLimit(fReset);
       if (lim > 0 && Number(fReset.used || 0) >= lim) canApply = false;
     }
-
-    const capF = (inf.subscription?.features || []).find(
-      (f) => f.key === "active_collaborations_limit"
-    );
+    const capF = (inf.subscription?.features || []).find(f => f.key === 'active_collaborations_limit');
     const cap = readLimit(capF);
     if (cap > 0) {
       const activeNow = await countActiveCollaborationsForInfluencer(influencerId);
       if (activeNow >= cap) canApply = false;
     }
 
-    const annotated = campaigns.map((c) => ({
-      ...c,
-      hasApplied: 0,
-      hasApproved: 0,
-      isContracted: 0,
-      contractId: null,
-      isAccepted: 0,
-      canApply,
-    }));
+    const totalPages = Math.ceil(total / limNum);
+    const annotated = campaigns.map((c) => ({ ...c, hasApplied: 0, hasApproved: 0, isContracted: 0, contractId: null, isAccepted: 0, canApply }));
 
-    return res.json({
-      meta: {
-        total,
-        page: 1,
-        limit: FIXED_LIMIT,
-        totalPages: Math.ceil(total / FIXED_LIMIT),
-      },
-      campaigns: annotated,
-    });
+    return res.json({ meta: { total, page: pageNum, limit: limNum, totalPages }, campaigns: annotated });
   } catch (err) {
-    console.error("Error in getCampaignsByInfluencer:", err);
-    return res.status(500).json({ message: "Internal server error" });
+    console.error('Error in getCampaignsByInfluencer:', err);
+    return res.status(500).json({ message: 'Internal server error' });
   }
 };
 
@@ -1216,31 +1242,67 @@ exports.getAppliedCampaignsByInfluencer = async (req, res) => {
 //  BRAND: ACCEPTED CAMPAIGNS
 // ===============================
 exports.getAcceptedCampaigns = async (req, res) => {
- 
   const { brandId, search, page = 1, limit = 10 } = req.body;
-  if (!brandId) return res.status(400).json({ message: 'brandId is required' });
+  if (!brandId) return res.status(400).json({ message: "brandId is required" });
 
   try {
+    // ✅ Start of today (UTC)
+    const now = new Date();
+    const startOfTodayUTC = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
+    );
+
+
     const contracts = await Contract.find(
-      { brandId, ...activeAcceptedFilter() },
+      { brandId, ...activeAcceptedFilter2() },
       "campaignId contractId influencerId feeAmount lastActionAt createdAt"
     )
       .sort({ lastActionAt: -1, createdAt: -1 })
       .lean();
-     console.log(contracts)
-    const campaignIds = contracts.map((c) => c.campaignId);
-    if (campaignIds.length === 0) return res.status(200).json({ meta: { total: 0, page, limit, totalPages: 0 }, campaigns: [] });
 
+   
+
+    const campaignIdsRaw = contracts.map((c) => String(c.campaignId));
+    const campaignIds = [...new Set(campaignIdsRaw)]; // ✅ unique
+
+
+
+    if (!campaignIds.length) {
+      return res.status(200).json({
+        meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 },
+        campaigns: [],
+      });
+    }
+
+    // Maps (latest contract per campaign because of sorting)
     const contractMap = new Map();
     const influencerMap = new Map();
     const feeMap = new Map();
-    contracts.forEach((c) => {
-      contractMap.set(c.campaignId, c.contractId);
-      influencerMap.set(c.campaignId, c.influencerId);
-      feeMap.set(c.campaignId, c.feeAmount);
-    });
+    const acceptedCountByCampaign = new Map();
 
-    const filter = { campaignsId: { $in: campaignIds } };
+    for (const c of contracts) {
+      const key = String(c.campaignId);
+
+      if (!contractMap.has(key)) contractMap.set(key, c.contractId);
+      if (!influencerMap.has(key)) influencerMap.set(key, c.influencerId);
+      if (!feeMap.has(key)) feeMap.set(key, c.feeAmount);
+
+      acceptedCountByCampaign.set(key, (acceptedCountByCampaign.get(key) || 0) + 1);
+    }
+
+    // ✅ DEBUG: see endDates for these campaignIds (no date filter)
+    const allCampaignDocs = await Campaign.find(
+      { campaignsId: { $in: campaignIds } },
+      "campaignsId productOrServiceName timeline.endDate"
+    ).lean();
+
+  
+    // ✅ IMPORTANT: show only campaigns whose endDate is BEFORE today (expired)
+    const filter = {
+      campaignsId: { $in: campaignIds },
+      "timeline.endDate": { $lt: startOfTodayUTC }, // ✅ show from next day onwards
+    };
+
     if (search?.trim()) filter.$or = buildSearchOr(search.trim());
 
     const pageNum = Math.max(1, parseInt(page, 10));
@@ -1249,24 +1311,49 @@ exports.getAcceptedCampaigns = async (req, res) => {
 
     const [total, campaigns] = await Promise.all([
       Campaign.countDocuments(filter),
-      Campaign.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limNum).lean()
+      Campaign.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limNum).lean(),
     ]);
 
-    const annotated = campaigns.map((c) => ({
-      ...c,
-      contractId: contractMap.get(c.campaignsId),
-      influencerId: influencerMap.get(c.campaignsId),
-      feeAmount: feeMap.get(c.campaignsId),
-      isAccepted: 1,
-      totalAcceptedMembers : contracts.length
-    }));
+  
 
-    return res.json({ meta: { total, page: pageNum, limit: limNum, totalPages: Math.ceil(total / limNum) }, campaigns: annotated });
+  const annotated = campaigns.map((c) => {
+  const key = String(c.campaignsId);
+
+  const totalAcceptedMembers = acceptedCountByCampaign.get(key) || 0;
+
+  // ✅ reduce count by subtracting accepted members
+  const reducedApplicantCount = Math.max(
+    0,
+    (Number(c.applicantCount) || 0) - totalAcceptedMembers
+  );
+
+  return {
+    ...c,
+    contractId: contractMap.get(key) || null,
+    influencerId: influencerMap.get(key) || null,
+    feeAmount: feeMap.get(key) || 0,
+    isAccepted: 1,
+
+    // ✅ keep same
+    totalAcceptedMembers,
+
+    // ✅ this is what your icon/badge should show
+    applicantCount: reducedApplicantCount,
+  };
+});
+
+
+    return res.json({
+      meta: { total, page: pageNum, limit: limNum, totalPages: Math.ceil(total / limNum) },
+      campaigns: annotated,
+    });
   } catch (err) {
-    console.error('Error in getAcceptedCampaigns:', err);
-    return res.status(500).json({ message: 'Internal server error' });
+    console.error("Error in getAcceptedCampaigns:", err);
+    return res.status(500).json({ message: "Internal server error" });
   }
 };
+
+
 
 // ===============================
 //  ACCEPTED INFLUENCERS (per Campaign)
@@ -1299,7 +1386,8 @@ exports.getAcceptedInfluencers = async (req, res) => {
       {
         ...campaignIdFilter(campaignId),
         isRejected: { $ne: 1 },             // not rejected
-        status: { $in: workingStatuses }    // only working statuses
+        status: { $in: workingStatuses },
+        awaitingRole : "collabglam"    // only working statuses
       },
       "influencerId contractId feeAmount lastActionAt createdAt status isAccepted isAssigned isRejected"
     )

@@ -40,7 +40,7 @@ const normalizeInsta = (h) => {
   return s || undefined;
 };
 
-const BASE_API_URL = process.env.INTERNAL_API_URL || 'http://localhost:5000';
+const BASE_API_URL = process.env.INTERNAL_API_URL || 'http://localhost:4000';
 const WELCOME_EMAIL_API_URL = `${BASE_API_URL}/emails/send-welcome`;
 
 // ---- env / mailer ----

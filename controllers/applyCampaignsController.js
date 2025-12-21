@@ -385,11 +385,12 @@ exports.getListByCampaign = async (req, res) => {
     limit = 10,
     search,
     sortField,
+    createdPage,
     sortOrder = 0 // 0 = asc, 1 = desc
   } = req.body || {};
 
   if (!campaignId) {
-    return res.status(400).json({ message: 'campaignId is required' });
+    return res.status(400).json({ message: "campaignId is required" });
   }
 
   try {
@@ -408,7 +409,7 @@ exports.getListByCampaign = async (req, res) => {
 
     // All influencer UUIDs from applicants
     const influencerIds = (record.applicants || [])
-      .map(a => a.influencerId)
+      .map((a) => a.influencerId)
       .filter(Boolean)
       .map(String); // normalize to string
 
@@ -424,17 +425,17 @@ exports.getListByCampaign = async (req, res) => {
 
     const filter = { influencerId: { $in: influencerIds } };
     if (search?.trim()) {
-      filter.name = { $regex: search.trim(), $options: 'i' };
+      filter.name = { $regex: search.trim(), $options: "i" };
     }
 
     // Influencer basic fields only — socialProfiles are no longer in schema
     const projection = [
-      'influencerId',
-      'name',
-      'primaryPlatform',
-      'onboarding.categoryName',
-      'onboarding.subcategories'
-    ].join(' ');
+      "influencerId",
+      "name",
+      "primaryPlatform",
+      "onboarding.categoryName",
+      "onboarding.subcategories"
+    ].join(" ");
 
     const influencersRaw = await Influencer.find(filter).select(projection).lean();
 
@@ -451,7 +452,7 @@ exports.getListByCampaign = async (req, res) => {
     // 🔹 Get Modash profiles using influencerId (UUID string) ONLY
     const modashProfiles = await Modash.find(
       { influencerId: { $in: influencerIds } },
-      'influencerId provider handle username fullname followers'
+      "influencerId provider handle username fullname followers"
     ).lean();
 
     // Group Modash profiles by influencerId (string)
@@ -469,7 +470,7 @@ exports.getListByCampaign = async (req, res) => {
 
       // 1) Try to match their primaryPlatform
       if (primaryPlatform) {
-        const hit = profiles.find(p => p.provider === primaryPlatform);
+        const hit = profiles.find((p) => p.provider === primaryPlatform);
         if (hit) return hit;
       }
 
@@ -484,31 +485,30 @@ exports.getListByCampaign = async (req, res) => {
 
     const contracts = await Contract.find({ campaignId }).lean();
     const isContractedCampaign = contracts.length > 0 ? 1 : 0;
-    const contractByInf = new Map(contracts.map(c => [String(c.influencerId), c]));
+    const contractByInf = new Map(contracts.map((c) => [String(c.influencerId), c]));
     const approvedId = record.approved?.[0]?.influencerId || null;
 
-    const applicationCreatedAt =
-      record.createdAt || record._id?.getTimestamp?.() || null;
+    const applicationCreatedAt = record.createdAt || record._id?.getTimestamp?.() || null;
 
-    const condensed = influencersRaw.map(inf => {
+    const condensed = influencersRaw.map((inf) => {
       const infIdStr = String(inf.influencerId);
 
       // Category name resolution (from onboarding or via Category map)
-      let categoryName = inf?.onboarding?.categoryName || '';
+      let categoryName = inf?.onboarding?.categoryName || "";
       if (!categoryName && Array.isArray(inf?.onboarding?.subcategories)) {
         for (const s of inf.onboarding.subcategories) {
           const cat = subIdToCatName.get(String(s?.subcategoryId));
-          if (cat) { categoryName = cat; break; }
+          if (cat) {
+            categoryName = cat;
+            break;
+          }
         }
       }
 
       const profiles = modashByInf.get(infIdStr) || [];
 
       // Sum followers across all Modash profiles for this influencer
-      const audienceSize = profiles.reduce(
-        (sum, p) => sum + (Number(p?.followers) || 0),
-        0
-      );
+      const audienceSize = profiles.reduce((sum, p) => sum + (Number(p?.followers) || 0), 0);
 
       // Choose the “best” Modash profile (primaryPlatform first, then highest followers)
       const chosen = pickModashProfile(profiles, inf.primaryPlatform);
@@ -516,12 +516,9 @@ exports.getListByCampaign = async (req, res) => {
       // 🔹 Handle from Modash only
       let handle = null;
       if (chosen) {
-        handle = (chosen.handle || chosen.username || chosen.fullname || '').trim() || null;
+        handle = (chosen.handle || chosen.username || chosen.fullname || "").trim() || null;
       }
-
-      if (handle && !handle.startsWith('@')) {
-        handle = '@' + handle;
-      }
+      if (handle && !handle.startsWith("@")) handle = "@" + handle;
 
       const c = contractByInf.get(infIdStr);
       const isAssigned = approvedId === inf.influencerId ? 1 : 0;
@@ -531,7 +528,7 @@ exports.getListByCampaign = async (req, res) => {
 
       return {
         influencerId: inf.influencerId,
-        name: inf.name || '',
+        name: inf.name || "",
         primaryPlatform: inf.primaryPlatform || null,
         handle,
         category: categoryName || null,
@@ -544,38 +541,64 @@ exports.getListByCampaign = async (req, res) => {
         feeAmount: c?.feeAmount || 0,
         isAccepted,
         isRejected,
-        rejectedReason: isRejected ? (c?.rejectedReason || '') : ''
+        rejectedReason: isRejected ? (c?.rejectedReason || "") : ""
       };
     });
 
-    // ✅ FILTER OUT ACCEPTED (isAccepted === 1) BEFORE sort/pagination/response
-    const filtered = condensed.filter(i => i.isAccepted !== 1);
+    // ✅ createdPage=true → filter OUT: status=READY_TO_SIGN & awaitingRole=collabglam
+    const normalizeStatus = (s) =>
+      String(s || "")
+        .trim()
+        .toUpperCase()
+        .replace(/\s+/g, "_"); // "ready to sign" -> "READY_TO_SIGN"
+
+    const normalizeRole = (s) => String(s || "").trim().toLowerCase();
+
+    let filtered = condensed;
+
+    if (createdPage === true || createdPage === "true") {
+      filtered = condensed.filter((row) => {
+        const c = contractByInf.get(String(row.influencerId));
+        if (!c) return true;
+
+        const status = normalizeStatus(c.status || c.contractStatus);
+        const awaitingRole = normalizeRole(
+          c.awaitingRole || c.awaiting_role || c.awaiting?.role
+        );
+
+        // filter out this case only
+        if (status === "READY_TO_SIGN" && awaitingRole === "collabglam") {
+          return false;
+        }
+        return true;
+      });
+    }
 
     // Sorting (same logic, just applied to filtered)
     const dir = sortOrder === 1 ? -1 : 1;
     if (sortField) {
       const allowed = new Set([
-        'name',
-        'primaryPlatform',
-        'category',
-        'audienceSize',
-        'handle',
-        'createdAt'
+        "name",
+        "primaryPlatform",
+        "category",
+        "audienceSize",
+        "handle",
+        "createdAt"
       ]);
       if (allowed.has(sortField)) {
         filtered.sort((a, b) => {
           const av = a[sortField];
           const bv = b[sortField];
 
-          if (sortField === 'createdAt') {
+          if (sortField === "createdAt") {
             const ta = av ? new Date(av).getTime() : 0;
             const tb = bv ? new Date(bv).getTime() : 0;
             return dir * (ta - tb);
           }
-          if (typeof av === 'number' && typeof bv === 'number') {
+          if (typeof av === "number" && typeof bv === "number") {
             return dir * (av - bv);
           }
-          return dir * String(av ?? '').localeCompare(String(bv ?? ''));
+          return dir * String(av ?? "").localeCompare(String(bv ?? ""));
         });
       }
     }
@@ -591,15 +614,18 @@ exports.getListByCampaign = async (req, res) => {
 
     return res.status(200).json({
       meta: { total, page: pageNum, limit: limNum, totalPages: Math.ceil(total / limNum) },
-      applicantCount: record.applicants.length, // kept same as your original
+
+      // ✅ count reduces when createdPage is true (3 -> 2)
+      applicantCount:
+        createdPage === true || createdPage === "true" ? total : record.applicants.length,
+
       isContracted: isContractedCampaign,
       contractId: null,
       influencers: paged
     });
-
   } catch (err) {
-    console.error('Error in getListByCampaign:', err);
-    return res.status(500).json({ message: 'Internal server error' });
+    console.error("Error in getListByCampaign:", err);
+    return res.status(500).json({ message: "Internal server error" });
   }
 };
 
