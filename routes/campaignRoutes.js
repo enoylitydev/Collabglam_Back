@@ -62,23 +62,25 @@ router.post(
 router.post('/checkApplied', brandController.verifyToken, campaignController.checkApplied);
 router.post('/byInfluencer', brandController.verifyToken, campaignController.getCampaignsByInfluencer);
 router.post('/myCampaign', brandController.verifyToken, campaignController.getApprovedCampaignsByInfluencer);
-router.post('/applied', brandController.verifyToken,campaignController.getAppliedCampaignsByInfluencer);
+router.post('/applied', brandController.verifyToken, campaignController.getAppliedCampaignsByInfluencer);
+router.post("/history", brandController.verifyToken, campaignController.getCampaignHistoryByBrand);
 
-
-router.post('/accepted', brandController.verifyToken,campaignController.getAcceptedCampaigns);
+router.post('/accepted', brandController.verifyToken, campaignController.getAcceptedCampaigns);
 
 // POST /campaign/accepted-influencers → get accepted influencers for a Campaign
-router.post('/accepted-inf', brandController.verifyToken,campaignController.getAcceptedInfluencers);
+router.post('/accepted-inf', brandController.verifyToken, campaignController.getAcceptedInfluencers);
 
-router.post('/contracted', brandController.verifyToken,campaignController.getContractedCampaignsByInfluencer);
-router.post('/filter', brandController.verifyToken,campaignController.getCampaignsByFilter);
+router.post('/contracted', brandController.verifyToken, campaignController.getContractedCampaignsByInfluencer);
+router.post('/filter', brandController.verifyToken, campaignController.getCampaignsByFilter);
 
-router.post('/rejectedbyinf', brandController.verifyToken,campaignController.getRejectedCampaignsByInfluencer);
-router.get('/campaignSummary', brandController.verifyToken,campaignController.getCampaignSummary);
+router.post('/rejectedbyinf', brandController.verifyToken, campaignController.getRejectedCampaignsByInfluencer);
+router.get('/campaignSummary', brandController.verifyToken, campaignController.getCampaignSummary);
 
 router.post('/save-draft', brandController.verifyToken, campaignController.saveDraftCampaign);
 router.get('/draft', brandController.verifyToken, campaignController.getDraftCampaignByBrand);
 
 router.post("/status", campaignController.updateCampaignStatus);
+
+router.post("/history-list", campaignController.listApplicants);
 
 module.exports = router;
