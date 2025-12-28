@@ -100,6 +100,10 @@ app.use('/notifications', notificationsRoutes);
 app.use('/emails', emailRoutes);
 app.use('/newinvitations', Invitationsroutes);
 
+// Bedrock API Test Route
+const bedrockTestController = require('./controllers/bedrockTestController');
+app.post('/test/bedrock', bedrockTestController.testBedrock);
+
 
 // Friendly 413 response (must be after body parsers)
 app.use((err, req, res, next) => {
@@ -110,7 +114,7 @@ app.use((err, req, res, next) => {
 });
 
 /* Mongo & start */
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 4000;
 startReminderCron();
 
 mongoose.connect(process.env.MONGODB_URI)

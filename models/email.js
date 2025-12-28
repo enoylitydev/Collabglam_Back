@@ -122,9 +122,12 @@ const emailMessageSchema = new mongoose.Schema(
     // ✅ SES MessageId of the FORWARDED email (useful for routing replies & debugging)
     forwardedSesMessageId: { type: String, index: true },
 
-    // Timestamps from the email’s perspective
+    // Timestamps from the email's perspective
     sentAt: { type: Date },
     receivedAt: { type: Date },
+
+    // ✅ AI Gatekeeper: PII detection flag
+    aiGatekeeperDetector: { type: Boolean, default: false, index: true },
 
     attachments: [
       {

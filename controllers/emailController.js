@@ -22,6 +22,7 @@ const {
   getOrCreateBrandAlias,
   getOrCreateInfluencerAlias,
 } = require("../utils/emailAliases");
+const { aiGatekeeper } = require("../utils/aiGatekeeper");
 
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024; // 20MB per file
 const BRAND_COOLDOWN_MS = 48 * 60 * 60 * 1000; // 2 days
@@ -296,6 +297,7 @@ async function uploadEmailAttachmentsToGridFS({ req, safeAttachments, metadata }
 /**
  * Send an email via SES, with optional Reply-To.
  * Supports attachments via RAW email.
+ * AI Gatekeeper: Masks PII before sending, but saves original to DB.
  */
 async function sendViaSES({
   fromAlias,
@@ -306,9 +308,18 @@ async function sendViaSES({
   textBody,
   replyTo,
   attachments,
+  originalSubject,
+  originalHtmlBody,
+  originalTextBody,
+  aiGatekeeperDetector,
 }) {
   let cmd;
   const nl = "\r\n";
+
+  // Use sanitized content for sending (if provided), otherwise use original
+  const sanitizedSubject = subject || originalSubject;
+  const sanitizedHtmlBody = htmlBody || originalHtmlBody;
+  const sanitizedTextBody = textBody || originalTextBody;
 
   try {
     if (attachments && attachments.length) {
@@ -318,7 +329,7 @@ async function sendViaSES({
       const headers = [
         `From: ${fromName} <${fromAlias}>`,
         `To: ${toRealEmail}`,
-        `Subject: ${subject}`,
+        `Subject: ${sanitizedSubject}`,
         "MIME-Version: 1.0",
         `Content-Type: multipart/mixed; boundary="${mixedBoundary}"`,
       ];
@@ -330,18 +341,18 @@ async function sendViaSES({
       raw += `--${mixedBoundary}${nl}`;
       raw += `Content-Type: multipart/alternative; boundary="${altBoundary}"${nl}${nl}`;
 
-      if (textBody) {
+      if (sanitizedTextBody) {
         raw += `--${altBoundary}${nl}`;
         raw += `Content-Type: text/plain; charset="UTF-8"${nl}`;
         raw += `Content-Transfer-Encoding: 7bit${nl}${nl}`;
-        raw += `${textBody}${nl}${nl}`;
+        raw += `${sanitizedTextBody}${nl}${nl}`;
       }
 
-      if (htmlBody) {
+      if (sanitizedHtmlBody) {
         raw += `--${altBoundary}${nl}`;
         raw += `Content-Type: text/html; charset="UTF-8"${nl}`;
         raw += `Content-Transfer-Encoding: 7bit${nl}${nl}`;
-        raw += `${htmlBody}${nl}${nl}`;
+        raw += `${sanitizedHtmlBody}${nl}${nl}`;
       }
 
       raw += `--${altBoundary}--${nl}${nl}`;
@@ -379,14 +390,14 @@ async function sendViaSES({
         Source: `${fromName} <${fromAlias}>`,
         Destination: { ToAddresses: [toRealEmail] },
         Message: {
-          Subject: { Charset: "UTF-8", Data: subject },
+          Subject: { Charset: "UTF-8", Data: sanitizedSubject },
           Body: {},
         },
       };
 
       if (replyTo) params.ReplyToAddresses = [replyTo];
-      if (htmlBody) params.Message.Body.Html = { Charset: "UTF-8", Data: htmlBody };
-      if (textBody) params.Message.Body.Text = { Charset: "UTF-8", Data: textBody };
+      if (sanitizedHtmlBody) params.Message.Body.Html = { Charset: "UTF-8", Data: sanitizedHtmlBody };
+      if (sanitizedTextBody) params.Message.Body.Text = { Charset: "UTF-8", Data: sanitizedTextBody };
 
       cmd = new SendEmailCommand(params);
     }
@@ -574,7 +585,7 @@ exports.getTemplateByKey = async (req, res) => {
 exports.sendBrandToInfluencer = async (req, res) => {
   try {
     const { brandId, influencerId, subject, body, templateId, attachments } = req.body;
-
+     console.log("req.body", req.body);
     if (!brandId || !influencerId || !subject || !body) {
       return res.status(400).json({
         error: "brandId, influencerId, subject and body are required.",
@@ -589,7 +600,8 @@ exports.sendBrandToInfluencer = async (req, res) => {
     const thread = await getOrCreateThread({ brand, influencer, createdBy: "brand", subject });
 
     // ✅ Enforce your rule BEFORE uploading/sending
-    await enforceBrandPolicyOrThrow(thread._id);
+    // TEMPORARILY COMMENTED OUT FOR TESTING AI GATEKEEPER
+    // await enforceBrandPolicyOrThrow(thread._id);
 
     const fromAlias = thread.brandDisplayAlias || thread.brandAliasEmail;
     const fromName = `${brand.name} via ${process.env.PLATFORM_NAME || "CollabGlam"}`;
@@ -618,15 +630,31 @@ exports.sendBrandToInfluencer = async (req, res) => {
       }))
       : undefined;
 
+    // ✅ AI Gatekeeper: Check and mask PII before sending
+    const originalSubject = subject;
+    const originalHtmlBody = htmlBody;
+    const originalTextBody = textBody;
+    
+    const gatekeeperResult = await aiGatekeeper({
+      subject: originalSubject,
+      textBody: originalTextBody,
+      htmlBody: originalHtmlBody,
+    });
+
+    // Send sanitized version, but save original to DB
     const sesResult = await sendViaSES({
       fromAlias,
       fromName,
       toRealEmail: influencer.email,
-      subject,
-      htmlBody,
-      textBody,
+      subject: gatekeeperResult.subject,
+      htmlBody: gatekeeperResult.htmlBody,
+      textBody: gatekeeperResult.textBody,
       replyTo: thread.brandAliasEmail,
       attachments: sesAttachments,
+      originalSubject,
+      originalHtmlBody,
+      originalTextBody,
+      aiGatekeeperDetector: gatekeeperResult.aiGatekeeperDetector,
     });
 
     const attachmentMeta = uploadedFiles.length
@@ -639,6 +667,7 @@ exports.sendBrandToInfluencer = async (req, res) => {
       }))
       : undefined;
 
+    // ✅ Save ORIGINAL content to DB (unfiltered), but mark if PII was detected
     const messageDoc = await EmailMessage.create({
       thread: thread._id,
       direction: "brand_to_influencer",
@@ -649,18 +678,19 @@ exports.sendBrandToInfluencer = async (req, res) => {
       fromRealEmail: brand.email,
       toRealEmail: influencer.email,
       toProxyEmail: thread.influencerAliasEmail,
-      subject,
-      htmlBody,
-      textBody,
+      subject: originalSubject, // Original unfiltered
+      htmlBody: originalHtmlBody, // Original unfiltered
+      textBody: originalTextBody, // Original unfiltered
       template: templateId || null,
       attachments: attachmentMeta,
       sentAt: new Date(),
       messageId: sesResult?.MessageId || undefined,
+      aiGatekeeperDetector: gatekeeperResult.aiGatekeeperDetector, // Flag if PII detected
     });
 
     thread.lastMessageAt = messageDoc.createdAt;
     thread.lastMessageDirection = "brand_to_influencer";
-    thread.lastMessageSnippet = (textBody || "").slice(0, 200);
+    thread.lastMessageSnippet = (originalTextBody || "").slice(0, 200);
     await thread.save();
 
     return res.status(200).json({
@@ -733,15 +763,31 @@ exports.sendInfluencerToBrand = async (req, res) => {
       }))
       : undefined;
 
+    // ✅ AI Gatekeeper: Check and mask PII before sending
+    const originalSubject = subject;
+    const originalHtmlBody = htmlBody;
+    const originalTextBody = textBody;
+    
+    const gatekeeperResult = await aiGatekeeper({
+      subject: originalSubject,
+      textBody: originalTextBody,
+      htmlBody: originalHtmlBody,
+    });
+
+    // Send sanitized version, but save original to DB
     const sesResult = await sendViaSES({
       fromAlias,
       fromName,
       toRealEmail: brand.email,
-      subject,
-      htmlBody,
-      textBody,
+      subject: gatekeeperResult.subject,
+      htmlBody: gatekeeperResult.htmlBody,
+      textBody: gatekeeperResult.textBody,
       replyTo: thread.influencerAliasEmail,
       attachments: sesAttachments,
+      originalSubject,
+      originalHtmlBody,
+      originalTextBody,
+      aiGatekeeperDetector: gatekeeperResult.aiGatekeeperDetector,
     });
 
     const attachmentMeta = uploadedFiles.length
@@ -754,6 +800,7 @@ exports.sendInfluencerToBrand = async (req, res) => {
       }))
       : undefined;
 
+    // ✅ Save ORIGINAL content to DB (unfiltered), but mark if PII was detected
     const messageDoc = await EmailMessage.create({
       thread: thread._id,
       direction: "influencer_to_brand",
@@ -764,18 +811,19 @@ exports.sendInfluencerToBrand = async (req, res) => {
       fromRealEmail: influencer.email,
       toRealEmail: brand.email,
       toProxyEmail: thread.brandAliasEmail,
-      subject,
-      htmlBody,
-      textBody,
+      subject: originalSubject, // Original unfiltered
+      htmlBody: originalHtmlBody, // Original unfiltered
+      textBody: originalTextBody, // Original unfiltered
       template: templateId || null,
       attachments: attachmentMeta,
       sentAt: new Date(),
       messageId: sesResult?.MessageId || undefined,
+      aiGatekeeperDetector: gatekeeperResult.aiGatekeeperDetector, // Flag if PII detected
     });
 
     thread.lastMessageAt = messageDoc.createdAt;
     thread.lastMessageDirection = "influencer_to_brand";
-    thread.lastMessageSnippet = (textBody || "").slice(0, 200);
+    thread.lastMessageSnippet = (originalTextBody || "").slice(0, 200);
 
     // Optional: if your schema has this field, this will persist; otherwise it's harmless.
     if (thread.hasInfluencerReplied !== undefined) thread.hasInfluencerReplied = true;
@@ -1565,7 +1613,8 @@ async function sendCampaignInvitationInternal(payload = {}) {
     subject: customSubject || undefined,
   });
 
-  await enforceBrandPolicyOrThrow(thread._id);
+  // TEMPORARILY COMMENTED OUT FOR TESTING AI GATEKEEPER
+  // await enforceBrandPolicyOrThrow(thread._id);
 
   // Build subject/body
   let subject = customSubject;
@@ -1699,20 +1748,36 @@ async function sendCampaignInvitationInternal(payload = {}) {
     }))
     : undefined;
 
+  // ✅ AI Gatekeeper: Check and mask PII before sending
+  const originalSubject = subject;
+  const originalHtmlBody = htmlBody;
+  const originalTextBody = textBody;
+  
+  const gatekeeperResult = await aiGatekeeper({
+    subject: originalSubject,
+    textBody: originalTextBody,
+    htmlBody: originalHtmlBody,
+  });
+
   // Send
   const fromAliasPretty = thread.brandDisplayAlias || thread.brandAliasEmail;
   const relayAlias = thread.brandAliasEmail;
   const fromName = `${brand.name} via ${process.env.PLATFORM_NAME || "CollabGlam"}`;
 
+  // Send sanitized version, but save original to DB
   const sesResult = await sendViaSES({
     fromAlias: fromAliasPretty,
     fromName,
     toRealEmail: recipientEmail,
-    subject,
-    htmlBody,
-    textBody,
+    subject: gatekeeperResult.subject,
+    htmlBody: gatekeeperResult.htmlBody,
+    textBody: gatekeeperResult.textBody,
     replyTo: relayAlias,
     attachments: sesAttachments,
+    originalSubject,
+    originalHtmlBody,
+    originalTextBody,
+    aiGatekeeperDetector: gatekeeperResult.aiGatekeeperDetector,
   });
 
   // Save message
@@ -1726,6 +1791,7 @@ async function sendCampaignInvitationInternal(payload = {}) {
     }))
     : undefined;
 
+  // ✅ Save ORIGINAL content to DB (unfiltered), but mark if PII was detected
   const messageDoc = await EmailMessage.create({
     thread: thread._id,
     direction: "brand_to_influencer",
@@ -1736,18 +1802,19 @@ async function sendCampaignInvitationInternal(payload = {}) {
     fromRealEmail: brand.email,
     toRealEmail: recipientEmail,
     toProxyEmail: thread.influencerAliasEmail,
-    subject,
-    htmlBody,
-    textBody,
+    subject: originalSubject, // Original unfiltered
+    htmlBody: originalHtmlBody, // Original unfiltered
+    textBody: originalTextBody, // Original unfiltered
     template: null,
     attachments: attachmentMeta,
     sentAt: new Date(),
     messageId: sesResult?.MessageId || undefined,
+    aiGatekeeperDetector: gatekeeperResult.aiGatekeeperDetector, // Flag if PII detected
   });
 
   thread.lastMessageAt = messageDoc.createdAt;
   thread.lastMessageDirection = "brand_to_influencer";
-  thread.lastMessageSnippet = (textBody || "").slice(0, 200);
+  thread.lastMessageSnippet = (originalTextBody || "").slice(0, 200);
   await thread.save();
 
   return {

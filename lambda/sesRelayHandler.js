@@ -6,6 +6,7 @@ const mongoose = require('mongoose');
 const { EmailThread, EmailMessage } = require('../models/email');
 const Brand = require('../models/brand');
 const Influencer = require('../models/influencer');
+const { aiGatekeeper } = require('../utils/aiGatekeeper');
 
 const REGION = process.env.AWS_REGION || 'ap-south-1';
 const RELAY_DOMAIN = process.env.EMAIL_RELAY_DOMAIN;
@@ -244,12 +245,19 @@ exports.handler = async (event) => {
       fromUserModel = 'Influencer';
     }
 
-    const subject = parsed.subject || '(no subject)';
-    const textBody = parsed.text || '';
-    const htmlBody =
+    const originalSubject = parsed.subject || '(no subject)';
+    const originalTextBody = parsed.text || '';
+    const originalHtmlBody =
       parsed.html || `<pre>${parsed.textAsHtml || ''}</pre>`;
 
-    // 4) Save message in MongoDB
+    // ✅ AI Gatekeeper: Check and mask PII before saving/forwarding
+    const gatekeeperResult = await aiGatekeeper({
+      subject: originalSubject,
+      textBody: originalTextBody,
+      htmlBody: originalHtmlBody,
+    });
+
+    // 4) Save ORIGINAL message in MongoDB (unfiltered), but mark if PII detected
     const messageDoc = await EmailMessage.create({
       thread: thread._id,
       direction,
@@ -257,22 +265,23 @@ exports.handler = async (event) => {
       fromUserModel,
       fromAliasEmail,
       toRealEmail,
-      subject,
-      htmlBody,
-      textBody,
+      subject: originalSubject, // Original unfiltered
+      htmlBody: originalHtmlBody, // Original unfiltered
+      textBody: originalTextBody, // Original unfiltered
       template: null,
+      aiGatekeeperDetector: gatekeeperResult.aiGatekeeperDetector, // Flag if PII detected
     });
 
     console.log('Created EmailMessage', messageDoc._id.toString());
 
-    // 5) Forward sanitized email to real recipient via SES, keeping same relay
+    // 5) Forward SANITIZED email to real recipient via SES, keeping same relay
     await sendViaSES({
       fromAlias: fromAliasEmail,
       fromName,
       toRealEmail,
-      subject,
-      htmlBody,
-      textBody,
+      subject: gatekeeperResult.subject, // Sanitized
+      htmlBody: gatekeeperResult.htmlBody, // Sanitized
+      textBody: gatekeeperResult.textBody, // Sanitized
       replyTo: thread.brandAliasEmail, // keep same relay
     });
 

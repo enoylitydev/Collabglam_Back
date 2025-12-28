@@ -8,6 +8,7 @@ const {
   getOrCreateBrandAlias,
   getOrCreateInfluencerAlias,
 } = require("../utils/emailAliases");
+const { aiGatekeeper } = require("../utils/aiGatekeeper");
 
 const RELAY_DOMAIN = (process.env.EMAIL_RELAY_DOMAIN || "mail.collabglam.com").toLowerCase();
 
@@ -295,7 +296,15 @@ exports.handleInboundEmail = async (req, res) => {
       if (exists) return res.status(200).json({ ok: true, duplicate: true });
     }
 
-    const { htmlBody, textBody } = buildBodies({ html, text });
+    const { htmlBody: originalHtmlBody, textBody: originalTextBody } = buildBodies({ html, text });
+    const originalSubject = subject || "";
+
+    // ✅ AI Gatekeeper: Check and mask PII before saving
+    const gatekeeperResult = await aiGatekeeper({
+      subject: originalSubject,
+      textBody: originalTextBody,
+      htmlBody: originalHtmlBody,
+    });
 
     // For UI consistency, store proxy identities as sender/recipient
     const fromProxyEmail =
@@ -309,6 +318,7 @@ exports.handleInboundEmail = async (req, res) => {
         : (thread.influencerDisplayAlias || thread.influencerAliasEmail);
     const toProxyEmail = matchedProxy; // the proxy address that received this inbound email
 
+    // ✅ Save ORIGINAL content to DB (unfiltered), but mark if PII detected
     const messageDoc = await EmailMessage.create({
       thread: thread._id,
       direction,
@@ -325,20 +335,21 @@ exports.handleInboundEmail = async (req, res) => {
       toProxyEmail,
       toRealEmail: direction === "brand_to_influencer" ? influencer.email : brand.email,
 
-      subject: subject || "",
-      htmlBody,
-      textBody,
+      subject: originalSubject, // Original unfiltered
+      htmlBody: originalHtmlBody, // Original unfiltered
+      textBody: originalTextBody, // Original unfiltered
 
       messageId: messageId || undefined,
       inReplyTo: inReplyTo || undefined,
       references: asArray(references),
 
       receivedAt: new Date(),
+      aiGatekeeperDetector: gatekeeperResult.aiGatekeeperDetector, // Flag if PII detected
     });
 
     thread.lastMessageAt = messageDoc.createdAt;
     thread.lastMessageDirection = direction;
-    thread.lastMessageSnippet = (textBody || "").slice(0, 200);
+    thread.lastMessageSnippet = (originalTextBody || "").slice(0, 200);
 
     // Optional optimization flag (won't break if schema doesn't have it)
     if (direction === "influencer_to_brand" && thread.hasInfluencerReplied !== undefined) {
