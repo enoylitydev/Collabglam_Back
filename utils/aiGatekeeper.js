@@ -115,6 +115,19 @@ function maskSensitiveContent(text, guardrailDetectedItems = []) {
       const fullMatch = match[0];
       const contentToMask = pattern.captureGroup ? match[pattern.captureGroup] : fullMatch;
       
+      // Special handling for Email pattern: only allow @mail.collabglam.com emails
+      if (pattern.name === 'Email') {
+        const emailLower = contentToMask.toLowerCase();
+        // Allow only collabglam emails, block all others
+        if (emailLower.includes('@mail.collabglam.com') || emailLower.includes('@collabglam.com')) {
+          console.log('[AI Gatekeeper] Allowing collabglam email:', contentToMask);
+          continue; // Skip this email - it's allowed
+        } else {
+          console.log('[AI Gatekeeper] Blocking non-collabglam email:', contentToMask);
+          // This email should be blocked - add it to itemsToMask
+        }
+      }
+      
       // Only add if not already in guardrail items and not duplicate
       const alreadyExists = itemsToMask.some(
         item => item.original === contentToMask && item.index === match.index
@@ -374,8 +387,20 @@ async function aiGatekeeper({ subject = '', textBody = '', htmlBody = '' }) {
   let sanitizedSubject = subject;
   let sanitizedTextBody = textBody;
   let sanitizedHtmlBody = htmlBody;
+  let allDetectedItems = []; // Track all detected items
 
   try {
+    // Helper function to check if an email is a collabglam email
+    const isCollabglamEmail = (str) => {
+      if (!str) return false;
+      const emailRegex = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g;
+      const emails = str.match(emailRegex) || [];
+      return emails.some(email => {
+        const emailLower = email.toLowerCase();
+        return emailLower.includes('@mail.collabglam.com') || emailLower.includes('@collabglam.com');
+      });
+    };
+
     // Combine subject and text body for guardrail check (same as example)
     const fullContent = `${subject}\n\n${textBody}`.trim();
     
@@ -387,9 +412,13 @@ async function aiGatekeeper({ subject = '', textBody = '', htmlBody = '' }) {
       contentCheck = await checkContentWithGuardrail(fullContent);
       needsMasking = contentCheck.needsMasking;
       
+      // Store all detected items
+      allDetectedItems = contentCheck.detectedItems || [];
+      
       console.log('[AI Gatekeeper] Content check result:', {
         needsMasking,
-        reason: contentCheck.reason
+        reason: contentCheck.reason,
+        detectedItemsCount: allDetectedItems.length
       });
     }
 
@@ -471,6 +500,7 @@ async function aiGatekeeper({ subject = '', textBody = '', htmlBody = '' }) {
     textBody: sanitizedTextBody,
     htmlBody: sanitizedHtmlBody,
     aiGatekeeperDetector,
+    detectedItems: allDetectedItems, // Return detected items for filtering
   };
 }
 
