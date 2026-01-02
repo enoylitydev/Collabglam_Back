@@ -1275,15 +1275,17 @@ exports.requestPasswordResetOtpInfluencer = async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ message: 'Email is required' });
 
+  const normalizedEmail = String(email).trim().toLowerCase();
+
   const influencer = await Influencer.findOne({
-    email: { $regex: `^${email.trim()}$`, $options: 'i' },
+    email: new RegExp(`^${normalizedEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
     name: { $exists: true, $ne: null },
-    password: { $exists: true, $ne: null }
+    password: { $exists: true, $ne: null },
   });
 
+  // ✅ Explicit response when not found
   if (!influencer) {
-    // keep message consistent with your brand controller if desired
-    return res.status(200).json({ message: 'Email not exist' });
+    return res.status(404).json({ message: 'Influencer does not exist with this email' });
   }
 
   const code = Math.floor(100000 + Math.random() * 900000).toString();
@@ -1311,7 +1313,7 @@ exports.requestPasswordResetOtpInfluencer = async (req, res) => {
     text,
   });
 
-  return res.status(200).json({ message: 'OTP has been sent.' });
+  return res.status(200).json({ message: 'OTP sent to your email' });
 };
 
 exports.verifyPasswordResetOtpInfluencer = async (req, res) => {

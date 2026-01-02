@@ -774,29 +774,25 @@ exports.requestPasswordResetOtp = async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ message: 'Email is required' });
 
-  // Find registered brand (must have name + password set)
   const brand = await Brand.findOne({
     email: exactEmailRegex(email),
     name: { $exists: true, $ne: null },
     password: { $exists: true, $ne: null },
   });
 
-  // Security-choice: respond generic even if not found.
+  // ✅ Explicit response (shows user doesn't exist)
   if (!brand) {
-    return res
-      .status(200)
-      .json({ message: 'If an account with that email exists, an OTP has been sent.' });
+    return res.status(404).json({ message: 'Brand does not exist with this email' });
   }
 
   const code = Math.floor(100000 + Math.random() * 900000).toString();
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 min
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
   brand.passwordResetCode = code;
   brand.passwordResetExpiresAt = expiresAt;
   brand.passwordResetVerified = false;
   await brand.save();
 
-  // ✉️ Send HTML email for password reset
   const subject = 'Password reset code';
   const html = otpHtmlTemplate({
     title: 'Password reset code',
@@ -807,16 +803,9 @@ exports.requestPasswordResetOtp = async (req, res) => {
   });
   const text = otpTextFallback({ code, minutes: 10, title: 'Password reset code' });
 
-  await sendMail({
-    to: brand.email,
-    subject,
-    html,
-    text,
-  });
+  await sendMail({ to: brand.email, subject, html, text });
 
-  return res
-    .status(200)
-    .json({ message: 'If an account with that email exists, an OTP has been sent.' });
+  return res.status(200).json({ message: 'OTP sent to your email' });
 };
 
 // ---------- 9) Password reset: verify OTP ----------
