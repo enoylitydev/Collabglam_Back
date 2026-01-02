@@ -141,20 +141,23 @@ function activeAcceptedFilter() {
     ]
   };
 }
+
 function activeAcceptedFilter2() {
   return {
     isAccepted: 1,
     isRejected: { $ne: 1 },
-    awaitingRole: "collabglam",
-    status: "READY_TO_SIGN",
-    status: { $nin: [CONTRACT_STATUS.REJECTED, CONTRACT_STATUS.SUPERSEDED] },
+    status: {
+      $in: [CONTRACT_STATUS.CONTRACT_SIGNED, CONTRACT_STATUS.MILESTONES_CREATED],
+      $nin: [CONTRACT_STATUS.REJECTED, CONTRACT_STATUS.SUPERSEDED],
+    },
     $or: [
       { supersededBy: { $exists: false } },
       { supersededBy: null },
-      { supersededBy: "" }
-    ]
+      { supersededBy: "" },
+    ],
   };
 }
+
 function campaignIdFilter(campaignId) {
   const id = String(campaignId);
   const or = [{ campaignId: id }, { campaignsId: id }];
@@ -1270,13 +1273,16 @@ exports.getAcceptedCampaigns = async (req, res) => {
   if (!brandId) return res.status(400).json({ message: "brandId is required" });
 
   try {
-    // ✅ ONLY campaigns where at least 1 influencer is "working"
-    // meaning: contract is READY_TO_SIGN and awaitingRole is collabglam
     const contracts = await Contract.find(
       {
         brandId,
-        status: CONTRACT_STATUS.READY_TO_SIGN,
-        awaitingRole: "collabglam",
+        isRejected: { $ne: 1 },
+        status: { $in: [CONTRACT_STATUS.CONTRACT_SIGNED, CONTRACT_STATUS.MILESTONES_CREATED] },
+        $or: [
+          { supersededBy: { $exists: false } },
+          { supersededBy: null },
+          { supersededBy: "" },
+        ],
       },
       "campaignId contractId influencerId feeAmount lastActionAt createdAt"
     )
@@ -1386,18 +1392,6 @@ exports.getAcceptedInfluencers = async (req, res) => {
       CONTRACT_STATUS.CONTRACT_SIGNED,
       CONTRACT_STATUS.MILESTONES_CREATED
     ];
-
-    const contracts = await Contract.find(
-      {
-        ...campaignIdFilter(campaignId),
-        isRejected: { $ne: 1 },             // not rejected
-        status: { $in: workingStatuses },
-        awaitingRole: "collabglam"    // only working statuses
-      },
-      "influencerId contractId feeAmount lastActionAt createdAt status isAccepted isAssigned isRejected"
-    )
-      .sort({ lastActionAt: -1, createdAt: -1 })
-      .lean();
 
     const influencerIds = contracts.map((c) => c.influencerId);
     if (!influencerIds.length) {
