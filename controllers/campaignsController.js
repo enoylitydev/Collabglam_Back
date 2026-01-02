@@ -1349,9 +1349,7 @@ exports.getAcceptedCampaigns = async (req, res) => {
 
       // optional: keep your old reduced applicantCount logic
       const reducedApplicantCount = Math.max(
-        0,
-        (Number(camp.applicantCount) || 0) - totalAcceptedMembers
-      );
+        0, (Number(camp.applicantCount) || 0));
 
       return {
         ...camp,
