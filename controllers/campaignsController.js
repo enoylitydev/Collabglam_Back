@@ -1372,50 +1372,68 @@ exports.getAcceptedCampaigns = async (req, res) => {
 exports.getAcceptedInfluencers = async (req, res) => {
   const {
     campaignId,
-    search = '',
+    search = "",
     page = 1,
     limit = 10,
-    sortBy = 'createdAt',
-    order = 'desc'
+    sortBy = "createdAt",
+    order = "desc",
   } = req.body;
 
   if (!campaignId) {
-    return res.status(400).json({ message: 'campaignId is required' });
+    return res.status(400).json({ message: "campaignId is required" });
   }
 
   try {
-    // ✅ Only contracts that represent an active / working collaboration
+    // ✅ Contracts that represent an active / working collaboration
     const workingStatuses = [
       CONTRACT_STATUS.INFLUENCER_ACCEPTED,
       CONTRACT_STATUS.BRAND_ACCEPTED,
       CONTRACT_STATUS.READY_TO_SIGN,
       CONTRACT_STATUS.CONTRACT_SIGNED,
-      CONTRACT_STATUS.MILESTONES_CREATED
+      CONTRACT_STATUS.MILESTONES_CREATED,
     ];
 
-    const influencerIds = contracts.map((c) => c.influencerId);
+    // ✅ FETCH CONTRACTS (this was missing)
+    const contracts = await Contract.find(
+      {
+        ...campaignIdFilter(campaignId),
+        isRejected: { $ne: 1 },
+        status: { $in: workingStatuses },
+        $or: [
+          { supersededBy: { $exists: false } },
+          { supersededBy: null },
+          { supersededBy: "" },
+        ],
+      },
+      "influencerId contractId feeAmount lastActionAt createdAt status isAccepted isAssigned isRejected"
+    )
+      .sort({ lastActionAt: -1, createdAt: -1 })
+      .lean();
+
+    const influencerIds = contracts.map((c) => String(c.influencerId));
     if (!influencerIds.length) {
       return res.status(200).json({
-        meta: { total: 0, page, limit, totalPages: 0 },
-        influencers: []
+        meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 },
+        influencers: [],
       });
     }
 
-    // Keep latest contract per influencer (because of sort above)
+    // ✅ Keep latest contract per influencer (because of sort above)
     const contractMap = new Map();
     const feeMap = new Map();
     contracts.forEach((c) => {
       const key = String(c.influencerId);
       if (!contractMap.has(key)) {
         contractMap.set(key, c.contractId);
-        feeMap.set(key, c.feeAmount);
+        feeMap.set(key, Number(c.feeAmount || 0));
       }
     });
 
     const filter = { influencerId: { $in: Array.from(contractMap.keys()) } };
+
     if (search && search.trim()) {
       const term = search.trim();
-      const regex = new RegExp(term, 'i');
+      const regex = new RegExp(term, "i");
       filter.$or = [{ name: regex }, { handle: regex }, { email: regex }];
     }
 
@@ -1424,14 +1442,15 @@ exports.getAcceptedInfluencers = async (req, res) => {
     const skip = (pageNum - 1) * limNum;
 
     const SORT_WHITELIST = {
-      createdAt: 'createdAt',
-      name: 'name',
-      followerCount: 'followerCount',
-      feeAmount: 'feeAmount'
+      createdAt: "createdAt",
+      name: "name",
+      followerCount: "followerCount",
+      feeAmount: "feeAmount",
     };
-    const sortField = SORT_WHITELIST[sortBy] || 'createdAt';
-    const sortDir = order === 'asc' ? 1 : -1;
-    const needPostSort = sortField === 'feeAmount';
+
+    const sortField = SORT_WHITELIST[sortBy] || "createdAt";
+    const sortDir = order === "asc" ? 1 : -1;
+    const needPostSort = sortField === "feeAmount";
     const mongoSort = needPostSort ? {} : { [sortField]: sortDir };
 
     const [total, rawInfluencers] = await Promise.all([
@@ -1440,14 +1459,14 @@ exports.getAcceptedInfluencers = async (req, res) => {
         .sort(mongoSort)
         .skip(skip)
         .limit(limNum)
-        .select('-passwordHash -__v')
-        .lean()
+        .select("-passwordHash -__v")
+        .lean(),
     ]);
 
     if (!rawInfluencers.length) {
       return res.json({
         meta: { total: 0, page: pageNum, limit: limNum, totalPages: 0 },
-        influencers: []
+        influencers: [],
       });
     }
 
@@ -1455,37 +1474,33 @@ exports.getAcceptedInfluencers = async (req, res) => {
 
     const modashProfiles = await Modash.find(
       { influencerId: { $in: pageInfluencerIds } },
-      'influencerId username handle followers provider'
+      "influencerId username handle followers provider"
     ).lean();
 
     const modashByInfluencerId = new Map();
     modashProfiles.forEach((m) => {
       const key = String(m.influencerId);
-      if (!modashByInfluencerId.has(key)) {
-        modashByInfluencerId.set(key, []);
-      }
+      if (!modashByInfluencerId.has(key)) modashByInfluencerId.set(key, []);
       modashByInfluencerId.get(key).push(m);
     });
 
-    const ALLOWED_PROVIDERS = ['youtube', 'instagram', 'tiktok'];
+    const ALLOWED_PROVIDERS = ["youtube", "instagram", "tiktok"];
 
     function pickPrimaryProfile(influencerDoc, profilesForInfluencer) {
-      if (!Array.isArray(profilesForInfluencer) || profilesForInfluencer.length === 0) {
-        return null;
-      }
-      const primaryPlatform = (influencerDoc.primaryPlatform || '').toLowerCase();
+      if (!Array.isArray(profilesForInfluencer) || profilesForInfluencer.length === 0) return null;
+
+      const primaryPlatform = (influencerDoc.primaryPlatform || "").toLowerCase();
       if (ALLOWED_PROVIDERS.includes(primaryPlatform)) {
         const direct = profilesForInfluencer.find(
-          (p) => (p.provider || '').toLowerCase() === primaryPlatform
+          (p) => String(p.provider || "").toLowerCase() === primaryPlatform
         );
         if (direct) return direct;
       }
+
       return profilesForInfluencer.reduce((best, current) => {
         if (!best) return current;
-        const bestFollowers =
-          typeof best.followers === 'number' ? best.followers : 0;
-        const currentFollowers =
-          typeof current.followers === 'number' ? current.followers : 0;
+        const bestFollowers = typeof best.followers === "number" ? best.followers : 0;
+        const currentFollowers = typeof current.followers === "number" ? current.followers : 0;
         return currentFollowers > bestFollowers ? current : best;
       }, null);
     }
@@ -1501,11 +1516,11 @@ exports.getAcceptedInfluencers = async (req, res) => {
         null;
 
       const audienceSize =
-        primaryProfile && typeof primaryProfile.followers === 'number'
+        primaryProfile && typeof primaryProfile.followers === "number"
           ? primaryProfile.followers
-          : typeof inf.followerCount === 'number'
-            ? inf.followerCount
-            : 0;
+          : typeof inf.followerCount === "number"
+          ? inf.followerCount
+          : 0;
 
       return {
         ...inf,
@@ -1515,7 +1530,7 @@ exports.getAcceptedInfluencers = async (req, res) => {
         socialHandle,
         audienceSize,
         primaryPlatform: inf.primaryPlatform || null,
-        primaryProvider: primaryProfile ? primaryProfile.provider : null
+        primaryProvider: primaryProfile ? primaryProfile.provider : null,
       };
     });
 
@@ -1530,15 +1545,13 @@ exports.getAcceptedInfluencers = async (req, res) => {
         total,
         page: pageNum,
         limit: limNum,
-        totalPages: Math.ceil(total / limNum)
+        totalPages: Math.ceil(total / limNum),
       },
-      influencers
+      influencers,
     });
   } catch (err) {
-    console.error('Error in getAcceptedInfluencers:', err);
-    return res
-      .status(500)
-      .json({ message: 'Internal server error' });
+    console.error("Error in getAcceptedInfluencers:", err);
+    return res.status(500).json({ message: "Internal server error" });
   }
 };
 
