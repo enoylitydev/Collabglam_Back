@@ -5,6 +5,8 @@ const Campaign = require('../models/campaign');
 const Brand = require('../models/brand');
 const Influencer = require('../models/influencer');
 const { createAndEmit } = require('../utils/notifier');
+const Contract = require('../models/contract');
+const { CONTRACT_STATUS } = require('../constants/contract');
 
 // ✉️ Email helpers
 const {
@@ -36,39 +38,40 @@ exports.createMilestone = async (req, res) => {
   } = req.body;
 
   const amountNum = Number(amount);
-  if (isNaN(amountNum)) {
-    return res.status(400).json({ message: 'amount must be a valid number' });
-  }
 
   if (!brandId || !influencerId || !campaignId || !milestoneTitle || amount == null) {
     return res.status(400).json({
-      message:
-        'brandId, influencerId, campaignId, milestoneTitle and amount are required',
+      message: 'brandId, influencerId, campaignId, milestoneTitle and amount are required',
     });
   }
 
+  if (isNaN(amountNum) || amountNum <= 0) {
+    return res.status(400).json({ message: 'amount must be a valid number > 0' });
+  }
+
   try {
-    // 1) Verify the campaign exists
-    const camp = await Campaign.findOne({ campaignsId: campaignId });
-    if (!camp) {
-      return res.status(404).json({ message: 'Campaign not found' });
+    // 1) Verify campaign
+    const camp = await Campaign.findOne({ campaignsId: campaignId }).lean();
+    if (!camp) return res.status(404).json({ message: 'Campaign not found' });
+
+    // 2) Find current contract (prefer campaign.contractId)
+    let contractDoc = null;
+    if (camp.contractId) {
+      contractDoc = await Contract.findOne({ contractId: camp.contractId });
+    }
+    if (!contractDoc) {
+      contractDoc = await Contract.findOne({ brandId, influencerId, campaignId })
+        .sort({ createdAt: -1 });
     }
 
-    const campaignBudget = Number(camp.budget);
-    // if budget is not a valid number or <= 0, we skip budget enforcement
-    const hasBudget = !isNaN(campaignBudget) && campaignBudget > 0;
-
-    // 2) Find or create the brand’s Milestone document
+    // 3) Load / create brand milestone doc
     let doc = await Milestone.findOne({ brandId });
-    if (!doc) {
-      doc = new Milestone({ brandId });
-    }
+    if (!doc) doc = new Milestone({ brandId });
 
-    // ensure numeric fields
-    doc.walletBalance = doc.walletBalance || 0;
-    doc.totalAmount = doc.totalAmount || 0;
+    doc.walletBalance = Number(doc.walletBalance || 0);
+    doc.totalAmount = Number(doc.totalAmount || 0);
 
-    // 2a) Check previous milestone for this influencer+campaign
+    // 4) Block if previous milestone for same influencer+campaign not released
     const prev = doc.milestoneHistory.filter(
       (e) => e.influencerId === influencerId && e.campaignId === campaignId
     );
@@ -83,22 +86,21 @@ exports.createMilestone = async (req, res) => {
       }
     }
 
-    // 2b) Check total milestone base amount vs campaign budget
-    // NOTE: we only use `amount` here, Razorpay fee is not part of campaign budget
+    // 5) Campaign budget enforcement (same as your logic, but safe)
+    const campaignBudget = Number(camp.budget);
+    const hasBudget = !isNaN(campaignBudget) && campaignBudget > 0;
+
     if (hasBudget) {
       const existingTotalForCampaign = doc.milestoneHistory
         .filter((e) => e.campaignId === campaignId)
         .reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
 
-      // already fully allocated = NO new milestones allowed
       if (existingTotalForCampaign >= campaignBudget) {
         return res.status(400).json({
-          message:
-            'You have added milestone equal to campaign now not able to add now milestone',
+          message: 'You have added milestone equal to campaign now not able to add now milestone',
         });
       }
 
-      // adding this milestone would exceed budget
       if (existingTotalForCampaign + amountNum > campaignBudget) {
         return res.status(400).json({
           message: 'Total milestone amount cannot exceed campaign budget',
@@ -106,17 +108,16 @@ exports.createMilestone = async (req, res) => {
       }
     }
 
-    // 2c) 🔥 Compute Razorpay fee & total
+    // 6) Razorpay fee calc
     const feePercent =
       !isNaN(RAZORPAY_FEE_PERCENT) && RAZORPAY_FEE_PERCENT >= 0
         ? RAZORPAY_FEE_PERCENT
         : 0.02;
 
-    const rawFee = amountNum * feePercent;
-    const razorpayFee = Math.round(rawFee * 100) / 100; // 2 decimals
+    const razorpayFee = Math.round(amountNum * feePercent * 100) / 100;
     const totalWithFee = amountNum + razorpayFee;
 
-    // 3) Append a new history entry
+    // 7) Create entry
     const entry = {
       influencerId,
       campaignId,
@@ -125,7 +126,6 @@ exports.createMilestone = async (req, res) => {
       milestoneDescription,
       released: false,
       createdAt: new Date(),
-
       razorpayFee,
       totalWithFee,
       razorpayOrderId,
@@ -134,16 +134,57 @@ exports.createMilestone = async (req, res) => {
 
     doc.milestoneHistory.push(entry);
 
-    // 4) Update walletBalance (escrow) + totalAmount
-    // NOTE: escrow is only the base amount, not Razorpay fee
-    doc.walletBalance = (doc.walletBalance || 0) + amountNum;
-    doc.totalAmount = (doc.totalAmount || 0) + amountNum;
+    // escrow wallet uses base amount only
+    doc.walletBalance = doc.walletBalance + amountNum;
+    doc.totalAmount = doc.totalAmount + amountNum;
 
-    // 5) Save
     await doc.save();
 
-    // 6) Notifications (non-blocking)
-    // Influencer → campaign view
+    // 8) ✅ LOCK CONTRACT ON FIRST MILESTONE CREATION
+    // We lock by setting status = MILESTONES_CREATED (your isLockedContract checks this)
+    // We DO NOT set lockedAt (reserved for fully-signed lock), but we DO set milestonesCreatedAt
+    let updatedContract = null;
+
+    if (contractDoc && contractDoc.status !== CONTRACT_STATUS.CONTRACT_SIGNED) {
+      // Only set if not already milestones-created
+      const alreadyMilestonesLocked =
+        contractDoc.status === CONTRACT_STATUS.MILESTONES_CREATED;
+
+      if (!alreadyMilestonesLocked) {
+        contractDoc.status = CONTRACT_STATUS.MILESTONES_CREATED;
+        contractDoc.milestonesCreatedAt = contractDoc.milestonesCreatedAt || new Date();
+        contractDoc.awaitingRole = null;
+        contractDoc.statusFlags = contractDoc.statusFlags || {};
+        contractDoc.statusFlags.awaitingCollabglam = false;
+
+        // optional audit trail (safe)
+        contractDoc.audit = contractDoc.audit || [];
+        contractDoc.audit.push({
+          type: 'MILESTONES_CREATED',
+          role: 'system',
+          details: { brandId, influencerId, campaignId },
+        });
+
+        await contractDoc.save();
+      }
+
+      updatedContract = contractDoc;
+
+      // Keep Campaign in sync for UI convenience
+      await Campaign.updateOne(
+        { campaignsId: campaignId },
+        {
+          $set: {
+            contractId: contractDoc.contractId,
+            isContracted: 1,
+            contractStatus: contractDoc.status,
+            milestonesCreatedAt: contractDoc.milestonesCreatedAt || new Date(),
+          },
+        }
+      );
+    }
+
+    // 9) Notifications + Email (your existing logic unchanged)
     createAndEmit({
       influencerId,
       type: 'milestone.created',
@@ -154,7 +195,6 @@ exports.createMilestone = async (req, res) => {
       actionPath: `/influencer/my-campaign`,
     }).catch((e) => console.error('notify influencer (created) failed:', e));
 
-    // Brand → milestone history
     createAndEmit({
       brandId,
       type: 'milestone.created',
@@ -165,7 +205,7 @@ exports.createMilestone = async (req, res) => {
       actionPath: `/brand/active-campaign`,
     }).catch((e) => console.error('notify brand (created) failed:', e));
 
-    // 6b) ✉️ Email to influencer (non-blocking)
+    // email section unchanged (keep your existing try/catch block)
     try {
       const [infDoc, brandDoc] = await Promise.all([
         Influencer.findOne({ influencerId }, 'name email').lean(),
@@ -188,7 +228,7 @@ exports.createMilestone = async (req, res) => {
       console.error('Error preparing milestone created email:', emailErr);
     }
 
-    // 7) Respond
+    // 10) ✅ Response includes contractStatus
     return res.status(201).json({
       message: 'Milestone created',
       milestoneId: doc.milestoneId,
@@ -198,9 +238,11 @@ exports.createMilestone = async (req, res) => {
         baseAmount: amountNum,
         razorpayFee,
         totalWithFee,
-        feePercent: feePercent,
+        feePercent,
       },
       entry,
+      contractStatus: updatedContract?.status || contractDoc?.status || null,
+      milestonesCreatedAt: updatedContract?.milestonesCreatedAt || contractDoc?.milestonesCreatedAt || null,
     });
   } catch (err) {
     console.error('Error in createMilestone:', err);

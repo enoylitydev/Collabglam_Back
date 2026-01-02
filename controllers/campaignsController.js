@@ -1107,9 +1107,10 @@ exports.getApprovedCampaignsByInfluencer = async (req, res) => {
   if (!influencerId) return res.status(400).json({ message: 'influencerId is required' });
 
   try {
+    // include status fields
     const contracts = await Contract.find(
       { influencerId, isAssigned: 1 },
-      'campaignId contractId isAccepted feeAmount'
+      'campaignId contractId isAccepted feeAmount status milestonesCreatedAt'
     ).lean();
 
     let campaignIds = contracts.map((c) => toStr(c.campaignId));
@@ -1117,28 +1118,43 @@ exports.getApprovedCampaignsByInfluencer = async (req, res) => {
       return res.json({ meta: { total: 0, page: +page, limit: +limit, totalPages: 0 }, campaigns: [] });
     }
 
+    // must be applied
     const applyRecs = await ApplyCampaign.find(
       { campaignId: { $in: campaignIds }, 'applicants.influencerId': influencerId },
       'campaignId'
     ).lean();
+
     const appliedIds = new Set(applyRecs.map((r) => toStr(r.campaignId)));
     campaignIds = campaignIds.filter((id) => appliedIds.has(id));
-    if (!campaignIds.length) return res.json({ meta: { total: 0, page: +page, limit: +limit, totalPages: 0 }, campaigns: [] });
+    if (!campaignIds.length) {
+      return res.json({ meta: { total: 0, page: +page, limit: +limit, totalPages: 0 }, campaigns: [] });
+    }
 
+    // must have milestone
     const milestoneIds = await milestoneSetForInfluencer(influencerId, campaignIds);
     campaignIds = campaignIds.filter((id) => milestoneIds.has(id));
-    if (!campaignIds.length) return res.json({ meta: { total: 0, page: +page, limit: +limit, totalPages: 0 }, campaigns: [] });
+    if (!campaignIds.length) {
+      return res.json({ meta: { total: 0, page: +page, limit: +limit, totalPages: 0 }, campaigns: [] });
+    }
 
+    // maps
     const contractIdMap = new Map();
     const feeMap = new Map();
     const acceptedMap = new Map();
+    const statusMap = new Map();
+    const milestonesCreatedAtMap = new Map();
+
+    const allowedSet = new Set(campaignIds);
+
     contracts.forEach((c) => {
       const cid = toStr(c.campaignId);
-      if (campaignIds.includes(cid)) {
-        contractIdMap.set(cid, c.contractId);
-        feeMap.set(cid, c.feeAmount);
-        acceptedMap.set(cid, c.isAccepted === 1 ? 1 : 0);
-      }
+      if (!allowedSet.has(cid)) return;
+
+      contractIdMap.set(cid, c.contractId);
+      feeMap.set(cid, Number(c.feeAmount || 0));
+      acceptedMap.set(cid, c.isAccepted === 1 ? 1 : 0);
+      statusMap.set(cid, c.status || null);
+      milestonesCreatedAtMap.set(cid, c.milestonesCreatedAt || null);
     });
 
     const filter = { campaignsId: { $in: campaignIds }, isActive: 1 };
@@ -1153,17 +1169,28 @@ exports.getApprovedCampaignsByInfluencer = async (req, res) => {
       Campaign.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limNum).lean()
     ]);
 
-    const campaigns = raw.map((c) => ({
-      ...c,
-      hasApplied: 1,
-      isContracted: 1,
-      isAccepted: acceptedMap.get(c.campaignsId) || 0,
-      hasMilestone: 1,
-      contractId: contractIdMap.get(c.campaignsId) || null,
-      feeAmount: feeMap.get(c.campaignsId) || 0
-    }));
+    const campaigns = raw.map((c) => {
+      const cid = toStr(c.campaignsId);
 
-    return res.json({ meta: { total, page: pageNum, limit: limNum, totalPages: Math.ceil(total / limNum) }, campaigns });
+      return {
+        ...c,
+        hasApplied: 1,
+        isContracted: 1,
+        isAccepted: acceptedMap.get(cid) || 0,
+        hasMilestone: 1,
+        contractId: contractIdMap.get(cid) || null,
+        feeAmount: feeMap.get(cid) || 0,
+
+        // ✅ requested: return CONTRACT_STATUS value
+        contractStatus: statusMap.get(cid) || null,
+        milestonesCreatedAt: milestonesCreatedAtMap.get(cid) || null,
+      };
+    });
+
+    return res.json({
+      meta: { total, page: pageNum, limit: limNum, totalPages: Math.ceil(total / limNum) },
+      campaigns
+    });
   } catch (err) {
     console.error('Error in getApprovedCampaignsByInfluencer:', err);
     return res.status(500).json({ message: 'Internal server error' });
