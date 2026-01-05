@@ -1570,10 +1570,12 @@ exports.getAcceptedInfluencers = async (req, res) => {
 
 exports.getContractedCampaignsByInfluencer = async (req, res) => {
   const { influencerId, search, page = 1, limit = 10 } = req.body;
-  if (!influencerId) return res.status(400).json({ message: "influencerId is required" });
+  if (!influencerId) {
+    return res.status(400).json({ message: "influencerId is required" });
+  }
 
   try {
-    // ✅ Canonical statuses (what your schema normalizes to)
+    // ✅ Contracted statuses (pre-milestone). We will ALSO exclude "signed + milestone exists"
     const CANONICAL_CONTRACTED = [
       CONTRACT_STATUS.BRAND_SENT_DRAFT,
       CONTRACT_STATUS.BRAND_EDITED,
@@ -1581,18 +1583,22 @@ exports.getContractedCampaignsByInfluencer = async (req, res) => {
       CONTRACT_STATUS.BRAND_ACCEPTED,
       CONTRACT_STATUS.INFLUENCER_ACCEPTED,
       CONTRACT_STATUS.READY_TO_SIGN,
-      CONTRACT_STATUS.CONTRACT_SIGNED,
-      CONTRACT_STATUS.MILESTONES_CREATED,
+      CONTRACT_STATUS.CONTRACT_SIGNED, // keep signed here, but will hide if milestone exists
     ];
 
-    // ✅ Optional: include legacy values for older rows that haven't been resaved/migrated
+    // ✅ Optional legacy values for older rows
     const LEGACY_CONTRACTED = ["sent", "viewed", "negotiation", "finalize", "signing", "locked"];
 
+    // ✅ Pull newest-first so Map keeps the newest per campaign
     const contracts = await Contract.find(
       {
         influencerId: String(influencerId),
         isRejected: { $ne: 1 },
-        status: { $in: Array.from(new Set([...CANONICAL_CONTRACTED, ...LEGACY_CONTRACTED])) },
+        status: {
+          $in: Array.from(new Set([...CANONICAL_CONTRACTED, ...LEGACY_CONTRACTED])),
+        },
+        // ✅ avoid superseded contract rows (if you use this field elsewhere)
+        $or: [{ supersededBy: { $exists: false } }, { supersededBy: null }, { supersededBy: "" }],
       },
       "campaignId contractId feeAmount isAccepted status lastActionAt createdAt"
     )
@@ -1600,44 +1606,118 @@ exports.getContractedCampaignsByInfluencer = async (req, res) => {
       .lean();
 
     if (!contracts.length) {
-      return res.json({ meta: { total: 0, page: +page, limit: +limit, totalPages: 0 }, campaigns: [] });
+      return res.json({
+        meta: { total: 0, page: +page, limit: +limit, totalPages: 0 },
+        campaigns: [],
+      });
     }
 
-    // Keep the newest contract per campaign
-    const contractByCampaign = new Map();
+    // ✅ Keep newest contract per campaignId
+    const contractByCampaignId = new Map();
     for (const c of contracts) {
-      const key = String(c.campaignId);
+      const key = String(c.campaignId || "");
       if (!key) continue;
-      if (!contractByCampaign.has(key)) {
-        contractByCampaign.set(key, {
+
+      if (!contractByCampaignId.has(key)) {
+        contractByCampaignId.set(key, {
           contractId: c.contractId || null,
           feeAmount: Number(c.feeAmount || 0),
           isAccepted: c.isAccepted === 1 ? 1 : 0,
-          status: c.status,
+          status: c.status || null,
+          campaignIdRaw: c.campaignId, // keep original for linking
         });
       }
     }
 
-    const campaignIds = Array.from(contractByCampaign.keys());
-    if (!campaignIds.length) {
-      return res.json({ meta: { total: 0, page: +page, limit: +limit, totalPages: 0 }, campaigns: [] });
+    let candidateCampaignIds = Array.from(contractByCampaignId.keys());
+    if (!candidateCampaignIds.length) {
+      return res.json({
+        meta: { total: 0, page: +page, limit: +limit, totalPages: 0 },
+        campaigns: [],
+      });
     }
 
-    // If some old contracts stored campaignId as ObjectId string, support both
+    // -------------------------------------------------------
+    // ✅ EXCLUDE: if milestone already exists for influencer+campaign
+    // Condition: (status is CONTRACT_SIGNED OR already milestones created) AND milestone exists
+    // Also: if status is MILESTONES_CREATED, never show here
+    // -------------------------------------------------------
+    const idsStr = candidateCampaignIds.map((x) => String(x));
+    const idsObj = idsStr
+      .filter((id) => mongoose.Types.ObjectId.isValid(id))
+      .map((id) => new mongoose.Types.ObjectId(id));
+
+    // milestoneHistory.campaignId might be stored as string OR ObjectId
+    const milestoneDocs = await Milestone.find(
+      {
+        milestoneHistory: {
+          $elemMatch: {
+            influencerId: String(influencerId),
+            campaignId: { $in: [...idsStr, ...idsObj] },
+          },
+        },
+      },
+      "milestoneHistory.campaignId milestoneHistory.influencerId"
+    ).lean();
+
+    const milestoneCampaignSet = new Set();
+    for (const d of milestoneDocs) {
+      for (const h of d.milestoneHistory || []) {
+        if (String(h.influencerId) === String(influencerId)) {
+          milestoneCampaignSet.add(String(h.campaignId));
+        }
+      }
+    }
+
+    // filter contracted list
+    for (const [campId, details] of contractByCampaignId.entries()) {
+      const st = details?.status;
+
+      // never show if already milestone status (defensive)
+      if (st === CONTRACT_STATUS.MILESTONES_CREATED) {
+        contractByCampaignId.delete(campId);
+        continue;
+      }
+
+      // hide if signed and milestone exists
+      const hasMilestone = milestoneCampaignSet.has(String(campId));
+      const isSigned = st === CONTRACT_STATUS.CONTRACT_SIGNED;
+
+      if (hasMilestone && isSigned) {
+        contractByCampaignId.delete(campId);
+      }
+    }
+
+    candidateCampaignIds = Array.from(contractByCampaignId.keys());
+    if (!candidateCampaignIds.length) {
+      return res.json({
+        meta: { total: 0, page: +page, limit: +limit, totalPages: 0 },
+        campaigns: [],
+      });
+    }
+
+    // -------------------------------------------------------
+    // ✅ Campaign query: support campaignsId (string/uuid) + _id (ObjectId)
+    // -------------------------------------------------------
     const uuidIds = [];
     const objIds = [];
-    for (const id of campaignIds) {
+
+    for (const id of candidateCampaignIds) {
       if (mongoose.Types.ObjectId.isValid(id) && String(new mongoose.Types.ObjectId(id)) === id) {
         objIds.push(new mongoose.Types.ObjectId(id));
       } else {
-        uuidIds.push(id);
+        uuidIds.push(String(id));
       }
     }
 
     let baseFilter;
-    if (uuidIds.length && objIds.length) baseFilter = { $or: [{ campaignsId: { $in: uuidIds } }, { _id: { $in: objIds } }] };
-    else if (uuidIds.length) baseFilter = { campaignsId: { $in: uuidIds } };
-    else baseFilter = { _id: { $in: objIds } };
+    if (uuidIds.length && objIds.length) {
+      baseFilter = { $or: [{ campaignsId: { $in: uuidIds } }, { _id: { $in: objIds } }] };
+    } else if (uuidIds.length) {
+      baseFilter = { campaignsId: { $in: uuidIds } };
+    } else {
+      baseFilter = { _id: { $in: objIds } };
+    }
 
     let filter = baseFilter;
     if (search?.trim()) {
@@ -1653,15 +1733,26 @@ exports.getContractedCampaignsByInfluencer = async (req, res) => {
       Campaign.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limNum).lean(),
     ]);
 
+    // -------------------------------------------------------
+    // ✅ Attach contract info
+    // Important: campaign key might be campaignsId (string) or _id (ObjectId)
+    // And contractByCampaignId keys are based on Contract.campaignId
+    // We'll try both ids to find matching contract record.
+    // -------------------------------------------------------
     const campaigns = rawCampaigns.map((c) => {
-      const key = String(c.campaignsId || c._id);
-      const details = contractByCampaign.get(key) || {};
+      const key1 = String(c.campaignsId || "");
+      const key2 = String(c._id || "");
+
+      const details = contractByCampaignId.get(key1) || contractByCampaignId.get(key2) || {};
+
+      const hasMilestone = milestoneCampaignSet.has(key1) || milestoneCampaignSet.has(key2);
+
       return {
         ...c,
         hasApplied: 1,
         isContracted: 1,
         isAccepted: details.isAccepted || 0,
-        hasMilestone: c.hasMilestone ?? 0,
+        hasMilestone: hasMilestone ? 1 : 0,
         contractId: details.contractId ?? null,
         feeAmount: details.feeAmount ?? 0,
         contractStatus: details.status ?? null,
@@ -1669,7 +1760,12 @@ exports.getContractedCampaignsByInfluencer = async (req, res) => {
     });
 
     return res.json({
-      meta: { total, page: pageNum, limit: limNum, totalPages: Math.ceil(total / limNum) },
+      meta: {
+        total,
+        page: pageNum,
+        limit: limNum,
+        totalPages: Math.ceil(total / limNum),
+      },
       campaigns,
     });
   } catch (err) {
