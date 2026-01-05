@@ -291,37 +291,41 @@ exports.getMilestonesByCampaign = async (req, res) => {
  * body: { influencerId, campaignId }
  */
 exports.getMilestonesByInfluencerAndCampaign = async (req, res) => {
-  const { influencerId, campaignId } = req.body;
+  const { influencerId, campaignId, brandId } = req.body;
+
   if (!influencerId || !campaignId) {
-    return res
-      .status(400)
-      .json({ message: 'influencerId and campaignId are required' });
+    return res.status(400).json({ message: "influencerId and campaignId are required" });
   }
 
   try {
-    const docs = await Milestone.find({
-      'milestoneHistory.influencerId': influencerId,
-      'milestoneHistory.campaignId': campaignId,
-    }).lean();
+    const filter = {
+      milestoneHistory: {
+        $elemMatch: {
+          influencerId: String(influencerId),
+          campaignId: String(campaignId),
+        },
+      },
+    };
+
+    // ✅ optional: if brandId is available, keep it tight
+    if (brandId) filter.brandId = String(brandId);
+
+    const docs = await Milestone.find(filter).lean();
 
     const entries = docs.flatMap((doc) =>
-      doc.milestoneHistory
-        .filter((e) => e.influencerId === influencerId && e.campaignId === campaignId)
+      (doc.milestoneHistory || [])
+        .filter(
+          (e) =>
+            String(e.influencerId) === String(influencerId) &&
+            String(e.campaignId) === String(campaignId)
+        )
         .map((e) => {
-          // Derive influencer-facing payout status
           let payoutStatus = e.payoutStatus;
-
-          if (!payoutStatus) {
-            if (!e.released) {
-              payoutStatus = 'pending';
-            } else {
-              payoutStatus = 'initiated';
-            }
-          }
+          if (!payoutStatus) payoutStatus = e.released ? "initiated" : "pending";
 
           return {
             ...e,
-            payoutStatus, // influencer UI uses this
+            payoutStatus,
             brandId: doc.brandId,
             milestoneId: doc.milestoneId,
             walletBalance: doc.walletBalance,
@@ -332,12 +336,12 @@ exports.getMilestonesByInfluencerAndCampaign = async (req, res) => {
     entries.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
     return res.status(200).json({
-      message: 'Milestones fetched by influencer and campaign',
+      message: "Milestones fetched by influencer and campaign",
       milestones: entries,
     });
   } catch (err) {
-    console.error('Error in getMilestonesByInfluencerAndCampaign:', err);
-    return res.status(500).json({ message: 'Internal server error' });
+    console.error("Error in getMilestonesByInfluencerAndCampaign:", err);
+    return res.status(500).json({ message: "Internal server error" });
   }
 };
 
