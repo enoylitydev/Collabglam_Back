@@ -140,29 +140,38 @@ exports.createMilestone = async (req, res) => {
 
     await doc.save();
 
-    // 8) ✅ LOCK CONTRACT ON FIRST MILESTONE CREATION
-    // We lock by setting status = MILESTONES_CREATED (your isLockedContract checks this)
-    // We DO NOT set lockedAt (reserved for fully-signed lock), but we DO set milestonesCreatedAt
+    // 8) ✅ SET CONTRACT STATUS ON FIRST MILESTONE CREATION
     let updatedContract = null;
 
-    if (contractDoc && contractDoc.status !== CONTRACT_STATUS.CONTRACT_SIGNED) {
-      // Only set if not already milestones-created
-      const alreadyMilestonesLocked =
-        contractDoc.status === CONTRACT_STATUS.MILESTONES_CREATED;
+    if (contractDoc) {
+      // Optional: enforce that milestones can only be created after signing
+      const st = String(contractDoc.status || "").toUpperCase();
+      const canCreateMilestone =
+        st === CONTRACT_STATUS.CONTRACT_SIGNED ||
+        st === CONTRACT_STATUS.MILESTONES_CREATED;
+
+      if (!canCreateMilestone) {
+        return res.status(400).json({
+          message: "Contract must be fully signed before creating milestones.",
+        });
+      }
+
+      const alreadyMilestonesLocked = st === CONTRACT_STATUS.MILESTONES_CREATED;
 
       if (!alreadyMilestonesLocked) {
         contractDoc.status = CONTRACT_STATUS.MILESTONES_CREATED;
         contractDoc.milestonesCreatedAt = contractDoc.milestonesCreatedAt || new Date();
         contractDoc.awaitingRole = null;
+
         contractDoc.statusFlags = contractDoc.statusFlags || {};
         contractDoc.statusFlags.awaitingCollabglam = false;
 
-        // optional audit trail (safe)
         contractDoc.audit = contractDoc.audit || [];
         contractDoc.audit.push({
-          type: 'MILESTONES_CREATED',
-          role: 'system',
+          type: "MILESTONES_CREATED",
+          role: "system",
           details: { brandId, influencerId, campaignId },
+          at: new Date(),
         });
 
         await contractDoc.save();
@@ -177,7 +186,7 @@ exports.createMilestone = async (req, res) => {
           $set: {
             contractId: contractDoc.contractId,
             isContracted: 1,
-            contractStatus: contractDoc.status,
+            contractStatus: contractDoc.status, // ✅ now MILESTONES_CREATED
             milestonesCreatedAt: contractDoc.milestonesCreatedAt || new Date(),
           },
         }
