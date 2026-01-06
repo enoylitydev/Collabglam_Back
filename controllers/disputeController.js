@@ -243,21 +243,14 @@ exports.brandCreateDispute = async (req, res) => {
       });
     }
 
-    // ensure brand exists
     const brand = await Brand.findOne({ brandId: String(brandId) }).lean();
-    if (!brand) {
-      return res.status(404).json({ message: 'Brand not found' });
-    }
+    if (!brand) return res.status(404).json({ message: 'Brand not found' });
 
-    // ensure influencer exists
     const influencer = await Influencer.findOne({
       influencerId: String(influencerId),
     }).lean();
-    if (!influencer) {
-      return res.status(404).json({ message: 'Influencer not found' });
-    }
+    if (!influencer) return res.status(404).json({ message: 'Influencer not found' });
 
-    // validate campaign belongs to this brand (if provided)
     let linkedCampaignId = null;
     let camp = null;
     if (campaignId) {
@@ -268,11 +261,10 @@ exports.brandCreateDispute = async (req, res) => {
       if (camp) linkedCampaignId = String(campaignId);
     }
 
-    // attachments from body + files uploaded in this same request
     const sanitizedAttachments = await buildAttachmentsFromReq(req, attachments);
 
     const dispute = new Dispute({
-      campaignId: linkedCampaignId, // may be null
+      campaignId: linkedCampaignId,
       brandId: String(brandId),
       influencerId: String(influencerId),
       subject: String(subject).trim(),
@@ -283,7 +275,22 @@ exports.brandCreateDispute = async (req, res) => {
 
     await dispute.save();
 
-    // Notify brand (creator)
+    // 🔔 IN-APP NOTIFICATION (Brand raised dispute -> Influencer must see it)
+    try {
+      await createAndEmit({
+        influencerId: String(influencerId),
+        type: 'dispute.created_against_you',
+        title: `New dispute raised (Ticket #${dispute.disputeId})`,
+        message: `${brand?.name || 'A brand'} raised a dispute: "${dispute.subject}".`,
+        entityType: 'dispute',
+        entityId: dispute.disputeId,
+        actionPath: { influencer: `/influencer/disputes/${dispute.disputeId}` },
+      });
+    } catch (e) {
+      console.warn('In-app notify failed (brandCreateDispute):', e.message);
+    }
+
+    // email notifications (existing)
     if (brand.email) {
       await handleSendDisputeCreated({
         email: brand.email,
@@ -293,7 +300,6 @@ exports.brandCreateDispute = async (req, res) => {
       });
     }
 
-    // Notify influencer that a dispute has been raised against them
     if (influencer.email) {
       await handleSendDisputeAgainstYou({
         email: influencer.email,
@@ -572,9 +578,7 @@ exports.brandAddComment = async (req, res) => {
     const { text, attachments = [], brandId } = req.body || {};
 
     if (!id) return res.status(400).json({ message: 'Dispute id is required' });
-    if (!brandId) {
-      return res.status(400).json({ message: 'brandId is required' });
-    }
+    if (!brandId) return res.status(400).json({ message: 'brandId is required' });
     if (!text || !String(text).trim()) {
       return res.status(400).json({ message: 'text is required' });
     }
@@ -585,17 +589,11 @@ exports.brandAddComment = async (req, res) => {
     const d = await Dispute.findOne({ disputeId: id });
     if (!d) return res.status(404).json({ message: 'Dispute not found' });
 
-    if (d.brandId !== String(brandId)) {
-      return res.status(403).json({ message: 'Forbidden' });
-    }
-
+    if (d.brandId !== String(brandId)) return res.status(403).json({ message: 'Forbidden' });
     if (d.status === 'resolved' || d.status === 'rejected') {
-      return res
-        .status(400)
-        .json({ message: 'Cannot comment on a finalized dispute' });
+      return res.status(400).json({ message: 'Cannot comment on a finalized dispute' });
     }
 
-    // body attachments + uploaded files
     const sanitized = await buildAttachmentsFromReq(req, attachments);
 
     d.comments.push({
@@ -607,15 +605,21 @@ exports.brandAddComment = async (req, res) => {
 
     await d.save();
 
-    await createAndEmit({
-      influencerId: d.influencerId,
-      type: 'dispute.comment_added',
-      title: `New comment on Dispute #${d.disputeId}`,
-      message: `Brand added a comment.`,
-      entityType: 'dispute',
-      entityId: d.disputeId,
-      actionPath: `/influencer/disputes/${d.disputeId}`,
-    });
+    // 🔔 Notify Influencer
+    try {
+      const snippet = String(text).trim().slice(0, 120);
+      await createAndEmit({
+        influencerId: d.influencerId,
+        type: 'dispute.comment_added',
+        title: `New comment on Dispute #${d.disputeId}`,
+        message: `${brand?.name || 'Brand'}: ${snippet}${String(text).trim().length > 120 ? '...' : ''}`,
+        entityType: 'dispute',
+        entityId: d.disputeId,
+        actionPath: { influencer: `/influencer/disputes/${d.disputeId}` },
+      });
+    } catch (e) {
+      console.warn('In-app notify failed (brandAddComment):', e.message);
+    }
 
     return res.status(200).json({ message: 'Comment added' });
   } catch (err) {
@@ -647,16 +651,11 @@ exports.influencerCreateDispute = async (req, res) => {
     const influencer = await Influencer.findOne({
       influencerId: String(influencerId),
     }).lean();
-    if (!influencer) {
-      return res.status(404).json({ message: 'Influencer not found' });
-    }
+    if (!influencer) return res.status(404).json({ message: 'Influencer not found' });
 
     const brand = await Brand.findOne({ brandId: String(brandId) }).lean();
-    if (!brand) {
-      return res.status(404).json({ message: 'Brand not found' });
-    }
+    if (!brand) return res.status(404).json({ message: 'Brand not found' });
 
-    // validate campaign belongs to that brand (if provided)
     let linkedCampaignId = null;
     let camp = null;
     if (campaignId) {
@@ -667,7 +666,6 @@ exports.influencerCreateDispute = async (req, res) => {
       if (camp) linkedCampaignId = String(campaignId);
     }
 
-    // attachments from body + files this request
     const sanitizedAttachments = await buildAttachmentsFromReq(req, attachments);
 
     const dispute = new Dispute({
@@ -682,7 +680,22 @@ exports.influencerCreateDispute = async (req, res) => {
 
     await dispute.save();
 
-    // Notify influencer (creator)
+    // 🔔 IN-APP NOTIFICATION (Influencer raised dispute -> Brand must see it)
+    try {
+      await createAndEmit({
+        brandId: String(brandId),
+        type: 'dispute.created_against_you',
+        title: `New dispute raised (Ticket #${dispute.disputeId})`,
+        message: `${influencer?.name || 'An influencer'} raised a dispute: "${dispute.subject}".`,
+        entityType: 'dispute',
+        entityId: dispute.disputeId,
+        actionPath: { brand: `/brand/disputes/${dispute.disputeId}` },
+      });
+    } catch (e) {
+      console.warn('In-app notify failed (influencerCreateDispute):', e.message);
+    }
+
+    // email notifications (existing)
     if (influencer.email) {
       await handleSendDisputeCreated({
         email: influencer.email,
@@ -692,7 +705,6 @@ exports.influencerCreateDispute = async (req, res) => {
       });
     }
 
-    // Notify brand that a dispute has been raised against them
     if (brand.email) {
       await handleSendDisputeAgainstYou({
         email: brand.email,
@@ -988,9 +1000,7 @@ exports.influencerAddComment = async (req, res) => {
     const { text, attachments = [], influencerId } = req.body || {};
 
     if (!id) return res.status(400).json({ message: 'Dispute id is required' });
-    if (!influencerId) {
-      return res.status(400).json({ message: 'influencerId is required' });
-    }
+    if (!influencerId) return res.status(400).json({ message: 'influencerId is required' });
     if (!text || !String(text).trim()) {
       return res.status(400).json({ message: 'text is required' });
     }
@@ -998,24 +1008,16 @@ exports.influencerAddComment = async (req, res) => {
     const influencer = await Influencer.findOne({
       influencerId: String(influencerId),
     }).lean();
-    if (!influencer) {
-      return res.status(404).json({ message: 'Influencer not found' });
-    }
+    if (!influencer) return res.status(404).json({ message: 'Influencer not found' });
 
     const d = await Dispute.findOne({ disputeId: id });
     if (!d) return res.status(404).json({ message: 'Dispute not found' });
 
-    if (d.influencerId !== String(influencerId)) {
-      return res.status(403).json({ message: 'Forbidden' });
-    }
-
+    if (d.influencerId !== String(influencerId)) return res.status(403).json({ message: 'Forbidden' });
     if (d.status === 'resolved' || d.status === 'rejected') {
-      return res
-        .status(400)
-        .json({ message: 'Cannot comment on a finalized dispute' });
+      return res.status(400).json({ message: 'Cannot comment on a finalized dispute' });
     }
 
-    // body attachments + uploaded files
     const sanitized = await buildAttachmentsFromReq(req, attachments);
 
     d.comments.push({
@@ -1026,15 +1028,22 @@ exports.influencerAddComment = async (req, res) => {
     });
 
     await d.save();
-    await createAndEmit({
-      brandId: d.brandId,
-      type: 'dispute.comment_added',
-      title: `New comment on Dispute #${d.disputeId}`,
-      message: `Influencer added a comment.`,
-      entityType: 'dispute',
-      entityId: d.disputeId,
-      actionPath: `/brand/disputes/${d.disputeId}`,
-    });
+
+    // 🔔 Notify Brand
+    try {
+      const snippet = String(text).trim().slice(0, 120);
+      await createAndEmit({
+        brandId: d.brandId,
+        type: 'dispute.comment_added',
+        title: `New comment on Dispute #${d.disputeId}`,
+        message: `${influencer?.name || 'Influencer'}: ${snippet}${String(text).trim().length > 120 ? '...' : ''}`,
+        entityType: 'dispute',
+        entityId: d.disputeId,
+        actionPath: { brand: `/brand/disputes/${d.disputeId}` },
+      });
+    } catch (e) {
+      console.warn('In-app notify failed (influencerAddComment):', e.message);
+    }
 
     return res.status(200).json({ message: 'Comment added' });
   } catch (err) {
@@ -1173,20 +1182,23 @@ exports.adminAddComment = async (req, res) => {
     });
 
     await d.save();
-    await createAndEmit({
-      brandId: d.brandId,
-      influencerId: d.influencerId,
-      type: 'dispute.admin_comment',
-      title: `Admin replied on Dispute #${d.disputeId}`,
-      message: `Admin added a comment.`,
-      entityType: 'dispute',
-      entityId: d.disputeId,
-      actionPath: {
-        brand: `/brand/disputes/${d.disputeId}`,
-        influencer: `/influencer/disputes/${d.disputeId}`,
-      },
-    });
-
+    try {
+      await createAndEmit({
+        brandId: d.brandId,
+        influencerId: d.influencerId,
+        type: 'dispute.admin_comment',
+        title: `Admin comment on Dispute #${d.disputeId}`,
+        message: `Admin added a comment.`,
+        entityType: 'dispute',
+        entityId: d.disputeId,
+        actionPath: {
+          brand: `/brand/disputes/${d.disputeId}`,
+          influencer: `/influencer/disputes/${d.disputeId}`,
+        },
+      });
+    } catch (e) {
+      console.warn('In-app notify failed (adminAddComment):', e.message);
+    }
     return res.status(200).json({ message: 'Comment added' });
   } catch (err) {
     console.error('Error in adminAddComment:', err);
@@ -1331,16 +1343,13 @@ exports.adminUpdateStatus = async (req, res) => {
         .json({ message: 'disputeId and status are required' });
     }
 
-    const normalizedStatus = normalizeStatusInput(status, {
-      allowZeroAll: false,
-    });
-    if (!normalizedStatus) {
-      return res.status(400).json({ message: 'Invalid status' });
-    }
+    const normalizedStatus = normalizeStatusInput(status, { allowZeroAll: false });
+    if (!normalizedStatus) return res.status(400).json({ message: 'Invalid status' });
 
     const d = await Dispute.findOne({ disputeId });
     if (!d) return res.status(404).json({ message: 'Dispute not found' });
 
+    const prevStatus = d.status;
     d.status = normalizedStatus;
 
     let admin = null;
@@ -1355,12 +1364,36 @@ exports.adminUpdateStatus = async (req, res) => {
         authorRole: 'Admin',
         authorId: admin ? admin.adminId : adminId || 'system',
         text: String(resolution),
-        // If you ever want attachments here too, you can add buildAttachmentsFromReq
       });
     }
 
     await d.save();
 
+    // 🔔 IN-APP NOTIFICATION (status changed -> BOTH must receive)
+    try {
+      const adminName = admin?.name || 'Admin';
+      const resolutionText = resolution && String(resolution).trim()
+        ? ` Note: ${String(resolution).trim()}`
+        : '';
+
+      await createAndEmit({
+        brandId: d.brandId,
+        influencerId: d.influencerId,
+        type: 'dispute.status_updated',
+        title: `Dispute #${d.disputeId} status updated`,
+        message: `${adminName} changed status from "${prevStatus}" to "${d.status}".${resolutionText}`,
+        entityType: 'dispute',
+        entityId: d.disputeId,
+        actionPath: {
+          brand: `/brand/disputes/${d.disputeId}`,
+          influencer: `/influencer/disputes/${d.disputeId}`,
+        },
+      });
+    } catch (e) {
+      console.warn('In-app notify failed (adminUpdateStatus):', e.message);
+    }
+
+    // existing email on resolved
     if (d.status === 'resolved') {
       const [brand, influencer] = await Promise.all([
         Brand.findOne({ brandId: d.brandId }).lean(),
@@ -1368,8 +1401,7 @@ exports.adminUpdateStatus = async (req, res) => {
       ]);
 
       const resolutionSummary =
-        resolution ||
-        'The dispute has been reviewed and resolved by our team.';
+        resolution || 'The dispute has been reviewed and resolved by our team.';
 
       if (brand && brand.email) {
         await handleSendDisputeResolved({
@@ -1425,19 +1457,23 @@ exports.adminAssign = async (req, res) => {
 
     d.assignedTo = { adminId: targetAdminId || null, name };
     await d.save();
-    await createAndEmit({
-      brandId: d.brandId,
-      influencerId: d.influencerId,
-      type: 'dispute.assigned',
-      title: `Dispute #${d.disputeId} assigned`,
-      message: `Your dispute has been assigned to our support team.`,
-      entityType: 'dispute',
-      entityId: d.disputeId,
-      actionPath: {
-        brand: `/brand/disputes/${d.disputeId}`,
-        influencer: `/influencer/disputes/${d.disputeId}`,
-      },
-    });
+    try {
+      await createAndEmit({
+        brandId: d.brandId,
+        influencerId: d.influencerId,
+        type: 'dispute.assigned',
+        title: `Dispute #${d.disputeId} assigned`,
+        message: `Your dispute has been assigned to our team.`,
+        entityType: 'dispute',
+        entityId: d.disputeId,
+        actionPath: {
+          brand: `/brand/disputes/${d.disputeId}`,
+          influencer: `/influencer/disputes/${d.disputeId}`,
+        },
+      });
+    } catch (e) {
+      console.warn('In-app notify failed (adminAssign):', e.message);
+    }
 
     return res
       .status(200)
