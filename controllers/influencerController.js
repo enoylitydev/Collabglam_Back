@@ -2188,3 +2188,49 @@ exports.verifyClaimEmailOtp = async (req, res) => {
     return res.status(500).json({ message: 'Internal server error' });
   }
 };
+
+exports.getInfluencerOnboarding = async (req, res) => {
+  try {
+    const { influencerId } = req.influencer || {};
+    if (!influencerId) return res.status(403).json({ message: 'Forbidden' });
+
+    const inf = await Influencer.findOne(
+      { influencerId },
+      'onboarding'
+    ).lean();
+
+    if (!inf) return res.status(404).json({ message: 'Influencer not found' });
+
+    const seen = !!inf?.onboarding?.influencerTourSeen;
+
+    return res.status(200).json({
+      influencerTourSeen: seen,
+      influencerTourSeenAt: inf?.onboarding?.influencerTourSeenAt || null,
+    });
+  } catch (err) {
+    console.error('getInfluencerOnboarding error:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+exports.markInfluencerTourSeen = async (req, res) => {
+  try {
+    const { influencerId } = req.influencer || {};
+    if (!influencerId) return res.status(403).json({ message: 'Forbidden' });
+
+    await Influencer.updateOne(
+      { influencerId },
+      {
+        $set: {
+          'onboarding.influencerTourSeen': true,
+          'onboarding.influencerTourSeenAt': new Date(),
+        },
+      }
+    );
+
+    return res.status(200).json({ success: true });
+  } catch (err) {
+    console.error('markInfluencerTourSeen error:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};

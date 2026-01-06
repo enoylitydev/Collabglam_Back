@@ -64,6 +64,11 @@ const brandSchema = new mongoose.Schema(
       trim: true,
     },
 
+    onboarding: {
+      brandTourSeen: { type: Boolean, default: false },
+      brandTourSeenAt: { type: Date, default: null },
+    },
+
     pocName: {
       type: String,
       trim: true,

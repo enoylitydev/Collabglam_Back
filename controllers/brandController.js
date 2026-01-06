@@ -1464,3 +1464,42 @@ exports.getBrandQuotas = async (req, res) => {
     }
   });
 };
+
+// GET /brand/onboarding
+exports.getOnboardingStatus = async (req, res) => {
+  try {
+    const brandId = req.brand?.brandId;
+    const brand = await Brand.findOne({ brandId }, 'onboarding').lean();
+    if (!brand) return res.status(404).json({ message: 'Brand not found' });
+
+    return res.status(200).json({
+      brandTourSeen: Boolean(brand.onboarding?.brandTourSeen),
+      brandTourSeenAt: brand.onboarding?.brandTourSeenAt || null,
+    });
+  } catch (err) {
+    console.error('getOnboardingStatus error:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// POST /brand/onboarding/brand-tour/seen
+exports.markBrandTourSeen = async (req, res) => {
+  try {
+    const brandId = req.brand?.brandId;
+
+    await Brand.updateOne(
+      { brandId },
+      {
+        $set: {
+          'onboarding.brandTourSeen': true,
+          'onboarding.brandTourSeenAt': new Date(),
+        },
+      }
+    );
+
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error('markBrandTourSeen error:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};

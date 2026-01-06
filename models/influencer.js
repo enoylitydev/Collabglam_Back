@@ -134,6 +134,9 @@ const influencerSchema = new mongoose.Schema(
     passwordResetExpiresAt: { type: Date },
     passwordResetVerified: { type: Boolean, default: false },
 
+    influencerTourSeen: { type: Boolean, default: false },
+    influencerTourSeenAt: { type: Date, default: null },
+
     paymentMethods: { type: [paymentSchema], default: [] },
     influencerAliasEmail: {
       type: String,
