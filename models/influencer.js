@@ -56,7 +56,11 @@ const onboardingSchema = new mongoose.Schema(
     promptAnswers: {
       type: [{ group: String, prompt: String, answer: String }],
       default: []
-    }
+    },
+
+    influencerTourSeen: { type: Boolean, default: false },
+    influencerTourSeenAt: { type: Date, default: null },
+
   },
   { _id: false }
 );
@@ -133,9 +137,6 @@ const influencerSchema = new mongoose.Schema(
     passwordResetCode: { type: String },
     passwordResetExpiresAt: { type: Date },
     passwordResetVerified: { type: Boolean, default: false },
-
-    influencerTourSeen: { type: Boolean, default: false },
-    influencerTourSeenAt: { type: Date, default: null },
 
     paymentMethods: { type: [paymentSchema], default: [] },
     influencerAliasEmail: {

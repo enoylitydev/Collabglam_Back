@@ -2191,21 +2191,20 @@ exports.verifyClaimEmailOtp = async (req, res) => {
 
 exports.getInfluencerOnboarding = async (req, res) => {
   try {
-    const { influencerId } = req.influencer || {};
-    if (!influencerId) return res.status(403).json({ message: 'Forbidden' });
+    const influencerId = req.influencer?.influencerId;
+    if (!influencerId) return res.status(401).json({ message: 'Unauthorized' });
 
-    const inf = await Influencer.findOne(
-      { influencerId },
-      'onboarding'
-    ).lean();
+    const inf = await Influencer.findOne({ influencerId })
+      .select('onboarding.influencerTourSeen onboarding.influencerTourSeenAt')
+      .lean();
 
     if (!inf) return res.status(404).json({ message: 'Influencer not found' });
 
-    const seen = !!inf?.onboarding?.influencerTourSeen;
+    const seen = Boolean(inf?.onboarding?.influencerTourSeen);
 
     return res.status(200).json({
       influencerTourSeen: seen,
-      influencerTourSeenAt: inf?.onboarding?.influencerTourSeenAt || null,
+      influencerTourSeenAt: inf?.onboarding?.influencerTourSeenAt ?? null,
     });
   } catch (err) {
     console.error('getInfluencerOnboarding error:', err);
@@ -2215,20 +2214,31 @@ exports.getInfluencerOnboarding = async (req, res) => {
 
 exports.markInfluencerTourSeen = async (req, res) => {
   try {
-    const { influencerId } = req.influencer || {};
-    if (!influencerId) return res.status(403).json({ message: 'Forbidden' });
+    const influencerId = req.influencer?.influencerId;
+    if (!influencerId) return res.status(401).json({ message: 'Unauthorized' });
 
-    await Influencer.updateOne(
+    const now = new Date();
+
+    const result = await Influencer.updateOne(
       { influencerId },
       {
         $set: {
           'onboarding.influencerTourSeen': true,
-          'onboarding.influencerTourSeenAt': new Date(),
+          'onboarding.influencerTourSeenAt': now,
         },
       }
     );
 
-    return res.status(200).json({ success: true });
+    // ✅ If token was valid but influencerId not found in DB
+    if (!result?.matchedCount) {
+      return res.status(404).json({ message: 'Influencer not found' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      influencerTourSeen: true,
+      influencerTourSeenAt: now,
+    });
   } catch (err) {
     console.error('markInfluencerTourSeen error:', err);
     return res.status(500).json({ message: 'Internal server error' });
