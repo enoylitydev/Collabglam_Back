@@ -385,12 +385,11 @@ function signaturePanelHTML(contract) {
       const img = imgSrc ? `<img class="sigimg" alt="Signature image" src="${esc(imgSrc)}">` : "";
 
       const meta = s.signed
-        ? `<div class="sigmeta">SIGNED by ${esc(s.name || "")}${
-            s.email ? ` &lt;${esc(s.email)}&gt;` : ""
-          }${when ? ` on ${esc(when)}` : ""}</div>`
+        ? `<div class="sigmeta">SIGNED by ${esc(s.name || "")}${s.email ? ` &lt;${esc(s.email)}&gt;` : ""
+        }${when ? ` on ${esc(when)}` : ""}</div>`
         : isCollabGlam && imgSrc
-        ? `<div class="sigmeta muted">Signature on file (CollabGlam)</div>`
-        : `<div class="sigmeta muted">Pending signature</div>`;
+          ? `<div class="sigmeta muted">Signature on file (CollabGlam)</div>`
+          : `<div class="sigmeta muted">Pending signature</div>`;
 
       return `
       <div class="signature-block">
@@ -514,9 +513,8 @@ function renderDeliverablesTable(delivs = [], tz) {
       const posting = esc(`${pwStart}${pwStart && pwEnd ? " – " : ""}${pwEnd}`);
 
       const draftDue = d?.draftDueDate ? formatDateTZ(d.draftDueDate, tz) : "";
-      const draftCell = `${fmtBool(d.draftRequired)}${
-        draftDue ? `<br><span class="muted">Due: ${esc(draftDue)}</span>` : ""
-      }`;
+      const draftCell = `${fmtBool(d.draftRequired)}${draftDue ? `<br><span class="muted">Due: ${esc(draftDue)}</span>` : ""
+        }`;
 
       const revisionsInc = d.revisionRoundsIncluded ?? d.revisionsIncluded;
       const extraRevFee = d.additionalRevisionFee;
@@ -592,11 +590,10 @@ function renderUsageBundleTokens(ub = {}, currency = "USD") {
       <strong>Geographies:</strong> ${esc(geos || "—")} |
       <strong>Derivative Edits:</strong> ${fmtBool(ub.derivativeEditsAllowed)} |
       <strong>Spend Cap:</strong> ${esc(spendCap)}
-      ${
-        ub.audienceRestrictions
-          ? `<br><strong>Audience Restrictions:</strong> ${esc(ub.audienceRestrictions)}`
-          : ""
-      }
+      ${ub.audienceRestrictions
+      ? `<br><strong>Audience Restrictions:</strong> ${esc(ub.audienceRestrictions)}`
+      : ""
+    }
     </p>`.trim();
 
   const table = `
@@ -1023,7 +1020,7 @@ async function renderPDFWithPuppeteer({ html, res, filename = "Contract.pdf", he
     if (page) {
       try {
         await page.close();
-      } catch (_e) {}
+      } catch (_e) { }
     }
   }
 }
@@ -1193,8 +1190,8 @@ function isLockedContract(contract) {
   const st = normalizeStatus(contract);
   return Boolean(
     contract.lockedAt ||
-      st === CONTRACT_STATUS.CONTRACT_SIGNED ||
-      st === CONTRACT_STATUS.MILESTONES_CREATED
+    st === CONTRACT_STATUS.CONTRACT_SIGNED ||
+    st === CONTRACT_STATUS.MILESTONES_CREATED
   );
 }
 
@@ -1507,10 +1504,10 @@ function roleFromReq(req, explicitRole) {
     (req.user?.isAdmin
       ? "admin"
       : req.user?.brandId
-      ? "brand"
-      : req.user?.influencerId
-      ? "influencer"
-      : "system")
+        ? "brand"
+        : req.user?.influencerId
+          ? "influencer"
+          : "system")
   );
 }
 
@@ -1682,25 +1679,25 @@ exports.initiate = async (req, res) => {
       Array.isArray(brandInput.deliverablesExpanded) && brandInput.deliverablesExpanded.length
         ? brandInput.deliverablesExpanded
         : [
-            {
-              type: "Video",
-              quantity: 1,
-              format: "MP4",
-              durationSec: 60,
-              postingWindow: { start: brandInput.goLive?.start, end: brandInput.goLive?.end },
-              draftRequired: (brandInput.revisionsIncluded ?? 1) > 0,
-              minLiveHours: 720,
-              revisionRoundsIncluded: brandInput.revisionsIncluded ?? 1,
-              additionalRevisionFee: admin.extraRevisionFee ?? 0,
-              tags: [],
-              handles: [],
-              captions: "",
-              links: [],
-              disclosures: "#ad",
-              whitelistingEnabled: false,
-              sparkAdsEnabled: false,
-            },
-          ];
+          {
+            type: "Video",
+            quantity: 1,
+            format: "MP4",
+            durationSec: 60,
+            postingWindow: { start: brandInput.goLive?.start, end: brandInput.goLive?.end },
+            draftRequired: (brandInput.revisionsIncluded ?? 1) > 0,
+            minLiveHours: 720,
+            revisionRoundsIncluded: brandInput.revisionsIncluded ?? 1,
+            additionalRevisionFee: admin.extraRevisionFee ?? 0,
+            tags: [],
+            handles: [],
+            captions: "",
+            links: [],
+            disclosures: "#ad",
+            whitelistingEnabled: false,
+            sparkAdsEnabled: false,
+          },
+        ];
 
     const draftDue = clampDraftDue(brandInput.goLive?.start || new Date());
     const enforcedHandle = influencerDoc.handle || "";
@@ -2091,9 +2088,8 @@ exports.brandConfirm = async (req, res) => {
       influencerId: String(contract.influencerId),
       type: "contract.confirm.brand",
       title: "Brand accepted",
-      message: `${contract.brandName || "Brand"} accepted the contract. ${
-        contract.status === CONTRACT_STATUS.READY_TO_SIGN ? "Both parties can sign now." : "Awaiting next step."
-      }`,
+      message: `${contract.brandName || "Brand"} accepted the contract. ${contract.status === CONTRACT_STATUS.READY_TO_SIGN ? "Both parties can sign now." : "Awaiting next step."
+        }`,
       entityType: "contract",
       entityId: String(contract.contractId),
       actionPath: `/influencer/my-campaign`,
@@ -2436,6 +2432,31 @@ exports.sign = async (req, res) => {
 
     const locked = isLockedContract(contract);
 
+    // Email: one side signed, other still pending
+    if (!locked) {
+      if (signerRole === "brand") {
+        const influencerEmail = getEmailForRole({ contract, role: "influencer" });
+        await safeSendEmail({
+          contract,
+          templateKey: "contract_signed_by_brand_influencer_notify",
+          to: influencerEmail,
+          recipientRole: "influencer",
+          recipientName: getNameForRole({ contract, role: "influencer" }),
+        });
+      }
+
+      if (signerRole === "influencer") {
+        const brandEmail = getEmailForRole({ contract, role: "brand" });
+        await safeSendEmail({
+          contract,
+          templateKey: "contract_signed_by_influencer_brand_notify",
+          to: brandEmail,
+          recipientRole: "brand",
+          recipientName: getNameForRole({ contract, role: "brand" }),
+        });
+      }
+    }
+
     const campaignSync = { isContracted: 1, contractId: contract.contractId };
     if (contract.isAccepted === 1) campaignSync.isAccepted = 1;
     if (locked) campaignSync.contractLockedAt = contract.lockedAt || new Date();
@@ -2445,21 +2466,21 @@ exports.sign = async (req, res) => {
     const opp =
       signerRole === "brand"
         ? {
-            recipientType: "influencer",
-            influencerId: String(contract.influencerId),
-            type: "contract.signed.brand",
-            path: `/influencer/my-campaign`,
-          }
+          recipientType: "influencer",
+          influencerId: String(contract.influencerId),
+          type: "contract.signed.brand",
+          path: `/influencer/my-campaign`,
+        }
         : signerRole === "influencer"
-        ? {
+          ? {
             recipientType: "brand",
             brandId: String(contract.brandId),
             type: "contract.signed.influencer",
             path: `/brand/created-campaign/applied-inf?id=${contract.campaignId}`,
           }
-        : signerRole === "collabglam"
-        ? null
-        : null;
+          : signerRole === "collabglam"
+            ? null
+            : null;
 
     if (opp) {
       await createAndEmit({

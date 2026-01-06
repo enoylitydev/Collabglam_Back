@@ -907,20 +907,23 @@ exports.saveQuickOnboarding = async (req, res) => {
       influencerId,
       email,
 
-      formats = [],
-      budgets = {},
-      projectLength = '',
-      capacity = '',
+      // step fields (do NOT default these)
+      formats,
+      budgets,
+      projectLength,
+      capacity,
 
       categoryId,
-      subcategories = [],
+      subcategories,
 
-      collabTypes = [],
-      allowlisting = false,
-      cadences = [],
+      collabTypes,
+      allowlisting,
+      cadences,
 
-      selectedPrompts = [],
-      promptAnswers = {}
+      selectedPrompts,
+      promptAnswers,
+
+      onboardingStepCompleted
     } = req.body;
 
     if (!influencerId && !email) {
@@ -934,47 +937,85 @@ exports.saveQuickOnboarding = async (req, res) => {
     const inf = await Influencer.findOne(query);
     if (!inf) return res.status(404).json({ message: 'Influencer not found' });
 
-    let budgetArr = [];
-    if (Array.isArray(budgets)) {
-      budgetArr = budgets;
-    } else if (budgets && typeof budgets === 'object') {
-      budgetArr = Object.entries(budgets).map(([format, range]) => ({ format, range }));
+    // Ensure onboarding object exists
+    if (!inf.onboarding) inf.onboarding = {};
+
+    // Build a patch object only from provided fields
+    const patch = {};
+
+    // Step 1
+    if (formats !== undefined) {
+      patch['onboarding.formats'] = Array.isArray(formats) ? formats : [];
     }
 
-    const { categoryId: catNumId, categoryName: catName } = await resolveCategoryBasics(categoryId);
-
-    const idx = await buildCategoryIndex();
-    let subLinks = normalizeCategories(subcategories, idx);
-
-    if (typeof catNumId === 'number') {
-      subLinks = subLinks.filter(s => s.categoryId === catNumId);
+    if (budgets !== undefined) {
+      let budgetArr = [];
+      if (Array.isArray(budgets)) {
+        budgetArr = budgets;
+      } else if (budgets && typeof budgets === 'object') {
+        budgetArr = Object.entries(budgets).map(([format, range]) => ({ format, range }));
+      }
+      patch['onboarding.budgets'] = budgetArr;
     }
 
-    const onboardingSubs = subLinks.map(s => ({
-      subcategoryId: s.subcategoryId,
-      subcategoryName: s.subcategoryName
-    }));
+    if (projectLength !== undefined) patch['onboarding.projectLength'] = projectLength || '';
+    if (capacity !== undefined) patch['onboarding.capacity'] = capacity || '';
 
-    inf.onboarding = {
-      formats: Array.isArray(formats) ? formats : [],
-      budgets: budgetArr,
-      projectLength,
-      capacity,
+    // Step 2
+    if (categoryId !== undefined) {
+      const { categoryId: catNumId, categoryName: catName } = await resolveCategoryBasics(categoryId);
 
-      categoryId: typeof catNumId === 'number' ? catNumId : undefined,
-      categoryName: catName || undefined,
+      patch['onboarding.categoryId'] = typeof catNumId === 'number' ? catNumId : undefined;
+      patch['onboarding.categoryName'] = catName || undefined;
 
-      subcategories: onboardingSubs,
+      // If subcategories are provided, normalize & store them
+      if (subcategories !== undefined) {
+        const idx = await buildCategoryIndex();
+        let subLinks = normalizeCategories(Array.isArray(subcategories) ? subcategories : [], idx);
 
-      collabTypes: Array.isArray(collabTypes) ? collabTypes : [],
-      allowlisting: !!allowlisting,
-      cadences: Array.isArray(cadences) ? cadences : [],
+        if (typeof catNumId === 'number') {
+          subLinks = subLinks.filter(s => s.categoryId === catNumId);
+        }
 
-      selectedPrompts: Array.isArray(selectedPrompts) ? selectedPrompts : [],
-      promptAnswers: normalizePromptAnswers(selectedPrompts, promptAnswers)
-    };
+        patch['onboarding.subcategories'] = subLinks.map(s => ({
+          subcategoryId: s.subcategoryId,
+          subcategoryName: s.subcategoryName
+        }));
+      }
+    } else if (subcategories !== undefined) {
+      // category not provided but subcategories provided (optional case)
+      const idx = await buildCategoryIndex();
+      const subLinks = normalizeCategories(Array.isArray(subcategories) ? subcategories : [], idx);
 
-    await inf.save();
+      patch['onboarding.subcategories'] = subLinks.map(s => ({
+        subcategoryId: s.subcategoryId,
+        subcategoryName: s.subcategoryName
+      }));
+    }
+
+    if (collabTypes !== undefined) patch['onboarding.collabTypes'] = Array.isArray(collabTypes) ? collabTypes : [];
+    if (allowlisting !== undefined) patch['onboarding.allowlisting'] = !!allowlisting;
+    if (cadences !== undefined) patch['onboarding.cadences'] = Array.isArray(cadences) ? cadences : [];
+
+    // Step 3
+    if (selectedPrompts !== undefined) patch['onboarding.selectedPrompts'] = Array.isArray(selectedPrompts) ? selectedPrompts : [];
+    if (promptAnswers !== undefined && selectedPrompts !== undefined) {
+      patch['onboarding.promptAnswers'] = normalizePromptAnswers(
+        Array.isArray(selectedPrompts) ? selectedPrompts : [],
+        promptAnswers || {}
+      );
+    } else if (promptAnswers !== undefined) {
+      // if they send promptAnswers alone, store raw-ish (or skip)
+      patch['onboarding.promptAnswers'] = promptAnswers || {};
+    }
+
+    if (onboardingStepCompleted !== undefined) {
+      patch['onboarding.onboardingStepCompleted'] = onboardingStepCompleted;
+    }
+
+    // Apply patch
+    await Influencer.updateOne(query, { $set: patch });
+
     return res.json({ message: 'Onboarding saved', influencerId: inf.influencerId });
   } catch (err) {
     console.error('saveQuickOnboarding error:', err);

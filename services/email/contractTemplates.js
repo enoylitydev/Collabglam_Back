@@ -400,6 +400,80 @@ ${baseFooterText}
     }),
   },
 
+  // 7.5) Brand signed but contract not fully signed yet → notify influencer to sign
+  contract_signed_by_brand_influencer_notify: {
+    event: "contract.signed_by_brand",
+    recipients: ["influencer"],
+    subject: "{BrandName} signed the contract — your signature is next",
+    subject_alt: [
+      "Signature needed: complete {ContractName}",
+      "{BrandName} signed — please sign to finish",
+    ],
+    preheader: "Add your signature to complete the contract.",
+    preheader_alt: "Open the contract and sign to finalize.",
+    cta_label: "Sign now",
+    body_text: `
+Hi {UserName},
+
+Good news — {BrandName} has signed {ContractName} (v{VersionNumber}).
+
+Next step: please add your signature to complete the contract.
+
+Sign here: ${absUrl("{PlatformLink}")}
+
+${baseFooterText}
+`.trim(),
+    body_html: wrapHtml({
+      theme: "influencer",
+      preheader: "Add your signature to complete the contract.",
+      title: "Brand signed — your signature is next",
+      intro:
+        "<strong>{BrandName}</strong> has signed <strong>{ContractName}</strong> (v{VersionNumber}).",
+      bullets: [
+        "Open the contract to review the final version",
+        "Add your signature to complete the agreement",
+      ],
+      ctaLabel: "Sign now",
+    }),
+  },
+
+  // 7.6) Influencer signed but contract not fully signed yet → notify brand to sign
+  contract_signed_by_influencer_brand_notify: {
+    event: "contract.signed_by_influencer",
+    recipients: ["brand"],
+    subject: "{InfluencerName} signed — please sign to complete the contract",
+    subject_alt: [
+      "Signature needed: complete {ContractName}",
+      "{InfluencerName} signed — your signature is next",
+    ],
+    preheader: "Add your signature to complete the contract.",
+    preheader_alt: "Open the contract and sign to finalize.",
+    cta_label: "Sign now",
+    body_text: `
+Hi {UserName},
+
+{InfluencerName} has signed {ContractName} (v{VersionNumber}).
+
+Next step: please add your signature to complete the contract.
+
+Sign here: ${absUrl("{PlatformLink}")}
+
+${baseFooterText}
+`.trim(),
+    body_html: wrapHtml({
+      theme: "brand",
+      preheader: "Add your signature to complete the contract.",
+      title: "Influencer signed — your signature is next",
+      intro:
+        "<strong>{InfluencerName}</strong> has signed <strong>{ContractName}</strong> (v{VersionNumber}).",
+      bullets: [
+        "Open the contract to review the final version",
+        "Add your signature to complete the agreement",
+      ],
+      ctaLabel: "Sign now",
+    }),
+  },
+
   // 8) Contract fully signed → success email to both
   contract_fully_signed_both: {
     event: "contract.fully_signed",

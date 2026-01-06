@@ -6,6 +6,7 @@ const Brand = require('../models/brand');
 const Influencer = require('../models/influencer');
 const ApplyCampaign = require('../models/applyCampaign');
 const Contract = require('../models/contract');
+const { createAndEmit } = require('../utils/notifier');
 
 // ⬇️ Adjust this path to your GridFS helper file if needed
 const { uploadToGridFS } = require('../utils/gridfs');
@@ -393,13 +394,13 @@ exports.brandList = async (req, res) => {
       const [influencers, campaigns] = await Promise.all([
         influencerIds.length
           ? Influencer.find({ influencerId: { $in: influencerIds } })
-              .select('influencerId name')
-              .lean()
+            .select('influencerId name')
+            .lean()
           : [],
         campaignIds.length
           ? Campaign.find({ campaignsId: { $in: campaignIds } })
-              .select('campaignsId productOrServiceName')
-              .lean()
+            .select('campaignsId productOrServiceName')
+            .lean()
           : [],
       ]);
 
@@ -507,13 +508,13 @@ exports.brandGetById = async (req, res) => {
       const [campaign, influencer] = await Promise.all([
         d.campaignId
           ? Campaign.findOne({ campaignsId: d.campaignId })
-              .select('campaignsId productOrServiceName')
-              .lean()
+            .select('campaignsId productOrServiceName')
+            .lean()
           : null,
         d.influencerId
           ? Influencer.findOne({ influencerId: d.influencerId })
-              .select('influencerId name')
-              .lean()
+            .select('influencerId name')
+            .lean()
           : null,
       ]);
 
@@ -605,6 +606,16 @@ exports.brandAddComment = async (req, res) => {
     });
 
     await d.save();
+
+    await createAndEmit({
+      influencerId: d.influencerId,
+      type: 'dispute.comment_added',
+      title: `New comment on Dispute #${d.disputeId}`,
+      message: `Brand added a comment.`,
+      entityType: 'dispute',
+      entityId: d.disputeId,
+      actionPath: `/influencer/disputes/${d.disputeId}`,
+    });
 
     return res.status(200).json({ message: 'Comment added' });
   } catch (err) {
@@ -794,13 +805,13 @@ exports.influencerList = async (req, res) => {
       const [brands, campaigns] = await Promise.all([
         brandIds.length
           ? Brand.find({ brandId: { $in: brandIds } })
-              .select('brandId name')
-              .lean()
+            .select('brandId name')
+            .lean()
           : [],
         campaignIds.length
           ? Campaign.find({ campaignsId: { $in: campaignIds } })
-              .select('campaignsId productOrServiceName')
-              .lean()
+            .select('campaignsId productOrServiceName')
+            .lean()
           : [],
       ]);
 
@@ -913,13 +924,13 @@ exports.influencerGetById = async (req, res) => {
       const [campaign, brand] = await Promise.all([
         d.campaignId
           ? Campaign.findOne({ campaignsId: d.campaignId })
-              .select('campaignsId productOrServiceName')
-              .lean()
+            .select('campaignsId productOrServiceName')
+            .lean()
           : null,
         d.brandId
           ? Brand.findOne({ brandId: d.brandId })
-              .select('brandId name')
-              .lean()
+            .select('brandId name')
+            .lean()
           : null,
       ]);
 
@@ -1015,6 +1026,15 @@ exports.influencerAddComment = async (req, res) => {
     });
 
     await d.save();
+    await createAndEmit({
+      brandId: d.brandId,
+      type: 'dispute.comment_added',
+      title: `New comment on Dispute #${d.disputeId}`,
+      message: `Influencer added a comment.`,
+      entityType: 'dispute',
+      entityId: d.disputeId,
+      actionPath: `/brand/disputes/${d.disputeId}`,
+    });
 
     return res.status(200).json({ message: 'Comment added' });
   } catch (err) {
@@ -1043,18 +1063,18 @@ exports.adminGetById = async (req, res) => {
       const [b, inf, camp] = await Promise.all([
         d.brandId
           ? Brand.findOne({ brandId: d.brandId })
-              .select('brandId name email')
-              .lean()
+            .select('brandId name email')
+            .lean()
           : null,
         d.influencerId
           ? Influencer.findOne({ influencerId: d.influencerId })
-              .select('influencerId name email')
-              .lean()
+            .select('influencerId name email')
+            .lean()
           : null,
         d.campaignId
           ? Campaign.findOne({ campaignsId: d.campaignId })
-              .select('campaignsId productOrServiceName')
-              .lean()
+            .select('campaignsId productOrServiceName')
+            .lean()
           : null
       ]);
 
@@ -1138,8 +1158,8 @@ exports.adminAddComment = async (req, res) => {
 
     const admin = adminId
       ? await Admin.findOne({ adminId: String(adminId) })
-          .select('adminId name email')
-          .lean()
+        .select('adminId name email')
+        .lean()
       : null;
 
     // body attachments + uploaded files
@@ -1153,6 +1173,19 @@ exports.adminAddComment = async (req, res) => {
     });
 
     await d.save();
+    await createAndEmit({
+      brandId: d.brandId,
+      influencerId: d.influencerId,
+      type: 'dispute.admin_comment',
+      title: `Admin replied on Dispute #${d.disputeId}`,
+      message: `Admin added a comment.`,
+      entityType: 'dispute',
+      entityId: d.disputeId,
+      actionPath: {
+        brand: `/brand/disputes/${d.disputeId}`,
+        influencer: `/influencer/disputes/${d.disputeId}`,
+      },
+    });
 
     return res.status(200).json({ message: 'Comment added' });
   } catch (err) {
@@ -1225,18 +1258,18 @@ exports.adminList = async (req, res) => {
       const [brands, influencers, campaigns] = await Promise.all([
         brandIds.length
           ? Brand.find({ brandId: { $in: brandIds } })
-              .select('brandId name')
-              .lean()
+            .select('brandId name')
+            .lean()
           : [],
         influencerIds.length
           ? Influencer.find({ influencerId: { $in: influencerIds } })
-              .select('influencerId name')
-              .lean()
+            .select('influencerId name')
+            .lean()
           : [],
         campaignIds.length
           ? Campaign.find({ campaignsId: { $in: campaignIds } })
-              .select('campaignsId productOrServiceName')
-              .lean()
+            .select('campaignsId productOrServiceName')
+            .lean()
           : [],
       ]);
 
@@ -1392,6 +1425,19 @@ exports.adminAssign = async (req, res) => {
 
     d.assignedTo = { adminId: targetAdminId || null, name };
     await d.save();
+    await createAndEmit({
+      brandId: d.brandId,
+      influencerId: d.influencerId,
+      type: 'dispute.assigned',
+      title: `Dispute #${d.disputeId} assigned`,
+      message: `Your dispute has been assigned to our support team.`,
+      entityType: 'dispute',
+      entityId: d.disputeId,
+      actionPath: {
+        brand: `/brand/disputes/${d.disputeId}`,
+        influencer: `/influencer/disputes/${d.disputeId}`,
+      },
+    });
 
     return res
       .status(200)
