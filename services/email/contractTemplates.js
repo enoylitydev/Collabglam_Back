@@ -2,13 +2,18 @@
 
 const SITE_URL = "https://collabglam.com";
 
+// ✅ Add these
+const SUPPORT_EMAIL = "help@collabglam.com";
+const COMPANY_ADDRESS = `8825 PERIMETER PARK BLVD STE 501
+JACKSONVILLE, FL 32216-1123
+USA`;
+
 const absUrl = (pathPlaceholder) =>
   `${SITE_URL}/${String(pathPlaceholder).replace(/^\/+/, "")}`;
 
 const THEME = {
   brand: {
     ctaClass: "bg-gradient-to-r from-[#FFA135] to-[#FF7236] text-white",
-    // inline fallback (email clients that ignore classes)
     ctaBg: "linear-gradient(90deg,#FFA135,#FF7236)",
     ctaText: "#ffffff",
   },
@@ -19,20 +24,22 @@ const THEME = {
   },
 };
 
+// ✅ Updated footer (unsubscribe removed)
 const baseFooterText = `
-Need help? Contact us at {SupportEmail}.
+Need help? Contact us at ${SUPPORT_EMAIL}.
 
-{CompanyAddress}
-${absUrl("{UnsubscribeLink}")}
+${COMPANY_ADDRESS}
 `.trim();
 
+// ✅ Updated footer HTML (unsubscribe removed + address fixed)
 const baseFooterHtml = `
 <p style="margin:16px 0 0;font-size:13px;line-height:1.5;color:#555;">
-  Need help? Contact us at <a href="mailto:{SupportEmail}" style="color:#111;">{SupportEmail}</a>.
+  Need help? Contact us at <a href="mailto:${SUPPORT_EMAIL}" style="color:#111;">${SUPPORT_EMAIL}</a>.
 </p>
 <p style="margin:12px 0 0;font-size:12px;line-height:1.5;color:#777;">
-  {CompanyAddress}<br/>
-  <a href="${absUrl("{UnsubscribeLink}")}" style="color:#777;">Unsubscribe</a>
+  8825 PERIMETER PARK BLVD STE 501<br/>
+  JACKSONVILLE, FL 32216-1123<br/>
+  USA<br/>
 </p>
 `.trim();
 

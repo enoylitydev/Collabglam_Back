@@ -1628,7 +1628,7 @@ exports.getContractedCampaignsByInfluencer = async (req, res) => {
         });
       }
     }
-    
+
 
     let candidateCampaignIds = Array.from(contractByCampaignId.keys());
     if (!candidateCampaignIds.length) {
@@ -2536,8 +2536,10 @@ exports.listApplicants = async (req, res) => {
 
       const c = contractByInf.get(infId);
 
+      const isRejected = c?.isRejected === 1 ? 1 : 0;
+
       return {
-        _id: inf._id || "", // if you need it
+        _id: inf._id || "",
         influencerId: inf.influencerId,
         name: inf.name || "",
         handle,
@@ -2545,15 +2547,19 @@ exports.listApplicants = async (req, res) => {
         audienceSize,
         createdAt: applicationCreatedAt,
 
-        // status fields used by frontend badge
-        isAssigned: c?.isAssigned === 1 ? 1 : 0,
-        isAccepted: c?.isAccepted === 1 ? 1 : 0,
+        // ✅ statuses
+        isRejected,
+        rejectedReason: c?.rejectedReason || null,
 
-        // ✅ NEW for actions
+        // If rejected, force others off (prevents wrong badge)
+        isAssigned: isRejected ? 0 : (c?.isAssigned === 1 ? 1 : 0),
+        isAccepted: isRejected ? 0 : (c?.isAccepted === 1 ? 1 : 0),
+
         isContracted: c ? 1 : 0,
         contractId: c?.contractId || null,
         hasMilestone: milestoneInfSet.has(infId) ? 1 : 0,
       };
+
     });
 
     // ✅ Search (smart: supports name, handle, category)
