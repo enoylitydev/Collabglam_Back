@@ -6,14 +6,12 @@ const {
 } = require("@aws-sdk/client-ses");
 
 const { v4: uuidv4 } = require("uuid");
-const mongoose = require("mongoose");
 
 const Brand = require("../models/brand");
 const Influencer = require("../models/influencer");
 const Campaign = require("../models/campaign");
 
 const { EmailThread, EmailMessage, EmailTemplate } = require("../models/email");
-const WarningEmail = require("../models/warningEmail");
 
 const Invitation = require("../models/NewInvitations");
 const MissingEmail = require("../models/MissingEmail");
@@ -99,97 +97,6 @@ async function findInfluencerByIdOrInfluencerId(id) {
     } catch (e) { }
   }
   return inf;
-}
-
-// ---------- Warning Email Helper ----------
-/**
- * Construct reason for blocking from detected items
- */
-function constructReasonForBlocking(filteredDetectedItems) {
-  if (!filteredDetectedItems || filteredDetectedItems.length === 0) {
-    return 'PII detected';
-  }
-  
-  // Get unique types from detected items
-  const types = [...new Set(filteredDetectedItems.map(item => item.type || 'PII').filter(Boolean))];
-  
-  if (types.length === 0) {
-    return 'PII detected';
-  }
-  
-  // Construct a readable reason string
-  return `Detected: ${types.join(', ')}`;
-}
-
-/**
- * Send warning email to sender when PII is detected
- */
-async function sendPIIWarningEmail({ 
-  toRealEmail, 
-  senderName, 
-  originalSubject, 
-  originalBody,
-  reasonForBlocking,
-  role,
-  brandId,
-  influencerId,
-  fromProxyEmail,
-  toProxyEmail,
-}) {
-  const warningSubject = "Email Not Sent - Restricted Content Detected";
-  const warningTextBody = `This email could not be sent.
-
-Your message appears to contain personal contact information or external details. To ensure a safe and secure collaboration experience, all communication should remain within CollabGlam.
-
-Please remove the restricted content and try again.`;
-
-  const warningHtmlBody = `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-      <h2 style="color: #d32f2f;">This email could not be sent.</h2>
-      <p>Your message appears to contain personal contact information or external details. To ensure a safe and secure collaboration experience, all communication should remain within CollabGlam.</p>
-      <p><strong>Please remove the restricted content and try again.</strong></p>
-    </div>
-  `;
-
-  try {
-    // Use MAIL_TO from .env as the sender
-    const fromEmail = process.env.MAIL_TO || process.env.MAIL_FROM || `noreply@${process.env.EMAIL_RELAY_DOMAIN || "mail.collabglam.com"}`;
-    const fromName = process.env.PLATFORM_NAME || "CollabGlam";
-
-    await sendViaSES({
-      fromAlias: fromEmail,
-      fromName: fromName,
-      toRealEmail: toRealEmail,
-      subject: warningSubject,
-      htmlBody: warningHtmlBody,
-      textBody: warningTextBody,
-      replyTo: undefined,
-      attachments: undefined,
-    });
-
-    // Save warning email to database
-    // Note: Using string IDs (brandId, influencerId) - aggregation with $lookup handles joins
-    const savedWarning = await WarningEmail.create({
-      role: role,
-      brandId: brandId || null,
-      influencerId: influencerId || null,
-      subject: warningSubject,
-      body: warningTextBody,
-      originalSubject: originalSubject,
-      originalBody: originalBody,
-      reasonForBlocking: reasonForBlocking || null,
-      recipientEmail: toRealEmail,
-      fromProxyEmail: fromProxyEmail,
-      toProxyEmail: toProxyEmail,
-      sentAt: new Date(),
-    });
-
-    console.log(`[PII Warning] Warning email sent to: ${toRealEmail} and saved to database with ID: ${savedWarning._id}`);
-    return true;
-  } catch (err) {
-    console.error("[PII Warning] Failed to send warning email:", err);
-    return false;
-  }
 }
 
 async function findCampaignByIdOrCampaignsId(id) {
@@ -679,20 +586,14 @@ exports.sendBrandToInfluencer = async (req, res) => {
   try {
     const { brandId, influencerId, subject, body, templateId, attachments } = req.body;
      console.log("req.body", req.body);
-    
-    // Handle case where influencerId might be an object
-    const actualInfluencerId = typeof influencerId === 'object' && influencerId !== null 
-      ? (influencerId.influencerId || influencerId.id || influencerId._id)
-      : influencerId;
-    
-    if (!brandId || !actualInfluencerId || !subject || !body) {
+    if (!brandId || !influencerId || !subject || !body) {
       return res.status(400).json({
         error: "brandId, influencerId, subject and body are required.",
       });
     }
 
     const brand = await findBrandByIdOrBrandId(brandId);
-    const influencer = await findInfluencerByIdOrInfluencerId(actualInfluencerId);
+    const influencer = await findInfluencerByIdOrInfluencerId(influencerId);
     if (!brand) return res.status(404).json({ error: "Brand not found" });
     if (!influencer) return res.status(404).json({ error: "Influencer not found" });
 
@@ -729,7 +630,7 @@ exports.sendBrandToInfluencer = async (req, res) => {
       }))
       : undefined;
 
-    // ✅ AI Gatekeeper: Check for PII before sending
+    // ✅ AI Gatekeeper: Check and mask PII before sending
     const originalSubject = subject;
     const originalHtmlBody = htmlBody;
     const originalTextBody = textBody;
@@ -740,94 +641,7 @@ exports.sendBrandToInfluencer = async (req, res) => {
       htmlBody: originalHtmlBody,
     });
 
-    // Helper function to check if detected items are only collabglam emails
-    const fullContent = `${originalSubject}\n\n${originalTextBody}`.trim();
-    const filterCollabglamEmails = (detectedItems) => {
-      if (!detectedItems || detectedItems.length === 0) return [];
-      
-      const emailRegex = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g;
-      
-      return detectedItems.filter(item => {
-        if (!item.match && !item.original) return true; // Keep if no match found
-        
-        const matchText = item.match || item.original || '';
-        const matchLower = matchText.toLowerCase();
-        
-        // Check if this match is part of a collabglam email in the full content
-        // This handles cases like "jackery@mail" which is part of "jackery@mail.collabglam.com"
-        if (fullContent) {
-          const fullContentLower = fullContent.toLowerCase();
-          // Look for collabglam emails in the full content
-          const collabglamEmails = fullContentLower.match(/\b[a-z0-9._%+-]+@(?:mail\.)?collabglam\.com\b/g) || [];
-          
-          // Check if the match text is contained within any collabglam email
-          const isPartOfCollabglamEmail = collabglamEmails.some(collabglamEmail => {
-            return collabglamEmail.includes(matchLower) || matchLower.includes(collabglamEmail.split('@')[0]);
-          });
-          
-          if (isPartOfCollabglamEmail) {
-            console.log('[AI Gatekeeper] Allowing collabglam email (partial match):', matchText);
-            return false; // Filter out - it's part of a collabglam email
-          }
-        }
-        
-        // If it's an email type, check if it's collabglam
-        if (item.type === 'Email' || item.type === 'EMAIL') {
-          const emails = matchText.match(emailRegex) || [];
-          // Filter out if it's a collabglam email
-          const isCollabglam = emails.some(email => {
-            const emailLower = email.toLowerCase();
-            return emailLower.includes('@mail.collabglam.com') || emailLower.includes('@collabglam.com');
-          });
-          if (isCollabglam) {
-            console.log('[AI Gatekeeper] Allowing collabglam email from detected items:', matchText);
-            return false; // Filter out collabglam emails
-          }
-        }
-        
-        // Keep all non-email items and non-collabglam emails
-        return true;
-      });
-    };
-
-    // Filter out collabglam emails from detected items
-    const filteredDetectedItems = filterCollabglamEmails(gatekeeperResult.detectedItems || []);
-    
-    // Only block if there are still detected items after filtering (non-collabglam PII)
-    const shouldBlock = gatekeeperResult.aiGatekeeperDetector && filteredDetectedItems.length > 0;
-    
-    if (shouldBlock) {
-      console.log('[AI Gatekeeper] Blocking email - non-collabglam PII detected:', {
-        originalDetectedCount: gatekeeperResult.detectedItems?.length || 0,
-        filteredDetectedCount: filteredDetectedItems.length,
-        filteredItems: filteredDetectedItems.map(item => ({ type: item.type, match: item.match || item.original }))
-      });
-      
-      // Construct reason for blocking
-      const reasonForBlocking = constructReasonForBlocking(filteredDetectedItems);
-      
-      // Send warning email to brand (sender)
-      await sendPIIWarningEmail({
-        toRealEmail: brand.email,
-        senderName: brand.name,
-        originalSubject: originalSubject,
-        originalBody: originalTextBody,
-        reasonForBlocking: reasonForBlocking,
-        role: "brand",
-        brandId: brand.brandId || String(brand._id),
-        influencerId: influencer.influencerId || String(influencer._id),
-        fromProxyEmail: thread.brandAliasEmail,
-        toProxyEmail: thread.influencerAliasEmail,
-      });
-
-      // Don't save blocked message to EmailMessage - only warning email is saved
-      return res.status(400).json({
-        error: "gatekeeper detected",
-        code: "PII_DETECTED",
-      });
-    }
-
-    // No PII detected - send email normally
+    // Send sanitized version, but save original to DB
     const sesResult = await sendViaSES({
       fromAlias,
       fromName,
@@ -837,6 +651,10 @@ exports.sendBrandToInfluencer = async (req, res) => {
       textBody: gatekeeperResult.textBody,
       replyTo: thread.brandAliasEmail,
       attachments: sesAttachments,
+      originalSubject,
+      originalHtmlBody,
+      originalTextBody,
+      aiGatekeeperDetector: gatekeeperResult.aiGatekeeperDetector,
     });
 
     const attachmentMeta = uploadedFiles.length
@@ -849,7 +667,7 @@ exports.sendBrandToInfluencer = async (req, res) => {
       }))
       : undefined;
 
-    // Save message to DB
+    // ✅ Save ORIGINAL content to DB (unfiltered), but mark if PII was detected
     const messageDoc = await EmailMessage.create({
       thread: thread._id,
       direction: "brand_to_influencer",
@@ -860,14 +678,14 @@ exports.sendBrandToInfluencer = async (req, res) => {
       fromRealEmail: brand.email,
       toRealEmail: influencer.email,
       toProxyEmail: thread.influencerAliasEmail,
-      subject: originalSubject,
-      htmlBody: originalHtmlBody,
-      textBody: originalTextBody,
+      subject: originalSubject, // Original unfiltered
+      htmlBody: originalHtmlBody, // Original unfiltered
+      textBody: originalTextBody, // Original unfiltered
       template: templateId || null,
       attachments: attachmentMeta,
       sentAt: new Date(),
       messageId: sesResult?.MessageId || undefined,
-      aiGatekeeperDetector: false, // No PII detected
+      aiGatekeeperDetector: gatekeeperResult.aiGatekeeperDetector, // Flag if PII detected
     });
 
     thread.lastMessageAt = messageDoc.createdAt;
@@ -902,24 +720,14 @@ exports.sendInfluencerToBrand = async (req, res) => {
   try {
     const { brandId, influencerId, subject, body, templateId, attachments } = req.body;
 
-    // Handle case where influencerId might be an object
-    const actualInfluencerId = typeof influencerId === 'object' && influencerId !== null 
-      ? (influencerId.influencerId || influencerId.id || influencerId._id)
-      : influencerId;
-    
-    // Handle case where brandId might be an object
-    const actualBrandId = typeof brandId === 'object' && brandId !== null 
-      ? (brandId.brandId || brandId.id || brandId._id)
-      : brandId;
-
-    if (!actualBrandId || !actualInfluencerId || !subject || !body) {
+    if (!brandId || !influencerId || !subject || !body) {
       return res.status(400).json({
         error: "brandId, influencerId, subject and body are required.",
       });
     }
 
-    const brand = await findBrandByIdOrBrandId(actualBrandId);
-    const influencer = await findInfluencerByIdOrInfluencerId(actualInfluencerId);
+    const brand = await findBrandByIdOrBrandId(brandId);
+    const influencer = await findInfluencerByIdOrInfluencerId(influencerId);
     if (!brand) return res.status(404).json({ error: "Brand not found" });
     if (!influencer) return res.status(404).json({ error: "Influencer not found" });
 
@@ -955,7 +763,7 @@ exports.sendInfluencerToBrand = async (req, res) => {
       }))
       : undefined;
 
-    // ✅ AI Gatekeeper: Check for PII before sending
+    // ✅ AI Gatekeeper: Check and mask PII before sending
     const originalSubject = subject;
     const originalHtmlBody = htmlBody;
     const originalTextBody = textBody;
@@ -966,94 +774,7 @@ exports.sendInfluencerToBrand = async (req, res) => {
       htmlBody: originalHtmlBody,
     });
 
-    // Helper function to check if detected items are only collabglam emails
-    const fullContent = `${originalSubject}\n\n${originalTextBody}`.trim();
-    const filterCollabglamEmails = (detectedItems) => {
-      if (!detectedItems || detectedItems.length === 0) return [];
-      
-      const emailRegex = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g;
-      
-      return detectedItems.filter(item => {
-        if (!item.match && !item.original) return true; // Keep if no match found
-        
-        const matchText = item.match || item.original || '';
-        const matchLower = matchText.toLowerCase();
-        
-        // Check if this match is part of a collabglam email in the full content
-        // This handles cases like "jackery@mail" which is part of "jackery@mail.collabglam.com"
-        if (fullContent) {
-          const fullContentLower = fullContent.toLowerCase();
-          // Look for collabglam emails in the full content
-          const collabglamEmails = fullContentLower.match(/\b[a-z0-9._%+-]+@(?:mail\.)?collabglam\.com\b/g) || [];
-          
-          // Check if the match text is contained within any collabglam email
-          const isPartOfCollabglamEmail = collabglamEmails.some(collabglamEmail => {
-            return collabglamEmail.includes(matchLower) || matchLower.includes(collabglamEmail.split('@')[0]);
-          });
-          
-          if (isPartOfCollabglamEmail) {
-            console.log('[AI Gatekeeper] Allowing collabglam email (partial match):', matchText);
-            return false; // Filter out - it's part of a collabglam email
-          }
-        }
-        
-        // If it's an email type, check if it's collabglam
-        if (item.type === 'Email' || item.type === 'EMAIL') {
-          const emails = matchText.match(emailRegex) || [];
-          // Filter out if it's a collabglam email
-          const isCollabglam = emails.some(email => {
-            const emailLower = email.toLowerCase();
-            return emailLower.includes('@mail.collabglam.com') || emailLower.includes('@collabglam.com');
-          });
-          if (isCollabglam) {
-            console.log('[AI Gatekeeper] Allowing collabglam email from detected items:', matchText);
-            return false; // Filter out collabglam emails
-          }
-        }
-        
-        // Keep all non-email items and non-collabglam emails
-        return true;
-      });
-    };
-
-    // Filter out collabglam emails from detected items
-    const filteredDetectedItems = filterCollabglamEmails(gatekeeperResult.detectedItems || []);
-    
-    // Only block if there are still detected items after filtering (non-collabglam PII)
-    const shouldBlock = gatekeeperResult.aiGatekeeperDetector && filteredDetectedItems.length > 0;
-    
-    if (shouldBlock) {
-      console.log('[AI Gatekeeper] Blocking email - non-collabglam PII detected:', {
-        originalDetectedCount: gatekeeperResult.detectedItems?.length || 0,
-        filteredDetectedCount: filteredDetectedItems.length,
-        filteredItems: filteredDetectedItems.map(item => ({ type: item.type, match: item.match || item.original }))
-      });
-      
-      // Construct reason for blocking
-      const reasonForBlocking = constructReasonForBlocking(filteredDetectedItems);
-      
-      // Send warning email to influencer (sender)
-      await sendPIIWarningEmail({
-        toRealEmail: influencer.email,
-        senderName: influencer.name || "Influencer",
-        originalSubject: originalSubject,
-        originalBody: originalTextBody,
-        reasonForBlocking: reasonForBlocking,
-        role: "influencer",
-        brandId: brand.brandId || String(brand._id),
-        influencerId: influencer.influencerId || String(influencer._id),
-        fromProxyEmail: thread.influencerAliasEmail,
-        toProxyEmail: thread.brandAliasEmail,
-      });
-
-      // Don't save blocked message to EmailMessage - only warning email is saved
-      return res.status(400).json({
-        error: "gatekeeper detected",
-        code: "PII_DETECTED",
-      });
-    }
-
-    // No PII detected - send email normally
+    // Send sanitized version, but save original to DB
     const sesResult = await sendViaSES({
       fromAlias,
       fromName,
@@ -1063,6 +784,10 @@ exports.sendInfluencerToBrand = async (req, res) => {
       textBody: gatekeeperResult.textBody,
       replyTo: thread.influencerAliasEmail,
       attachments: sesAttachments,
+      originalSubject,
+      originalHtmlBody,
+      originalTextBody,
+      aiGatekeeperDetector: gatekeeperResult.aiGatekeeperDetector,
     });
 
     const attachmentMeta = uploadedFiles.length
@@ -1075,7 +800,7 @@ exports.sendInfluencerToBrand = async (req, res) => {
       }))
       : undefined;
 
-    // Save message to DB
+    // ✅ Save ORIGINAL content to DB (unfiltered), but mark if PII was detected
     const messageDoc = await EmailMessage.create({
       thread: thread._id,
       direction: "influencer_to_brand",
@@ -1086,14 +811,14 @@ exports.sendInfluencerToBrand = async (req, res) => {
       fromRealEmail: influencer.email,
       toRealEmail: brand.email,
       toProxyEmail: thread.brandAliasEmail,
-      subject: originalSubject,
-      htmlBody: originalHtmlBody,
-      textBody: originalTextBody,
+      subject: originalSubject, // Original unfiltered
+      htmlBody: originalHtmlBody, // Original unfiltered
+      textBody: originalTextBody, // Original unfiltered
       template: templateId || null,
       attachments: attachmentMeta,
       sentAt: new Date(),
       messageId: sesResult?.MessageId || undefined,
-      aiGatekeeperDetector: false, // No PII detected
+      aiGatekeeperDetector: gatekeeperResult.aiGatekeeperDetector, // Flag if PII detected
     });
 
     thread.lastMessageAt = messageDoc.createdAt;
@@ -2034,99 +1759,12 @@ async function sendCampaignInvitationInternal(payload = {}) {
     htmlBody: originalHtmlBody,
   });
 
-  // Helper function to check if detected items are only collabglam emails
-  const fullContent = `${originalSubject}\n\n${originalTextBody}`.trim();
-  const filterCollabglamEmails = (detectedItems) => {
-    if (!detectedItems || detectedItems.length === 0) return [];
-    
-    const emailRegex = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g;
-    
-    return detectedItems.filter(item => {
-      if (!item.match && !item.original) return true; // Keep if no match found
-      
-      const matchText = item.match || item.original || '';
-      const matchLower = matchText.toLowerCase();
-      
-      // Check if this match is part of a collabglam email in the full content
-      // This handles cases like "jackery@mail" which is part of "jackery@mail.collabglam.com"
-      if (fullContent) {
-        const fullContentLower = fullContent.toLowerCase();
-        // Look for collabglam emails in the full content
-        const collabglamEmails = fullContentLower.match(/\b[a-z0-9._%+-]+@(?:mail\.)?collabglam\.com\b/g) || [];
-        
-        // Check if the match text is contained within any collabglam email
-        const isPartOfCollabglamEmail = collabglamEmails.some(collabglamEmail => {
-          return collabglamEmail.includes(matchLower) || matchLower.includes(collabglamEmail.split('@')[0]);
-        });
-        
-        if (isPartOfCollabglamEmail) {
-          console.log('[AI Gatekeeper] Allowing collabglam email (partial match):', matchText);
-          return false; // Filter out - it's part of a collabglam email
-        }
-      }
-      
-      // If it's an email type, check if it's collabglam
-      if (item.type === 'Email' || item.type === 'EMAIL') {
-        const emails = matchText.match(emailRegex) || [];
-        // Filter out if it's a collabglam email
-        const isCollabglam = emails.some(email => {
-          const emailLower = email.toLowerCase();
-          return emailLower.includes('@mail.collabglam.com') || emailLower.includes('@collabglam.com');
-        });
-        if (isCollabglam) {
-          console.log('[AI Gatekeeper] Allowing collabglam email from detected items:', matchText);
-          return false; // Filter out collabglam emails
-        }
-      }
-      
-      // Keep all non-email items and non-collabglam emails
-      return true;
-    });
-  };
-
-  // Filter out collabglam emails from detected items
-  const filteredDetectedItems = filterCollabglamEmails(gatekeeperResult.detectedItems || []);
-  
-  // Only block if there are still detected items after filtering (non-collabglam PII)
-  const shouldBlock = gatekeeperResult.aiGatekeeperDetector && filteredDetectedItems.length > 0;
-
   // Send
   const fromAliasPretty = thread.brandDisplayAlias || thread.brandAliasEmail;
   const relayAlias = thread.brandAliasEmail;
   const fromName = `${brand.name} via ${process.env.PLATFORM_NAME || "CollabGlam"}`;
 
-  if (shouldBlock) {
-    console.log('[AI Gatekeeper] Blocking email - non-collabglam PII detected:', {
-      originalDetectedCount: gatekeeperResult.detectedItems?.length || 0,
-      filteredDetectedCount: filteredDetectedItems.length,
-      filteredItems: filteredDetectedItems.map(item => ({ type: item.type, match: item.match || item.original }))
-    });
-    
-    // Construct reason for blocking
-    const reasonForBlocking = constructReasonForBlocking(filteredDetectedItems);
-    
-    // Send warning email to brand (sender)
-    await sendPIIWarningEmail({
-      toRealEmail: brand.email,
-      senderName: brand.name,
-      originalSubject: originalSubject,
-      originalBody: originalTextBody,
-      reasonForBlocking: reasonForBlocking,
-      role: "brand",
-      brandId: brand.brandId || String(brand._id),
-      influencerId: influencer?.influencerId || String(influencer?._id) || null,
-      fromProxyEmail: thread.brandAliasEmail,
-      toProxyEmail: thread.influencerAliasEmail,
-    });
-
-    // Don't save blocked message to EmailMessage - only warning email is saved
-    const err = new Error("gatekeeper detected");
-    err.statusCode = 400;
-    err.code = "PII_DETECTED";
-    throw err;
-  }
-
-  // No PII detected - send email normally
+  // Send sanitized version, but save original to DB
   const sesResult = await sendViaSES({
     fromAlias: fromAliasPretty,
     fromName,
@@ -2136,6 +1774,10 @@ async function sendCampaignInvitationInternal(payload = {}) {
     textBody: gatekeeperResult.textBody,
     replyTo: relayAlias,
     attachments: sesAttachments,
+    originalSubject,
+    originalHtmlBody,
+    originalTextBody,
+    aiGatekeeperDetector: gatekeeperResult.aiGatekeeperDetector,
   });
 
   // Save message
@@ -2149,7 +1791,7 @@ async function sendCampaignInvitationInternal(payload = {}) {
     }))
     : undefined;
 
-  // Save message to DB
+  // ✅ Save ORIGINAL content to DB (unfiltered), but mark if PII was detected
   const messageDoc = await EmailMessage.create({
     thread: thread._id,
     direction: "brand_to_influencer",
@@ -2160,14 +1802,14 @@ async function sendCampaignInvitationInternal(payload = {}) {
     fromRealEmail: brand.email,
     toRealEmail: recipientEmail,
     toProxyEmail: thread.influencerAliasEmail,
-    subject: originalSubject,
-    htmlBody: originalHtmlBody,
-    textBody: originalTextBody,
+    subject: originalSubject, // Original unfiltered
+    htmlBody: originalHtmlBody, // Original unfiltered
+    textBody: originalTextBody, // Original unfiltered
     template: null,
     attachments: attachmentMeta,
     sentAt: new Date(),
     messageId: sesResult?.MessageId || undefined,
-    aiGatekeeperDetector: false, // No PII detected
+    aiGatekeeperDetector: gatekeeperResult.aiGatekeeperDetector, // Flag if PII detected
   });
 
   thread.lastMessageAt = messageDoc.createdAt;
@@ -2444,149 +2086,5 @@ exports.getInfluencerEmailListForBrand = async (req, res) => {
   } catch (err) {
     console.error("getInfluencerEmailListForBrand (threads+messages) error:", err);
     return res.status(500).json({ error: "Internal server error" });
-  }
-};
-
-/**
- * GET /api/emails/warning-emails
- * Get all warning emails with brand and influencer names
- * Uses aggregation with $lookup since brandId/influencerId are strings (UUIDs)
- */
-exports.getAllWarningEmails = async (req, res) => {
-  try {
-    // Use aggregation with $lookup to join on string fields (brandId, influencerId)
-    // This is efficient - single query with joins, works with string UUIDs
-    const warningEmails = await WarningEmail.aggregate([
-      {
-        $sort: { createdAt: -1 }
-      },
-      {
-        $lookup: {
-          from: 'brands', // MongoDB collection name (usually pluralized)
-          localField: 'brandId',
-          foreignField: 'brandId',
-          as: 'brandInfo'
-        }
-      },
-      {
-        $lookup: {
-          from: 'influencers', // MongoDB collection name (usually pluralized)
-          localField: 'influencerId',
-          foreignField: 'influencerId',
-          as: 'influencerInfo'
-        }
-      },
-      {
-        $addFields: {
-          brandName: {
-            $ifNull: [{ $arrayElemAt: ['$brandInfo.name', 0] }, null]
-          },
-          influencerName: {
-            $ifNull: [{ $arrayElemAt: ['$influencerInfo.name', 0] }, null]
-          }
-        }
-      },
-      {
-        $project: {
-          brandInfo: 0,
-          influencerInfo: 0
-        }
-      }
-    ]);
-
-    return res.status(200).json({
-      success: true,
-      total: warningEmails.length,
-      warningEmails: warningEmails,
-    });
-  } catch (err) {
-    console.error("getAllWarningEmails error:", err);
-    return res.status(500).json({ 
-      success: false,
-      error: "Internal server error" 
-    });
-  }
-};
-
-/**
- * GET /api/emails/warning-emails/:id
- * Get single warning email by _id with brand and influencer names
- */
-exports.getWarningEmailById = async (req, res) => {
-  try {
-    const { id } = req.params;
-    
-    if (!id) {
-      return res.status(400).json({
-        success: false,
-        error: "Warning email ID is required"
-      });
-    }
-
-    // Use aggregation with $lookup to join brand and influencer
-    const warningEmails = await WarningEmail.aggregate([
-      {
-        $match: { _id: new mongoose.Types.ObjectId(id) }
-      },
-      {
-        $lookup: {
-          from: 'brands',
-          localField: 'brandId',
-          foreignField: 'brandId',
-          as: 'brandInfo'
-        }
-      },
-      {
-        $lookup: {
-          from: 'influencers',
-          localField: 'influencerId',
-          foreignField: 'influencerId',
-          as: 'influencerInfo'
-        }
-      },
-      {
-        $addFields: {
-          brandName: {
-            $ifNull: [{ $arrayElemAt: ['$brandInfo.name', 0] }, null]
-          },
-          influencerName: {
-            $ifNull: [{ $arrayElemAt: ['$influencerInfo.name', 0] }, null]
-          }
-        }
-      },
-      {
-        $project: {
-          brandInfo: 0,
-          influencerInfo: 0
-        }
-      }
-    ]);
-
-    if (!warningEmails || warningEmails.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: "Warning email not found"
-      });
-    }
-
-    return res.status(200).json({
-      success: true,
-      warningEmail: warningEmails[0],
-    });
-  } catch (err) {
-    console.error("getWarningEmailById error:", err);
-    
-    // Handle invalid ObjectId format
-    if (err.name === 'CastError' || err.message.includes('ObjectId')) {
-      return res.status(400).json({
-        success: false,
-        error: "Invalid warning email ID format"
-      });
-    }
-    
-    return res.status(500).json({ 
-      success: false,
-      error: "Internal server error" 
-    });
   }
 };

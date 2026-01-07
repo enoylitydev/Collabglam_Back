@@ -60,8 +60,4 @@ router.post(
 
 router.post("/brand/influencer-list", emailController.getInfluencerEmailListForBrand);
 
-// Warning emails listing
-router.get("/warning-emails", emailController.getAllWarningEmails);
-router.get("/warning-emails/:id", emailController.getWarningEmailById);
-
 module.exports = router;
