@@ -10,4 +10,7 @@ router.post('/verify', paymentController.verifyPayment);
 router.post('/milestone-order', paymentController.createMilestoneOrder);
 router.post('/milestone-verify', paymentController.verifyMilestonePayment);
 
+router.post('/payment-history', paymentController.getInvoicesByUserId);
+router.post('/generate-invoice', paymentController.previewInvoiceByInvoiceNumber);
+
 module.exports = router;

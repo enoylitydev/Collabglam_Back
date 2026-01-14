@@ -1,54 +1,66 @@
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 
 const paymentSchema = new mongoose.Schema({
-  orderId: { 
-    type: String, 
-    required: true, 
-    unique: true 
+  orderId: {
+    type: String,
+    required: true,
+    unique: true,
   },
-  paymentId: { 
-    type: String 
+  paymentId: {
+    type: String,
   },
-  signature: { 
-    type: String 
+  signature: {
+    type: String,
   },
-  amount: { 
-    type: Number, 
-    required: true 
+  amount: {
+    type: Number,
+    required: true,
   },
-  currency: { 
-    type: String, 
-    required: true, 
-    default: 'USD' 
+  currency: {
+    type: String,
+    required: true,
+    default: "USD",
   },
-  receipt: { 
-    type: String 
+  receipt: {
+    type: String,
   },
-  userId: { 
-    type: String, // Change this to String to support UUIDs
-    required: true 
+
+  userId: {
+    type: String,
+    required: true,
   },
-  role: { 
-    type: String, 
-    required: true, 
-    enum: ['Brand', 'Influencer'] 
+  role: {
+    type: String,
+    required: true,
+    enum: ["Brand", "Influencer"],
   },
-  planId: { 
-    type: String, // Change this to String to support UUIDs
-    required: true 
+
+  planId: {
+    type: String,
+    required: true,
   },
-  status: { 
-    type: String, 
-    enum: ['created', 'paid', 'failed'], 
-    default: 'created' 
+  planName: {
+    type: String,
+    default: "",
   },
-  createdAt: { 
-    type: Date, 
-    default: Date.now 
+
+  status: {
+    type: String,
+    enum: ["created", "paid", "failed"],
+    default: "created",
   },
-  paidAt: { 
-    type: Date 
-  }
+  createdAt: {
+    type: Date,
+    default: Date.now,
+  },
+  paidAt: {
+    type: Date,
+  },
+
+  invoiceNumber: { type: String },
+  invoiceFilePath: { type: String },
+  invoiceEmailTo: { type: String },
+  invoiceEmailSentAt: { type: Date },
 });
 
-module.exports = mongoose.model('Payment', paymentSchema);
+module.exports = mongoose.model("Payment", paymentSchema);

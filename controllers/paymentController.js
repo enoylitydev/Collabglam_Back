@@ -8,6 +8,11 @@ const Influencer = require("../models/influencer");
 const subscriptionHelper = require("../utils/subscriptionHelper");
 const MilestonePayment = require("../models/milestonePayment");
 
+// ✅ ADD THIS (your subscription plan model)
+const SubscriptionPlan = require("../models/subscription");
+
+const { sendPaymentSuccessEmailWithInvoice,generateInvoicePdfBuffer } = require("../emails/paymentEmailController");
+
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const clientUrl = (process.env.CAMPAIGN_BASE_URL || "https://collabglam.com").replace(/\/$/, "");
@@ -18,28 +23,33 @@ const milestoneSuccessPath =
 
 const roleToSuccessPath = (role) => (role === "Influencer" ? influencerSuccessPath : brandSuccessPath);
 
-/**
- * ✅ Protect against open-redirect:
- * - allow relative paths: "/brand/...."
- * - OR allow absolute URLs ONLY if they start with CLIENT_URL
- */
 function safeRedirectUrl(url, fallbackAbsoluteUrl) {
   try {
     if (!url) return fallbackAbsoluteUrl;
 
-    // relative path => join with clientUrl
     if (typeof url === "string" && url.startsWith("/")) {
       return `${clientUrl}${url}`;
     }
 
-    // absolute URL => allow only same origin as clientUrl
     const u = new URL(url);
     if (u.origin === clientUrl) return url;
 
-    // anything else => fallback
     return fallbackAbsoluteUrl;
   } catch {
     return fallbackAbsoluteUrl;
+  }
+}
+
+// ✅ helper to resolve plan name
+async function resolvePlanName({ planId, role, planName, name }) {
+  const direct = (planName || name || "").trim();
+  if (direct) return direct;
+
+  try {
+    const plan = await SubscriptionPlan.findOne({ planId, role });
+    return (plan?.displayName || plan?.name || "").trim();
+  } catch {
+    return "";
   }
 }
 
@@ -56,9 +66,13 @@ exports.createOrder = async (req, res) => {
       userId,
       role,
       planId,
-      planName,          // ✅ optional
-      successUrl,        // ✅ optional (frontend can send)
-      cancelUrl,         // ✅ optional (frontend can send)
+
+      // ✅ supports both keys
+      planName,
+      name,
+
+      successUrl,
+      cancelUrl,
     } = req.body;
 
     if (!userId || !role || !planId) {
@@ -123,12 +137,14 @@ exports.createOrder = async (req, res) => {
       return res.status(400).json({ success: false, message: "amount is required for paid plans" });
     }
 
+    // ✅ Fix plan name mismatch here
+    const finalPlanName = await resolvePlanName({ planId, role, planName, name });
+
     const receiptId = receipt || crypto.randomBytes(10).toString("hex");
 
     const defaultSuccess = `${clientUrl}${roleToSuccessPath(role)}?stripe_success=1&session_id={CHECKOUT_SESSION_ID}`;
     const defaultCancel = `${clientUrl}${roleToSuccessPath(role)}?stripe_cancel=1`;
 
-    // ✅ Use safe redirect URLs (frontend can override)
     const finalSuccessUrl = safeRedirectUrl(successUrl, defaultSuccess);
     const finalCancelUrl = safeRedirectUrl(cancelUrl, defaultCancel);
 
@@ -144,7 +160,7 @@ exports.createOrder = async (req, res) => {
             currency: stripeCurrency,
             product_data: {
               name: `CollabGlam - ${role} Plan`,
-              description: `PlanId: ${planId}`,
+              description: `Plan: ${finalPlanName || "Subscription"}`, // ✅ no planId
             },
             unit_amount: Math.round(amountNum * 100),
           },
@@ -156,7 +172,11 @@ exports.createOrder = async (req, res) => {
         userId: String(userId),
         role: String(role),
         planId: String(planId),
-        planName: String(planName || ""), // ✅ helpful for frontend
+
+        // ✅ keep both for compatibility
+        planName: String(finalPlanName || ""),
+        name: String(finalPlanName || ""),
+
         receipt: String(receiptId),
       },
       success_url: finalSuccessUrl,
@@ -171,6 +191,10 @@ exports.createOrder = async (req, res) => {
       userId,
       planId,
       role,
+
+      // ✅ store resolved plan name in DB
+      planName: finalPlanName || "",
+
       status: "created",
       createdAt: new Date(),
     });
@@ -198,9 +222,31 @@ exports.verifyPayment = async (req, res) => {
       return res.status(400).json({ success: false, message: "sessionId is required" });
     }
 
-    // ✅ idempotent: if already paid in DB, return success
     const existing = await Payment.findOne({ orderId: sessionId });
+
+    // idempotent
     if (existing?.status === "paid") {
+      if (!existing.invoiceEmailSentAt) {
+        try {
+          await sendPaymentSuccessEmailWithInvoice({
+            kind: "plan",
+            role: existing.role,
+            userId: existing.userId,
+            currency: existing.currency,
+            amountCents: existing.amount,
+            paidAt: existing.paidAt || new Date(),
+            planName: existing.planName,
+            invoiceNumber: existing.invoiceNumber || undefined,
+          });
+          await Payment.findOneAndUpdate(
+            { orderId: sessionId },
+            { invoiceEmailSentAt: new Date() }
+          );
+        } catch (e) {
+          console.error("Invoice email failed (already-paid):", e);
+        }
+      }
+
       return res.json({
         success: true,
         message: "Payment already verified",
@@ -220,24 +266,72 @@ exports.verifyPayment = async (req, res) => {
       });
     }
 
-    await Payment.findOneAndUpdate(
+    // ✅ plan name from metadata (supports both)
+    const metaPlanName = (session.metadata?.planName || session.metadata?.name || "").trim();
+
+    // ✅ if still missing, try DB or fetch from SubscriptionPlan
+    let finalPlanName = metaPlanName;
+    if (!finalPlanName && existing?.planName) finalPlanName = existing.planName;
+
+    if (!finalPlanName) {
+      finalPlanName = await resolvePlanName({
+        planId: session.metadata?.planId,
+        role: session.metadata?.role,
+        planName: "",
+        name: "",
+      });
+    }
+
+    const updated = await Payment.findOneAndUpdate(
       { orderId: sessionId },
       {
         paymentId: session.payment_intent || null,
         signature: null,
         status: "paid",
         paidAt: new Date(),
+
+        role: session.metadata?.role,
+        userId: session.metadata?.userId,
+        planId: session.metadata?.planId,
+        planName: finalPlanName || "",
       },
       { new: true }
     );
 
+    // ✅ send email + invoice
+    try {
+      const r = await sendPaymentSuccessEmailWithInvoice({
+        kind: "plan",
+        role: updated.role,
+        userId: updated.userId,
+        currency: updated.currency,
+        amountCents: updated.amount,
+        paidAt: updated.paidAt,
+        planName: updated.planName,
+        invoiceNumber: updated.invoiceNumber || undefined,
+      });
+
+      await Payment.findOneAndUpdate(
+        { orderId: sessionId },
+        {
+          invoiceNumber: r.invoiceNumber,
+          invoiceFilePath: r.invoiceFilePath,
+          invoiceEmailTo: r.recipientEmail,
+          invoiceEmailSentAt: new Date(),
+        },
+        { new: true }
+      );
+    } catch (e) {
+      console.error("Invoice email failed:", e);
+    }
+
     return res.json({
       success: true,
       message: "Payment verified successfully",
-      planId: session.metadata?.planId,
-      planName: session.metadata?.planName,
-      role: session.metadata?.role,
-      userId: session.metadata?.userId,
+      planId: updated.planId,
+      planName: updated.planName,
+      role: updated.role,
+      userId: updated.userId,
     });
   } catch (error) {
     console.error("Error in verifyPayment:", error);
@@ -245,10 +339,10 @@ exports.verifyPayment = async (req, res) => {
   }
 };
 
+
 /**
  * Create Stripe Checkout Session for milestone payment
  * route: /payment/milestone-order
- * ✅ accepts successUrl/cancelUrl from frontend
  */
 exports.createMilestoneOrder = async (req, res) => {
   try {
@@ -259,10 +353,10 @@ exports.createMilestoneOrder = async (req, res) => {
       brandId,
       influencerId,
       campaignId,
-      campaignName,       // ✅ NEW (optional)
+      campaignName,
       milestoneTitle,
-      successUrl,         // ✅ optional override from frontend
-      cancelUrl,          // ✅ optional override from frontend
+      successUrl,
+      cancelUrl,
     } = req.body;
 
     if (!amount || !brandId || !influencerId || !campaignId) {
@@ -288,20 +382,15 @@ exports.createMilestoneOrder = async (req, res) => {
     const receiptId = receipt || crypto.randomBytes(10).toString("hex");
     const stripeCurrency = String(currency).toLowerCase();
 
-    // ✅ fallback base path (NO query in env)
     const basePath = (milestoneSuccessPath || "/brand/active-campaign/active-inf").startsWith("/")
       ? milestoneSuccessPath
       : `/${milestoneSuccessPath}`;
 
-    // ✅ dynamic query
     const qs = `id=${encodeURIComponent(campaignId)}&name=${encodeURIComponent(campaignName || "")}`;
 
-    const defaultSuccessUrl =
-      `${clientUrl}${basePath}?${qs}&stripe_success=1&session_id={CHECKOUT_SESSION_ID}`;
-    const defaultCancelUrl =
-      `${clientUrl}${basePath}?${qs}&stripe_cancel=1`;
+    const defaultSuccessUrl = `${clientUrl}${basePath}?${qs}&stripe_success=1&session_id={CHECKOUT_SESSION_ID}`;
+    const defaultCancelUrl = `${clientUrl}${basePath}?${qs}&stripe_cancel=1`;
 
-    // ✅ allow frontend override, else fallback
     const finalSuccessUrl = safeRedirectUrl(successUrl, defaultSuccessUrl);
     const finalCancelUrl = safeRedirectUrl(cancelUrl, defaultCancelUrl);
 
@@ -328,7 +417,7 @@ exports.createMilestoneOrder = async (req, res) => {
         brandId: String(brandId),
         influencerId: String(influencerId),
         campaignId: String(campaignId),
-        campaignName: String(campaignName || ""), // ✅ save it too
+        campaignName: String(campaignName || ""),
         milestoneTitle: String(milestoneTitle || ""),
       },
       success_url: finalSuccessUrl,
@@ -343,6 +432,7 @@ exports.createMilestoneOrder = async (req, res) => {
       brandId,
       influencerId,
       campaignId,
+      campaignName: campaignName || "",
       milestoneTitle,
       status: "created",
       createdAt: new Date(),
@@ -375,14 +465,55 @@ exports.verifyMilestonePayment = async (req, res) => {
       });
     }
 
-    // ✅ idempotent: if already paid in DB, return success
     const existing = await MilestonePayment.findOne({ orderId: sessionId });
+
+    // ✅ idempotent: if already paid, only send invoice if not sent
     if (existing?.status === "paid") {
+      let emailAttempted = false;
+      let emailSent = Boolean(existing.invoiceEmailSentAt);
+
+      if (!emailSent) {
+        try {
+          emailAttempted = true;
+
+          // milestone payer is brand
+          const brand = await Brand.findOne({ brandId: existing.brandId });
+          if (brand?.email) {
+            const r = await sendPaymentSuccessEmailWithInvoice({
+              kind: "milestone",
+              toEmail: brand.email,
+              toName: brand.name || brand.brandName || "Brand",
+              currency: existing.currency,
+              amountCents: existing.amount,
+              paidAt: existing.paidAt || new Date(),
+              campaignId: existing.campaignId,
+              campaignName: existing.campaignName,
+              milestoneTitle: existing.milestoneTitle,
+              invoiceNumber: existing.invoiceNumber || undefined,
+            });
+
+            await MilestonePayment.findOneAndUpdate(
+              { orderId: sessionId },
+              {
+                invoiceNumber: r.invoiceNumber,
+                invoiceFilePath: r.invoiceFilePath,
+                invoiceEmailTo: r.recipientEmail,
+                invoiceEmailSentAt: new Date(),
+              }
+            );
+            emailSent = true;
+          }
+        } catch (e) {
+          console.error("Milestone invoice email failed (already-paid case):", e);
+        }
+      }
+
       return res.json({
         success: true,
         message: "Milestone payment already verified",
         payment: existing,
         metadata: {},
+        invoiceEmail: { attempted: emailAttempted, sent: emailSent },
       });
     }
 
@@ -403,6 +534,12 @@ exports.verifyMilestonePayment = async (req, res) => {
         signature: null,
         status: "paid",
         paidAt: new Date(),
+        // store metadata for invoice
+        campaignId: session.metadata?.campaignId,
+        campaignName: session.metadata?.campaignName,
+        milestoneTitle: session.metadata?.milestoneTitle,
+        brandId: session.metadata?.brandId,
+        influencerId: session.metadata?.influencerId,
       },
       { new: true }
     );
@@ -414,14 +551,238 @@ exports.verifyMilestonePayment = async (req, res) => {
       });
     }
 
+    // ✅ Send invoice email to Brand (payer)
+    let invoiceEmail = { attempted: false, sent: false };
+    try {
+      invoiceEmail.attempted = true;
+      const brand = await Brand.findOne({ brandId: paymentRecord.brandId });
+      if (brand?.email) {
+        const r = await sendPaymentSuccessEmailWithInvoice({
+          kind: "milestone",
+          toEmail: brand.email,
+          toName: brand.name || brand.brandName || "Brand",
+          currency: paymentRecord.currency,
+          amountCents: paymentRecord.amount,
+          paidAt: paymentRecord.paidAt,
+          campaignId: paymentRecord.campaignId,
+          campaignName: paymentRecord.campaignName,
+          milestoneTitle: paymentRecord.milestoneTitle,
+          invoiceNumber: paymentRecord.invoiceNumber || undefined,
+        });
+
+        await MilestonePayment.findOneAndUpdate(
+          { orderId: sessionId },
+          {
+            invoiceNumber: r.invoiceNumber,
+            invoiceFilePath: r.invoiceFilePath,
+            invoiceEmailTo: r.recipientEmail,
+            invoiceEmailSentAt: new Date(),
+          },
+          { new: true }
+        );
+
+        invoiceEmail.sent = true;
+      }
+    } catch (e) {
+      console.error("Milestone invoice email failed:", e);
+    }
+
     return res.json({
       success: true,
       message: "Milestone payment verified successfully",
       payment: paymentRecord,
       metadata: session.metadata || {},
+      invoiceEmail,
     });
   } catch (error) {
     console.error("Error in verifyMilestonePayment:", error);
     return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+
+exports.getInvoicesByUserId = async (req, res) => {
+  try {
+    const { userId, role } = req.body || {};
+
+    if (!userId || !role) {
+      return res.status(400).json({
+        success: false,
+        message: "userId and role are required",
+      });
+    }
+
+    if (!["Brand", "Influencer"].includes(String(role))) {
+      return res.status(400).json({
+        success: false,
+        message: 'role must be "Brand" or "Influencer"',
+      });
+    }
+
+    // 1) Plan invoices (Payment)
+    const planInvoices = await Payment.find({
+      userId: String(userId),
+      role: String(role),
+      status: "paid",
+      invoiceNumber: { $exists: true, $ne: "" },
+    })
+      .sort({ paidAt: -1, createdAt: -1 })
+      .select(
+        "orderId paymentId amount currency receipt userId role planName status createdAt paidAt invoiceNumber invoiceFilePath invoiceEmailTo invoiceEmailSentAt"
+      )
+      .lean();
+
+    // 2) Milestone invoices (payer is Brand only)
+    let milestoneInvoices = [];
+    if (String(role) === "Brand") {
+      milestoneInvoices = await MilestonePayment.find({
+        brandId: String(userId),
+        status: "paid",
+        invoiceNumber: { $exists: true, $ne: "" },
+      })
+        .sort({ paidAt: -1, createdAt: -1 })
+        .select(
+          "orderId paymentId amount currency receipt brandId influencerId campaignId campaignName milestoneTitle status createdAt paidAt invoiceNumber invoiceFilePath invoiceEmailTo invoiceEmailSentAt"
+        )
+        .lean();
+    }
+
+    return res.json({
+      success: true,
+      userId,
+      role,
+      invoices: {
+        plans: planInvoices,
+        milestones: milestoneInvoices,
+      },
+      counts: {
+        plans: planInvoices.length,
+        milestones: milestoneInvoices.length,
+        total: planInvoices.length + milestoneInvoices.length,
+      },
+    });
+  } catch (err) {
+    console.error("getInvoicesByUserId error:", err);
+    return res.status(500).json({ success: false, message: "Internal server error" });
+  }
+};
+
+
+/**
+ * ✅ Preview invoice PDF by invoiceNumber (INLINE only)
+ * route: POST /payment/invoices/preview
+ * body: { invoiceNumber }
+ */
+exports.previewInvoiceByInvoiceNumber = async (req, res) => {
+  try {
+    const { invoiceNumber } = req.body || {};
+
+    if (!invoiceNumber) {
+      return res.status(400).json({
+        success: false,
+        message: "invoiceNumber is required",
+      });
+    }
+
+    // 1) find record in Payment first
+    let record = await Payment.findOne({ invoiceNumber: String(invoiceNumber) }).lean();
+    let kind = "plan";
+
+    // 2) else in MilestonePayment
+    if (!record) {
+      record = await MilestonePayment.findOne({ invoiceNumber: String(invoiceNumber) }).lean();
+      kind = "milestone";
+    }
+
+    if (!record) {
+      return res.status(404).json({ success: false, message: "Invoice not found" });
+    }
+
+    // 3) resolve "Bill to"
+    const issuedAtStr = new Date(record.paidAt || record.createdAt || Date.now()).toDateString();
+
+    const fromName = process.env.INVOICE_FROM_NAME || "CollabGlam";
+    const fromEmail = process.env.INVOICE_FROM_EMAIL || "billing@collabglam.io";
+    const fromSite = process.env.INVOICE_FROM_WEBSITE || "https://collabglam.com";
+    const fromBlock = `${fromName}\n${fromEmail}\n${fromSite}`;
+
+    let toName = "Customer";
+    let toEmail = record.invoiceEmailTo || "";
+
+    if (kind === "plan") {
+      if (record.role === "Brand") {
+        const b = await Brand.findOne({ brandId: record.userId }).lean();
+        if (b) {
+          toName = b.name || b.brandName || "Brand";
+          toEmail = b.email || toEmail;
+        }
+      } else {
+        const i = await Influencer.findOne({ influencerId: record.userId }).lean();
+        if (i) {
+          toName = i.name || i.influencerName || "Influencer";
+          toEmail = i.email || toEmail;
+        }
+      }
+    } else {
+      const b = await Brand.findOne({ brandId: record.brandId }).lean();
+      if (b) {
+        toName = b.name || b.brandName || "Brand";
+        toEmail = b.email || toEmail;
+      }
+    }
+
+    const toBlock = `${toName}\n${toEmail || ""}`;
+
+    // 4) invoice items
+    const items =
+      kind === "milestone"
+        ? [
+            {
+              description: `Milestone Payment - ${record.milestoneTitle || "Milestone"}\nCampaign: ${
+                record.campaignName || ""
+              } (${record.campaignId || ""})`,
+              qty: 1,
+              unitPriceCents: Number(record.amount),
+              amountCents: Number(record.amount),
+            },
+          ]
+        : [
+            {
+              description: `CollabGlam - ${record.role} Subscription\nPlan: ${record.planName || "—"}`,
+              qty: 1,
+              unitPriceCents: Number(record.amount),
+              amountCents: Number(record.amount),
+            },
+          ];
+
+    const subtotalCents = Number(record.amount);
+    const totalCents = Number(record.amount);
+
+    const footerNote =
+      kind === "milestone"
+        ? "Milestone invoice (generated by invoiceNumber)."
+        : "Subscription invoice (generated by invoiceNumber).";
+
+    // 5) generate pdf buffer
+    const pdf = await generateInvoicePdfBuffer({
+      invoiceNumber: record.invoiceNumber,
+      issuedAt: issuedAtStr,
+      fromBlock,
+      toBlock,
+      currency: record.currency || "USD",
+      items,
+      subtotalCents,
+      totalCents,
+      footerNote,
+    });
+
+    // ✅ INLINE ONLY
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="${pdf.filename}"`);
+
+    return res.status(200).send(pdf.buffer);
+  } catch (err) {
+    console.error("previewInvoiceByInvoiceNumber error:", err);
+    return res.status(500).json({ success: false, message: "Internal server error" });
   }
 };

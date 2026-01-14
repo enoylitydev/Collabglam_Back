@@ -2,7 +2,8 @@ const express = require('express');
 const router = express.Router();
 const {login,getAllBrands,getList,getAllCampaigns,getBrandById,
     getByInfluencerId, getCampaignById,getCampaignsByBrandId,adminGetInfluencerById,
-    adminGetInfluencerList,adminAddYouTubeEmail,listMissingEmail,updateMissingEmail,checkMissingEmailByHandle
+    adminGetInfluencerList,adminAddYouTubeEmail,listMissingEmail,updateMissingEmail,checkMissingEmailByHandle,
+    getAllPayments
 } = require('../controllers/adminController');  
 
 
@@ -35,5 +36,7 @@ router.post('/addYouTubeEmail', adminAddYouTubeEmail);
 router.post('/listMissingEmail', listMissingEmail);
 router.post('/updateMissingEmail', updateMissingEmail);
 router.post('/checkstatus', checkMissingEmailByHandle);
+
+router.post('/getpayments', getAllPayments);
 
 module.exports = router;

@@ -6,6 +6,7 @@ const Influencer = require('../models/influencer'); // Assuming you have an Infl
 const Campaign = require('../models/campaign');
 const Milestone = require('../models/milestone'); // Assuming you have a Milestone model
 const Modash = require('../models/modash');
+const Payment = require('../models/payment');
 const escapeRegex = (s = '') => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 /**
  * POST /admin/login
@@ -17,6 +18,37 @@ const Invitation = require('../models/NewInvitations');
 const { _sendCampaignInvitationInternal } = require('../controllers/emailController');
 
 const { fetch, Agent } = require('undici');
+
+
+const { generateInvoicePdfBuffer } = require("../emails/paymentEmailController");
+
+function safeText(v) {
+  return String(v ?? "").trim();
+}
+
+function pickDisplayName(user, role, userId) {
+  return (
+    user?.name ||
+    user?.fullName ||
+    user?.brandName ||
+    user?.companyName ||
+    user?.influencerName ||
+    user?.username ||
+    `${role} (${userId})`
+  );
+}
+
+async function resolvePlanName({ planId, role, planName }) {
+  const direct = safeText(planName);
+  if (direct) return direct;
+
+  try {
+    const plan = await SubscriptionPlan.findOne({ planId, role }).lean();
+    return safeText(plan?.displayName || plan?.name || "");
+  } catch {
+    return "";
+  }
+}
 
 
 // --- YouTube API bits (extracted) ---
@@ -990,5 +1022,130 @@ exports.checkMissingEmailByHandle = async (req, res) => {
       status: 0,
       message: 'Internal server error while checking missing email.'
     });
+  }
+};
+
+
+exports.getAllPayments = async (req, res) => {
+  try {
+    // 1) Parse inputs
+    const page = Math.max(parseInt(req.body.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.body.limit, 10) || 10, 1), 100);
+    const search = (req.body.search || '').trim();
+    const sortBy = (req.body.sortBy || 'createdAt').trim();
+    const sortOrder = String(req.body.sortOrder || 'desc').toLowerCase();
+    
+    // Filters
+    const statusFilter = (req.body.status || '').trim(); // e.g., 'paid', 'created', 'failed'
+    const roleFilter = (req.body.role || '').trim();     // e.g., 'Brand', 'Influencer'
+
+    // 2) Build Query Filter
+    const filter = {};
+
+    // 2a) Exact Match Filters
+    if (statusFilter && statusFilter !== 'all') {
+      filter.status = statusFilter;
+    }
+    if (roleFilter && roleFilter !== 'all') {
+      filter.role = roleFilter; // Case sensitive based on model enum ["Brand", "Influencer"]
+    }
+
+    // 2b) Text Search (Order ID, Payment ID, Invoice Number, Invoice Email, Plan Name)
+    if (search) {
+      const re = new RegExp(escapeRegex(search), 'i');
+      filter.$or = [
+        { orderId: re },
+        { paymentId: re },
+        { invoiceNumber: re },
+        { invoiceEmailTo: re },
+        { planName: re },
+        { userId: re } // Allows searching by specific ID if known
+      ];
+    }
+
+    // 3) Count total documents
+    const total = await Payment.countDocuments(filter);
+
+    // 4) Validate Sort
+    const ALLOWED_SORT = ['amount', 'createdAt', 'paidAt', 'status', 'planName'];
+    const field = ALLOWED_SORT.includes(sortBy) ? sortBy : 'createdAt';
+    const dir = sortOrder === 'asc' ? 1 : -1;
+
+    // 5) Fetch Payments
+    const payments = await Payment.find(filter)
+      .sort({ [field]: dir })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean();
+
+    // 6) Enrich Data (Fetch Brand/Influencer Names)
+    //    We gather all IDs first to minimize DB calls
+    const brandIds = [];
+    const influencerIds = [];
+
+    payments.forEach(p => {
+      if (p.role === 'Brand' && p.userId) brandIds.push(p.userId);
+      if (p.role === 'Influencer' && p.userId) influencerIds.push(p.userId);
+    });
+
+    // Fetch details in parallel
+    const [brands, influencers] = await Promise.all([
+      Brand.find({ brandId: { $in: brandIds } }).select('brandId name brandName email').lean(),
+      Influencer.find({ influencerId: { $in: influencerIds } }).select('influencerId name influencerName email').lean()
+    ]);
+
+    // Create lookup maps
+    const brandMap = {};
+    brands.forEach(b => { 
+      brandMap[b.brandId] = b.name || b.brandName || b.email || 'Unknown Brand'; 
+    });
+
+    const influencerMap = {};
+    influencers.forEach(i => { 
+      influencerMap[i.influencerId] = i.name || i.influencerName || i.email || 'Unknown Influencer'; 
+    });
+
+    // 7) Format Response
+    const data = payments.map(p => {
+      let displayName = 'Unknown';
+      
+      if (p.role === 'Brand') {
+        displayName = brandMap[p.userId] || `Brand (${p.userId})`;
+      } else if (p.role === 'Influencer') {
+        displayName = influencerMap[p.userId] || `Influencer (${p.userId})`;
+      }
+
+      return {
+        _id: p._id,
+        orderId: p.orderId,
+        paymentId: p.paymentId || 'N/A',
+        amount: p.amount, // Note: usually in cents if using Stripe/Razorpay, clarify in frontend
+        currency: p.currency,
+        status: p.status,
+        planName: p.planName,
+        role: p.role,
+        userId: p.userId,
+        userName: displayName, // Enriched field
+        invoiceNumber: p.invoiceNumber || '-',
+        invoiceEmailTo: p.invoiceEmailTo || '-',
+        createdAt: p.createdAt,
+        paidAt: p.paidAt
+      };
+    });
+
+    // 8) Return Result
+    return res.status(200).json({
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit),
+      sortBy: field,
+      sortOrder: sortOrder,
+      payments: data
+    });
+
+  } catch (error) {
+    console.error('Error in getAllPayments:', error);
+    return res.status(500).json({ message: 'Internal server error' });
   }
 };
