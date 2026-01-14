@@ -1,3 +1,6 @@
+// ==============================
+// FILE: models/contract.js
+// ==============================
 "use strict";
 
 const mongoose = require("mongoose");
@@ -14,6 +17,9 @@ const LEGACY_STATUS = Object.freeze(Object.keys(LEGACY_STATUS_MAP));
 
 // Allow reading both canonical + legacy, but controllers/middleware must WRITE canonical
 const STATUS_ENUM = Object.freeze(Array.from(new Set([...CANONICAL_STATUS, ...LEGACY_STATUS])));
+
+// ✅ Workflow signers (CollabGlam signature is display-only)
+const WORKFLOW_SIGNERS = Object.freeze(["brand", "influencer"]);
 
 function normalizeStatus(status) {
   if (!status) return CONTRACT_STATUS.DRAFT;
@@ -53,13 +59,12 @@ const ExpandedDeliverableSchema = new mongoose.Schema(
     type: String,
     quantity: Number,
     format: String,
-    durationSec: Number, // for videos
+    durationSec: Number,
     postingWindow: { start: Date, end: Date },
     draftRequired: { type: Boolean, default: false },
     draftDueDate: Date,
     minLiveHours: Number,
 
-    // Spec-aligned fields
     liveRetentionMonths: Number,
     revisionRoundsIncluded: Number,
     additionalRevisionFee: Number,
@@ -70,11 +75,11 @@ const ExpandedDeliverableSchema = new mongoose.Schema(
     links: [String],
     disclosures: String,
 
-    // Legacy aliases (kept)
+    // Legacy aliases
     whitelisting: { type: Boolean, default: false },
     sparkAds: { type: Boolean, default: false },
 
-    // Canonical switches (optional, but supported by render layer)
+    // Canonical switches
     whitelistingEnabled: { type: Boolean, default: undefined },
     sparkAdsEnabled: { type: Boolean, default: undefined },
   },
@@ -180,8 +185,9 @@ const contractSchema = new mongoose.Schema({
   // Canonical status (writes should be canonical)
   status: { type: String, enum: STATUS_ENUM, default: CONTRACT_STATUS.DRAFT },
 
-  // Spec additions
   version: { type: Number, default: 0 },
+
+  // Keep collabglam in enum for backwards-compat reads, but we will NEVER expose it via flags
   awaitingRole: { type: String, enum: ["brand", "influencer", "collabglam"], default: null },
 
   acceptances: {
@@ -191,7 +197,8 @@ const contractSchema = new mongoose.Schema({
 
   editsLockedAt: { type: Date },
 
-  requiredSigners: { type: [String], default: () => ["brand", "influencer"] },
+  // ✅ Never require CollabGlam for workflow completion
+  requiredSigners: { type: [String], default: () => [...WORKFLOW_SIGNERS] },
 
   versions: { type: [VersionSchema], default: () => [] },
 
@@ -213,7 +220,7 @@ const contractSchema = new mongoose.Schema({
   milestonesCreatedAt: { type: Date },
   milestones: { type: [MilestoneSchema], default: () => [] },
 
-  // Back-compat acceptance fields (kept; synced with acceptances.* during writes)
+  // Back-compat acceptance fields
   confirmations: {
     brand: { type: ConfirmationSchema, default: () => ({ confirmed: false }) },
     influencer: { type: ConfirmationSchema, default: () => ({ confirmed: false }) },
@@ -233,7 +240,7 @@ const contractSchema = new mongoose.Schema({
     deliverablesExpanded: [ExpandedDeliverableSchema],
   },
 
-  // Influencer data (expanded to persist acceptance details)
+  // Influencer data
   influencer: {
     legalName: { type: String, default: "" },
     email: { type: String, default: "" },
@@ -248,7 +255,6 @@ const contractSchema = new mongoose.Schema({
     country: { type: String, default: "" },
     notes: { type: String, default: "" },
 
-    // existing fields
     shippingAddress: { type: String, default: "" },
     dataAccess: {
       insightsReadOnly: { type: Boolean, default: false },
@@ -264,7 +270,6 @@ const contractSchema = new mongoose.Schema({
     autoCalcs: { firstDraftDue: Date, tokensExpandedAt: { type: Date } },
   },
 
-  // Admin/System data
   admin: {
     governingLaw: { type: String, default: "California, United States" },
     arbitrationSeat: { type: String, default: "San Francisco, CA" },
@@ -282,17 +287,14 @@ const contractSchema = new mongoose.Schema({
     ],
   },
 
-  // Template + tokens
   templateVersion: { type: Number, default: 1 },
   templateTokensSnapshot: { type: Object, default: {} },
   renderedTextSnapshot: { type: String },
 
-  // Display preferences
   dateFormatShort: { type: String, default: "MMMM D, YYYY" },
   dateFormatLong: { type: String, default: "Do MMMM YYYY" },
   locale: { type: String, default: "en-US" },
 
-  // Effective date handling
   requestedEffectiveDate: { type: Date },
   requestedEffectiveDateTimezone: { type: String, default: "America/Los_Angeles" },
   effectiveDate: { type: Date },
@@ -300,38 +302,33 @@ const contractSchema = new mongoose.Schema({
   effectiveDateOverride: { type: Date },
   lockedAt: { type: Date },
 
-  // Signatures (tri-party supported)
+  // Signatures (CollabGlam block supported, but NOT a workflow signer)
   signatures: {
     brand: { type: SignatureSchema, default: () => ({}) },
     influencer: { type: SignatureSchema, default: () => ({}) },
     collabglam: { type: SignatureSchema, default: () => ({}) },
   },
 
-  // Edit tracking
   isEdit: { type: Boolean, default: false },
   isEditBy: { type: String, enum: ["brand", "influencer", "admin", "system", ""], default: "" },
   editedFields: [String],
   lastEdit: { type: LastEditSchema, default: () => ({ isEdit: false, by: "", fields: [] }) },
 
-  // Audit trail
   audit: [AuditEventSchema],
 
-  // Denorms
   brandName: { type: String },
   brandAddress: { type: String },
   influencerName: { type: String },
   influencerAddress: { type: String },
   influencerHandle: { type: String },
 
-  // Convenience fields
   lastSentAt: { type: Date },
   isAssigned: { type: Number, default: 0 },
-  isAccepted: { type: Number, default: 0 }, // legacy convenience
+  isAccepted: { type: Number, default: 0 },
   isRejected: { type: Number, default: 0 },
   feeAmount: { type: Number, default: 0 },
   currency: { type: String, default: "USD" },
 
-  // Resend lineage
   resendIteration: { type: Number, default: 0 },
   resendOf: { type: String },
   supersededBy: { type: String },
@@ -352,8 +349,6 @@ contractSchema.index({ awaitingRole: 1 });
 contractSchema.index({ "audit.at": -1 });
 contractSchema.index({ resendOf: 1 });
 contractSchema.index({ supersededBy: 1 });
-
-// Reminder worker query support
 contractSchema.index({ status: 1, awaitingRole: 1, "reminders.brand.dueAt": 1 });
 contractSchema.index({ status: 1, awaitingRole: 1, "reminders.influencer.dueAt": 1 });
 
@@ -364,14 +359,12 @@ contractSchema.pre("save", function preSave(next) {
     // 1) Normalize status (WRITE canonical)
     this.status = normalizeStatus(this.status);
 
-    // 2) Ensure requiredSigners always includes brand + influencer
-    if (!Array.isArray(this.requiredSigners) || this.requiredSigners.length === 0) {
-      this.requiredSigners = ["brand", "influencer"];
-    } else {
-      const set = new Set(this.requiredSigners.map(String));
-      set.add("brand");
-      set.add("influencer");
-      this.requiredSigners = Array.from(set);
+    // ✅ 2) Enforce workflow signers (CollabGlam is NEVER required)
+    this.requiredSigners = [...WORKFLOW_SIGNERS];
+
+    // ✅ 2b) Never persist awaitingRole as collabglam/unknown
+    if (!["brand", "influencer"].includes(this.awaitingRole || "")) {
+      this.awaitingRole = null;
     }
 
     // 3) Back-compat sync between acceptances and confirmations
@@ -386,7 +379,6 @@ contractSchema.pre("save", function preSave(next) {
     const bAcc = Boolean(this.acceptances?.brand?.accepted);
     const iAcc = Boolean(this.acceptances?.influencer?.accepted);
 
-    // If acceptances are set, ensure confirmations reflect them
     if (bAcc) {
       this.confirmations.brand = {
         ...(this.confirmations.brand || {}),
@@ -406,7 +398,6 @@ contractSchema.pre("save", function preSave(next) {
       if (this.acceptances.influencer.acceptedVersion == null) this.acceptances.influencer.acceptedVersion = currentVersion;
     }
 
-    // If confirmations are set (legacy writes), ensure acceptances reflect them
     if (bConf && !bAcc) {
       this.acceptances.brand = {
         ...(this.acceptances.brand || {}),
@@ -446,6 +437,7 @@ function computeStatusFlags(doc) {
   const st = normalizeStatus(doc?.status || CONTRACT_STATUS.DRAFT);
 
   const isDraft = st === CONTRACT_STATUS.DRAFT;
+
   const isSentLike = [
     CONTRACT_STATUS.BRAND_SENT_DRAFT,
     CONTRACT_STATUS.BRAND_EDITED,
@@ -458,19 +450,16 @@ function computeStatusFlags(doc) {
   ].includes(st);
 
   const isFinalized = st === CONTRACT_STATUS.READY_TO_SIGN;
-  const isSigning = st === CONTRACT_STATUS.READY_TO_SIGN; // signing happens inside READY_TO_SIGN
+  const isSigning = st === CONTRACT_STATUS.READY_TO_SIGN;
   const isLocked = [CONTRACT_STATUS.CONTRACT_SIGNED, CONTRACT_STATUS.MILESTONES_CREATED].includes(st) || Boolean(doc?.lockedAt);
 
   const rejected = st === CONTRACT_STATUS.REJECTED || doc?.isRejected === 1;
 
-  // "Viewed" is event-only now. For backward compatibility, treat viewed as:
-  // - anyone has viewed at least once OR beyond draft.
   const isViewed = Boolean(doc?.lastViewedAt?.brand || doc?.lastViewedAt?.influencer) || !isDraft;
 
   const brandAccepted = Boolean(doc?.acceptances?.brand?.accepted);
   const influencerAccepted = Boolean(doc?.acceptances?.influencer?.accepted);
 
-  // Back-compat names
   const brandConfirmed = Boolean(doc?.confirmations?.brand?.confirmed) || brandAccepted;
   const influencerConfirmed = Boolean(doc?.confirmations?.influencer?.confirmed) || influencerAccepted;
 
@@ -480,7 +469,8 @@ function computeStatusFlags(doc) {
 
   const readyToSign = st === CONTRACT_STATUS.READY_TO_SIGN && Boolean(doc?.editsLockedAt) && brandAcceptedOnCurrent && influencerAcceptedOnCurrent;
 
-  const req = Array.isArray(doc?.requiredSigners) && doc.requiredSigners.length ? doc.requiredSigners : ["brand", "influencer"];
+  // ✅ CollabGlam is never required for "signed completion"
+  const req = [...WORKFLOW_SIGNERS];
   const sigs = doc?.signatures || {};
   const fullySigned = req.every((r) => Boolean(sigs?.[r]?.signed));
 
@@ -515,10 +505,19 @@ function computeStatusFlags(doc) {
 
   const isResendChild = Boolean(doc?.resendIteration > 0 || doc?.resendOf);
 
+  // ✅ Never expose awaitingRole="collabglam"
+  const safeAwaitingRole = (() => {
+    if (isLocked || rejected) return null;
+    if (readyToSign) {
+      const next = req.find((r) => !sigs?.[r]?.signed) || null;
+      return next;
+    }
+    return ["brand", "influencer"].includes(doc?.awaitingRole || "") ? doc.awaitingRole : null;
+  })();
+
   return {
-    // Back-compat flags
     isDraft,
-    isSent: isSentLike, // legacy "sent" meaning "beyond draft"
+    isSent: isSentLike,
     isViewed,
     isNegotiation: [
       CONTRACT_STATUS.BRAND_SENT_DRAFT,
@@ -534,16 +533,14 @@ function computeStatusFlags(doc) {
 
     isBrandInitiate: !isDraft,
 
-    // Back-compat acceptance naming
     isBrandConfirmed: brandConfirmed,
     isInfluencerConfirm: influencerConfirmed,
 
-    // Spec-friendly
     statusCanonical: st,
-    awaitingRole: doc?.awaitingRole || null,
+    awaitingRole: safeAwaitingRole,
     version: v,
 
-    // signature completion based on requiredSigners
+    // ✅ based on workflow signers only
     isBothSigned: fullySigned,
 
     canEditBrandFields,
@@ -552,6 +549,9 @@ function computeStatusFlags(doc) {
     canSignInfluencer,
 
     isResendChild,
+
+    // ✅ compatibility flag (always false)
+    awaitingCollabglam: false,
   };
 }
 
@@ -568,7 +568,6 @@ contractSchema.set("toJSON", {
     const f = computeStatusFlags(doc);
     ret.statusFlags = f;
 
-    // Preserve legacy casing used elsewhere
     ret.isBrandInitiate = f.isBrandInitiate;
     ret.isInfluencerconfirm = f.isInfluencerConfirm;
     ret.isrejected = f.isRejected;
@@ -593,10 +592,13 @@ contractSchema.set("toJSON", {
     ret.isResend = f.isResendChild;
     ret.isresend = f.isResendChild;
 
-    // Helpful canonical mirrors for new UI/clients
+    // Helpful canonical mirrors
     ret.statusCanonical = f.statusCanonical;
     ret.awaitingRole = f.awaitingRole;
     ret.version = f.version;
+
+    // ✅ never show awaiting collabglam
+    ret.awaitingCollabglam = false;
 
     return ret;
   },
@@ -659,10 +661,7 @@ contractSchema.statics.isTimezoneSupported = function (key) {
 
 const Contract = mongoose.model("Contract", contractSchema);
 
-// Backward compatibility: keep Contract.STATUS as legacy list if any old code uses it
 Contract.STATUS = LEGACY_STATUS;
-
-// Also export canonical explicitly for new code
 Contract.CANONICAL_STATUS = CANONICAL_STATUS;
 Contract.STATUS_ENUM = STATUS_ENUM;
 Contract.normalizeStatus = normalizeStatus;

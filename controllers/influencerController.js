@@ -29,7 +29,7 @@ const { escapeRegExp } = require('../utils/searchTokens');
 
 const UUIDv4Regex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-const BASE_API_URL = process.env.INTERNAL_API_URL || 'http://localhost:5000';
+const BASE_API_URL = 'https://api.collabglam.com';
 const WELCOME_EMAIL_API_URL = `${BASE_API_URL}/emails/send-welcome`;
 
 /* ========================= SMTP / Mailer (brand-style) ========================= */
@@ -907,20 +907,23 @@ exports.saveQuickOnboarding = async (req, res) => {
       influencerId,
       email,
 
-      formats = [],
-      budgets = {},
-      projectLength = '',
-      capacity = '',
+      // step fields (do NOT default these)
+      formats,
+      budgets,
+      projectLength,
+      capacity,
 
       categoryId,
-      subcategories = [],
+      subcategories,
 
-      collabTypes = [],
-      allowlisting = false,
-      cadences = [],
+      collabTypes,
+      allowlisting,
+      cadences,
 
-      selectedPrompts = [],
-      promptAnswers = {}
+      selectedPrompts,
+      promptAnswers,
+
+      onboardingStepCompleted
     } = req.body;
 
     if (!influencerId && !email) {
@@ -934,47 +937,85 @@ exports.saveQuickOnboarding = async (req, res) => {
     const inf = await Influencer.findOne(query);
     if (!inf) return res.status(404).json({ message: 'Influencer not found' });
 
-    let budgetArr = [];
-    if (Array.isArray(budgets)) {
-      budgetArr = budgets;
-    } else if (budgets && typeof budgets === 'object') {
-      budgetArr = Object.entries(budgets).map(([format, range]) => ({ format, range }));
+    // Ensure onboarding object exists
+    if (!inf.onboarding) inf.onboarding = {};
+
+    // Build a patch object only from provided fields
+    const patch = {};
+
+    // Step 1
+    if (formats !== undefined) {
+      patch['onboarding.formats'] = Array.isArray(formats) ? formats : [];
     }
 
-    const { categoryId: catNumId, categoryName: catName } = await resolveCategoryBasics(categoryId);
-
-    const idx = await buildCategoryIndex();
-    let subLinks = normalizeCategories(subcategories, idx);
-
-    if (typeof catNumId === 'number') {
-      subLinks = subLinks.filter(s => s.categoryId === catNumId);
+    if (budgets !== undefined) {
+      let budgetArr = [];
+      if (Array.isArray(budgets)) {
+        budgetArr = budgets;
+      } else if (budgets && typeof budgets === 'object') {
+        budgetArr = Object.entries(budgets).map(([format, range]) => ({ format, range }));
+      }
+      patch['onboarding.budgets'] = budgetArr;
     }
 
-    const onboardingSubs = subLinks.map(s => ({
-      subcategoryId: s.subcategoryId,
-      subcategoryName: s.subcategoryName
-    }));
+    if (projectLength !== undefined) patch['onboarding.projectLength'] = projectLength || '';
+    if (capacity !== undefined) patch['onboarding.capacity'] = capacity || '';
 
-    inf.onboarding = {
-      formats: Array.isArray(formats) ? formats : [],
-      budgets: budgetArr,
-      projectLength,
-      capacity,
+    // Step 2
+    if (categoryId !== undefined) {
+      const { categoryId: catNumId, categoryName: catName } = await resolveCategoryBasics(categoryId);
 
-      categoryId: typeof catNumId === 'number' ? catNumId : undefined,
-      categoryName: catName || undefined,
+      patch['onboarding.categoryId'] = typeof catNumId === 'number' ? catNumId : undefined;
+      patch['onboarding.categoryName'] = catName || undefined;
 
-      subcategories: onboardingSubs,
+      // If subcategories are provided, normalize & store them
+      if (subcategories !== undefined) {
+        const idx = await buildCategoryIndex();
+        let subLinks = normalizeCategories(Array.isArray(subcategories) ? subcategories : [], idx);
 
-      collabTypes: Array.isArray(collabTypes) ? collabTypes : [],
-      allowlisting: !!allowlisting,
-      cadences: Array.isArray(cadences) ? cadences : [],
+        if (typeof catNumId === 'number') {
+          subLinks = subLinks.filter(s => s.categoryId === catNumId);
+        }
 
-      selectedPrompts: Array.isArray(selectedPrompts) ? selectedPrompts : [],
-      promptAnswers: normalizePromptAnswers(selectedPrompts, promptAnswers)
-    };
+        patch['onboarding.subcategories'] = subLinks.map(s => ({
+          subcategoryId: s.subcategoryId,
+          subcategoryName: s.subcategoryName
+        }));
+      }
+    } else if (subcategories !== undefined) {
+      // category not provided but subcategories provided (optional case)
+      const idx = await buildCategoryIndex();
+      const subLinks = normalizeCategories(Array.isArray(subcategories) ? subcategories : [], idx);
 
-    await inf.save();
+      patch['onboarding.subcategories'] = subLinks.map(s => ({
+        subcategoryId: s.subcategoryId,
+        subcategoryName: s.subcategoryName
+      }));
+    }
+
+    if (collabTypes !== undefined) patch['onboarding.collabTypes'] = Array.isArray(collabTypes) ? collabTypes : [];
+    if (allowlisting !== undefined) patch['onboarding.allowlisting'] = !!allowlisting;
+    if (cadences !== undefined) patch['onboarding.cadences'] = Array.isArray(cadences) ? cadences : [];
+
+    // Step 3
+    if (selectedPrompts !== undefined) patch['onboarding.selectedPrompts'] = Array.isArray(selectedPrompts) ? selectedPrompts : [];
+    if (promptAnswers !== undefined && selectedPrompts !== undefined) {
+      patch['onboarding.promptAnswers'] = normalizePromptAnswers(
+        Array.isArray(selectedPrompts) ? selectedPrompts : [],
+        promptAnswers || {}
+      );
+    } else if (promptAnswers !== undefined) {
+      // if they send promptAnswers alone, store raw-ish (or skip)
+      patch['onboarding.promptAnswers'] = promptAnswers || {};
+    }
+
+    if (onboardingStepCompleted !== undefined) {
+      patch['onboarding.onboardingStepCompleted'] = onboardingStepCompleted;
+    }
+
+    // Apply patch
+    await Influencer.updateOne(query, { $set: patch });
+
     return res.json({ message: 'Onboarding saved', influencerId: inf.influencerId });
   } catch (err) {
     console.error('saveQuickOnboarding error:', err);
@@ -1275,15 +1316,17 @@ exports.requestPasswordResetOtpInfluencer = async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ message: 'Email is required' });
 
+  const normalizedEmail = String(email).trim().toLowerCase();
+
   const influencer = await Influencer.findOne({
-    email: { $regex: `^${email.trim()}$`, $options: 'i' },
+    email: new RegExp(`^${normalizedEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
     name: { $exists: true, $ne: null },
-    password: { $exists: true, $ne: null }
+    password: { $exists: true, $ne: null },
   });
 
+  // ✅ Explicit response when not found
   if (!influencer) {
-    // keep message consistent with your brand controller if desired
-    return res.status(200).json({ message: 'Email not exist' });
+    return res.status(404).json({ message: 'Influencer does not exist with this email' });
   }
 
   const code = Math.floor(100000 + Math.random() * 900000).toString();
@@ -1311,7 +1354,7 @@ exports.requestPasswordResetOtpInfluencer = async (req, res) => {
     text,
   });
 
-  return res.status(200).json({ message: 'OTP has been sent.' });
+  return res.status(200).json({ message: 'OTP sent to your email' });
 };
 
 exports.verifyPasswordResetOtpInfluencer = async (req, res) => {
@@ -2142,6 +2185,62 @@ exports.verifyClaimEmailOtp = async (req, res) => {
     });
   } catch (err) {
     console.error('verifyClaimEmailOtp error:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+exports.getInfluencerOnboarding = async (req, res) => {
+  try {
+    const influencerId = req.influencer?.influencerId;
+    if (!influencerId) return res.status(401).json({ message: 'Unauthorized' });
+
+    const inf = await Influencer.findOne({ influencerId })
+      .select('onboarding.influencerTourSeen onboarding.influencerTourSeenAt')
+      .lean();
+
+    if (!inf) return res.status(404).json({ message: 'Influencer not found' });
+
+    const seen = Boolean(inf?.onboarding?.influencerTourSeen);
+
+    return res.status(200).json({
+      influencerTourSeen: seen,
+      influencerTourSeenAt: inf?.onboarding?.influencerTourSeenAt ?? null,
+    });
+  } catch (err) {
+    console.error('getInfluencerOnboarding error:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+exports.markInfluencerTourSeen = async (req, res) => {
+  try {
+    const influencerId = req.influencer?.influencerId;
+    if (!influencerId) return res.status(401).json({ message: 'Unauthorized' });
+
+    const now = new Date();
+
+    const result = await Influencer.updateOne(
+      { influencerId },
+      {
+        $set: {
+          'onboarding.influencerTourSeen': true,
+          'onboarding.influencerTourSeenAt': now,
+        },
+      }
+    );
+
+    // ✅ If token was valid but influencerId not found in DB
+    if (!result?.matchedCount) {
+      return res.status(404).json({ message: 'Influencer not found' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      influencerTourSeen: true,
+      influencerTourSeenAt: now,
+    });
+  } catch (err) {
+    console.error('markInfluencerTourSeen error:', err);
     return res.status(500).json({ message: 'Internal server error' });
   }
 };

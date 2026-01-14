@@ -26,6 +26,8 @@ const {
   getLiteById,
   requestClaimEmailOtp,
   verifyClaimEmailOtp,
+  getInfluencerOnboarding,
+  markInfluencerTourSeen,
 } = require('../controllers/influencerController');
 
 
@@ -78,6 +80,9 @@ router.post(
   verifyToken,
   verifyClaimEmailOtp
 );
+
+router.get('/onboarding', verifyToken, getInfluencerOnboarding);
+router.post('/onboarding/influencer-tour/seen', verifyToken, markInfluencerTourSeen);
 
 
 module.exports = router;

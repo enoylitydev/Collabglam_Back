@@ -56,7 +56,11 @@ const onboardingSchema = new mongoose.Schema(
     promptAnswers: {
       type: [{ group: String, prompt: String, answer: String }],
       default: []
-    }
+    },
+
+    influencerTourSeen: { type: Boolean, default: false },
+    influencerTourSeenAt: { type: Date, default: null },
+
   },
   { _id: false }
 );

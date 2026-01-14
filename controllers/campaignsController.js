@@ -1,10 +1,11 @@
+// controllers/campaign.js
 const mongoose = require('mongoose');
 const multer = require('multer');
 const { uploadToGridFS } = require('../utils/gridfs');
 
 const Campaign = require('../models/campaign');
 const Brand = require('../models/brand');
-const Category = require('../models/categories'); // categories collection with subcategories[]
+const Category = require('../models/categories');
 const ApplyCampaign = require('../models/applyCampaign');
 const Influencer = require('../models/influencer');
 const Contract = require('../models/contract');
@@ -12,7 +13,7 @@ const SubscriptionPlan = require('../models/subscription');
 const getFeature = require('../utils/getFeature');
 const Milestone = require('../models/milestone');
 const Country = require('../models/country');
-const Modash = require('../models/modash'); // adjust path if needed
+const Modash = require('../models/modash');
 const { CONTRACT_STATUS } = require("../constants/contract");
 
 // ✅ persisted notifications helper (creates DB row + emits via socket.io)
@@ -33,7 +34,6 @@ const DOC_MIMES = new Set([
 // ===============================
 //  Subscription / Quota helpers
 // ===============================
-
 async function ensureBrandQuota(brandId, featureKey, amount = 1) {
   if (!brandId) {
     throw new Error('brandId is required for quota checks');
@@ -129,6 +129,46 @@ const upload = multer({
 // ===============================
 //  Helpers
 // ===============================
+function activeAcceptedFilter() {
+  return {
+    isAccepted: 1,
+    isRejected: { $ne: 1 },
+    status: { $nin: [CONTRACT_STATUS.REJECTED, CONTRACT_STATUS.SUPERSEDED] },
+    $or: [
+      { supersededBy: { $exists: false } },
+      { supersededBy: null },
+      { supersededBy: "" }
+    ]
+  };
+}
+
+function activeAcceptedFilter2() {
+  return {
+    isAccepted: 1,
+    isRejected: { $ne: 1 },
+    status: {
+      $in: [CONTRACT_STATUS.CONTRACT_SIGNED, CONTRACT_STATUS.MILESTONES_CREATED],
+      $nin: [CONTRACT_STATUS.REJECTED, CONTRACT_STATUS.SUPERSEDED],
+    },
+    $or: [
+      { supersededBy: { $exists: false } },
+      { supersededBy: null },
+      { supersededBy: "" },
+    ],
+  };
+}
+
+function campaignIdFilter(campaignId) {
+  const id = String(campaignId);
+  const or = [{ campaignId: id }, { campaignsId: id }];
+
+  // optional robustness if some rows stored ObjectId
+  if (mongoose.Types.ObjectId.isValid(id)) {
+    or.push({ campaignId: new mongoose.Types.ObjectId(id) });
+  }
+  return { $or: or };
+}
+
 function computeIsActive(timeline) {
   if (!timeline || !timeline.endDate) return 1;
   const now = new Date();
@@ -252,6 +292,98 @@ async function findMatchingInfluencers({ subIds = [], catNumIds = [] }) {
 
   return influencers || [];
 }
+
+function addInfluencerOpenStatusGate(filter) {
+  filter.$and = filter.$and || [];
+  filter.$and.push({
+    $or: [{ campaignStatus: 'open' },
+    { campaignStatus: { $exists: false } }]
+  });
+  return filter;
+}
+
+// ✅ STATUS: closed removed
+const CAMPAIGN_STATUS = Object.freeze({
+  OPEN: "open",
+  PAUSED: "paused",
+});
+
+const ALLOWED_CAMPAIGN_STATUSES = new Set([
+  CAMPAIGN_STATUS.OPEN,
+  CAMPAIGN_STATUS.PAUSED,
+]);
+
+function normalizeStatus(v) {
+  return String(v || "").toLowerCase().trim();
+}
+
+exports.updateCampaignStatus = async (req, res) => {
+  try {
+    const { brandId, campaignId, status } = req.body || {};
+
+    if (!brandId) {
+      return res.status(400).json({ message: "brandId is required." });
+    }
+    if (!campaignId) {
+      return res.status(400).json({ message: "campaignId is required." });
+    }
+
+    const next = normalizeStatus(status);
+    if (!ALLOWED_CAMPAIGN_STATUSES.has(next)) {
+      return res.status(400).json({
+        message: "Invalid status. Use: open | paused",
+      });
+    }
+
+    // ✅ Robust: supports campaignsId / campaignId / ObjectId (via helper you already have)
+    const campaign = await Campaign.findOne({
+      brandId,
+      ...campaignIdFilter(campaignId),
+    });
+
+    if (!campaign) {
+      return res.status(404).json({ message: "Campaign not found." });
+    }
+
+    // ✅ Legacy cleanup: if DB has "closed", treat it as "paused"
+    const current = normalizeStatus(campaign.campaignStatus || CAMPAIGN_STATUS.OPEN);
+    if (current === "closed") {
+      campaign.campaignStatus = CAMPAIGN_STATUS.PAUSED;
+    }
+
+    // ✅ If opening, ensure timeline not ended
+    if (next === CAMPAIGN_STATUS.OPEN) {
+      const activeFlag = computeIsActive(campaign.timeline);
+      if (activeFlag === 0) {
+        return res.status(400).json({
+          message: "Campaign timeline ended. Extend endDate to reopen.",
+        });
+      }
+      // optional: clear pausedAt when opening
+      campaign.pausedAt = undefined;
+    }
+
+    // ✅ Update status (no closed / no isActive changes)
+    campaign.campaignStatus = next;
+    campaign.statusUpdatedAt = new Date();
+
+    if (next === CAMPAIGN_STATUS.PAUSED) {
+      campaign.pausedAt = new Date();
+    }
+
+    await campaign.save();
+
+    return res.json({
+      message: "Campaign status updated successfully.",
+      campaign,
+    });
+  } catch (error) {
+    console.error("Error in updateCampaignStatus:", error);
+    return res.status(500).json({
+      message: "Internal server error while updating campaign status.",
+    });
+  }
+};
 
 // ===============================
 //  CREATE CAMPAIGN
@@ -436,6 +568,10 @@ exports.createCampaign = (req, res) => {
         additionalNotes,
         isActive: isActiveFlag,
         isDraft: 0, // 🔹 mark as final campaign
+
+        // ✅ NEW: open by default
+        campaignStatus: 'open',
+        statusUpdatedAt: new Date(),
       };
 
       let campaignDoc;
@@ -615,6 +751,12 @@ exports.updateCampaign = (req, res) => {
       delete updates.interestId;
       delete updates.interestName;
 
+      // ✅ NEW: protect status fields (must use updateCampaignStatus)
+      delete updates.campaignStatus;
+      delete updates.statusUpdatedAt;
+      delete updates.pausedAt;
+      delete updates.closedAt;
+
       // targetAudience
       if (updates.targetAudience) {
         let ta = updates.targetAudience;
@@ -723,39 +865,79 @@ exports.deleteCampaign = async (req, res) => {
 // ===============================
 exports.getActiveCampaignsByBrand = async (req, res) => {
   try {
-    const { brandId, page = 1, limit = 10, search = '', sortBy = 'createdAt', sortOrder = 'desc' } = req.query;
+    const {
+      brandId,
+      page = 1,
+      limit = 10,
+      search = "",
+      sortBy = "createdAt",
+      sortOrder = "desc",
+    } = req.query;
 
-    if (!brandId) return res.status(400).json({ message: 'Query parameter brandId is required.' });
+    if (!brandId) {
+      return res.status(400).json({ message: "brandId is required." });
+    }
 
-    const filter = { brandId, isActive: 1 };
-    if (search) filter.$or = buildSearchOr(search);
+    // 1) get accepted campaign ids for this brand
+    const acceptedIds = await Contract.distinct("campaignId", {
+      brandId,
+      ...activeAcceptedFilter2(),
+    });
+
+    // Make lookup fast + safe (ObjectId vs string)
+    const acceptedSet = new Set(acceptedIds.map((id) => String(id)));
+    const now = new Date();
+    const startOfTodayUTC = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
+    );
+
+    // 2) active campaigns filter
+    const filter = {
+      brandId,
+      isActive: 1,
+      "timeline.endDate": { $gte: startOfTodayUTC }, // ✅ expired filter
+    };
+
+    if (search?.trim()) filter.$or = buildSearchOr(search.trim());
 
     const pageNum = Math.max(parseInt(page, 10), 1);
     const perPage = Math.max(parseInt(limit, 10), 1);
     const skip = (pageNum - 1) * perPage;
 
-    const sortDir = String(sortOrder).toLowerCase() === 'asc' ? 1 : -1;
+    const sortDir = String(sortOrder).toLowerCase() === "asc" ? 1 : -1;
     const sortObj = { [sortBy]: sortDir };
 
     const [campaigns, totalCount] = await Promise.all([
       Campaign.find(filter)
-        .select('-description') // ← exclude description
+        .select("-description")
         .sort(sortObj)
         .skip(skip)
         .limit(perPage)
         .lean(),
-      Campaign.countDocuments(filter)
+      Campaign.countDocuments(filter),
     ]);
 
+    // Add influencerWorking field
+    const campaignsWithFlag = campaigns.map((c) => ({
+      ...c,
+      influencerWorking: acceptedSet.has(String(c.campaignsId)),
+    }));
+
     return res.json({
-      data: campaigns,
-      pagination: { total: totalCount, page: pageNum, limit: perPage, totalPages: Math.ceil(totalCount / perPage) }
+      data: campaignsWithFlag,
+      pagination: {
+        total: totalCount,
+        page: pageNum,
+        limit: perPage,
+        totalPages: Math.ceil(totalCount / perPage),
+      },
     });
   } catch (error) {
-    console.error('Error in getActiveCampaignsByBrand:', error);
-    return res.status(500).json({ message: 'Internal server error while fetching active campaigns.' });
+    console.error("Error in getActiveCampaignsByBrand:", error);
+    return res.status(500).json({ message: "Internal server error." });
   }
 };
+
 
 // ===============================
 //  BRAND: PREVIOUS (INACTIVE) CAMPAIGNS (paginated)
@@ -803,7 +985,13 @@ exports.getActiveCampaignsByCategories = async (req, res) => {
     }
     subcategoryIds = subcategoryIds.map((s) => String(s));
 
-    const filter = { isActive: 1, 'categories.subcategoryId': { $in: subcategoryIds } };
+    // ✅ NEW: open only + exclude drafts (influencer side)
+    const filter = addInfluencerOpenStatusGate({
+      isActive: 1,
+      isDraft: { $ne: 1 },
+      'categories.subcategoryId': { $in: subcategoryIds }
+    });
+
     if (search && typeof search === 'string' && search.trim()) filter.$or = buildSearchOr(search.trim());
 
     const pageNum = Math.max(1, parseInt(page, 10));
@@ -922,9 +1110,10 @@ exports.getApprovedCampaignsByInfluencer = async (req, res) => {
   if (!influencerId) return res.status(400).json({ message: 'influencerId is required' });
 
   try {
+    // include status fields
     const contracts = await Contract.find(
       { influencerId, isAssigned: 1 },
-      'campaignId contractId isAccepted feeAmount'
+      'campaignId contractId isAccepted feeAmount status milestonesCreatedAt'
     ).lean();
 
     let campaignIds = contracts.map((c) => toStr(c.campaignId));
@@ -932,28 +1121,43 @@ exports.getApprovedCampaignsByInfluencer = async (req, res) => {
       return res.json({ meta: { total: 0, page: +page, limit: +limit, totalPages: 0 }, campaigns: [] });
     }
 
+    // must be applied
     const applyRecs = await ApplyCampaign.find(
       { campaignId: { $in: campaignIds }, 'applicants.influencerId': influencerId },
       'campaignId'
     ).lean();
+
     const appliedIds = new Set(applyRecs.map((r) => toStr(r.campaignId)));
     campaignIds = campaignIds.filter((id) => appliedIds.has(id));
-    if (!campaignIds.length) return res.json({ meta: { total: 0, page: +page, limit: +limit, totalPages: 0 }, campaigns: [] });
+    if (!campaignIds.length) {
+      return res.json({ meta: { total: 0, page: +page, limit: +limit, totalPages: 0 }, campaigns: [] });
+    }
 
+    // must have milestone
     const milestoneIds = await milestoneSetForInfluencer(influencerId, campaignIds);
     campaignIds = campaignIds.filter((id) => milestoneIds.has(id));
-    if (!campaignIds.length) return res.json({ meta: { total: 0, page: +page, limit: +limit, totalPages: 0 }, campaigns: [] });
+    if (!campaignIds.length) {
+      return res.json({ meta: { total: 0, page: +page, limit: +limit, totalPages: 0 }, campaigns: [] });
+    }
 
+    // maps
     const contractIdMap = new Map();
     const feeMap = new Map();
     const acceptedMap = new Map();
+    const statusMap = new Map();
+    const milestonesCreatedAtMap = new Map();
+
+    const allowedSet = new Set(campaignIds);
+
     contracts.forEach((c) => {
       const cid = toStr(c.campaignId);
-      if (campaignIds.includes(cid)) {
-        contractIdMap.set(cid, c.contractId);
-        feeMap.set(cid, c.feeAmount);
-        acceptedMap.set(cid, c.isAccepted === 1 ? 1 : 0);
-      }
+      if (!allowedSet.has(cid)) return;
+
+      contractIdMap.set(cid, c.contractId);
+      feeMap.set(cid, Number(c.feeAmount || 0));
+      acceptedMap.set(cid, c.isAccepted === 1 ? 1 : 0);
+      statusMap.set(cid, c.status || null);
+      milestonesCreatedAtMap.set(cid, c.milestonesCreatedAt || null);
     });
 
     const filter = { campaignsId: { $in: campaignIds }, isActive: 1 };
@@ -968,17 +1172,28 @@ exports.getApprovedCampaignsByInfluencer = async (req, res) => {
       Campaign.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limNum).lean()
     ]);
 
-    const campaigns = raw.map((c) => ({
-      ...c,
-      hasApplied: 1,
-      isContracted: 1,
-      isAccepted: acceptedMap.get(c.campaignsId) || 0,
-      hasMilestone: 1,
-      contractId: contractIdMap.get(c.campaignsId) || null,
-      feeAmount: feeMap.get(c.campaignsId) || 0
-    }));
+    const campaigns = raw.map((c) => {
+      const cid = toStr(c.campaignsId);
 
-    return res.json({ meta: { total, page: pageNum, limit: limNum, totalPages: Math.ceil(total / limNum) }, campaigns });
+      return {
+        ...c,
+        hasApplied: 1,
+        isContracted: 1,
+        isAccepted: acceptedMap.get(cid) || 0,
+        hasMilestone: 1,
+        contractId: contractIdMap.get(cid) || null,
+        feeAmount: feeMap.get(cid) || 0,
+
+        // ✅ requested: return CONTRACT_STATUS value
+        contractStatus: statusMap.get(cid) || null,
+        milestonesCreatedAt: milestonesCreatedAtMap.get(cid) || null,
+      };
+    });
+
+    return res.json({
+      meta: { total, page: pageNum, limit: limNum, totalPages: Math.ceil(total / limNum) },
+      campaigns
+    });
   } catch (err) {
     console.error('Error in getApprovedCampaignsByInfluencer:', err);
     return res.status(500).json({ message: 'Internal server error' });
@@ -1053,31 +1268,65 @@ exports.getAppliedCampaignsByInfluencer = async (req, res) => {
   }
 };
 
-// ===============================
-//  BRAND: ACCEPTED CAMPAIGNS
-// ===============================
 exports.getAcceptedCampaigns = async (req, res) => {
   const { brandId, search, page = 1, limit = 10 } = req.body;
-  if (!brandId) return res.status(400).json({ message: 'brandId is required' });
+  if (!brandId) return res.status(400).json({ message: "brandId is required" });
 
   try {
+    const FINAL_STATUSES = [
+      CONTRACT_STATUS.CONTRACT_SIGNED,
+      CONTRACT_STATUS.MILESTONES_CREATED,
+    ];
+
+    // ✅ get all FINAL contracts for this brand (latest-first)
     const contracts = await Contract.find(
-      { brandId, isAccepted: 1 },
-      'campaignId contractId influencerId feeAmount'
-    ).lean();
+      {
+        brandId: String(brandId),
+        isRejected: { $ne: 1 },
+        status: { $in: FINAL_STATUSES },
+        $or: [
+          { supersededBy: { $exists: false } },
+          { supersededBy: null },
+          { supersededBy: "" },
+        ],
+      },
+      "campaignId contractId influencerId feeAmount lastActionAt createdAt status"
+    )
+      .sort({ lastActionAt: -1, createdAt: -1 })
+      .lean();
 
-    const campaignIds = contracts.map((c) => c.campaignId);
-    if (campaignIds.length === 0) return res.status(200).json({ meta: { total: 0, page, limit, totalPages: 0 }, campaigns: [] });
+    const campaignIdsRaw = contracts.map((c) => String(c.campaignId));
+    const campaignIds = [...new Set(campaignIdsRaw)];
 
+    if (!campaignIds.length) {
+      return res.status(200).json({
+        meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 },
+        campaigns: [],
+      });
+    }
+
+    // ✅ map latest contract per campaign + count influencers per campaign
     const contractMap = new Map();
     const influencerMap = new Map();
     const feeMap = new Map();
-    contracts.forEach((c) => {
-      contractMap.set(c.campaignId, c.contractId);
-      influencerMap.set(c.campaignId, c.influencerId);
-      feeMap.set(c.campaignId, c.feeAmount);
-    });
+    const statusMap = new Map();
+    const signedCountByCampaign = new Map();
 
+    for (const c of contracts) {
+      const key = String(c.campaignId);
+
+      // keep latest (because sorted by lastActionAt/createdAt)
+      if (!contractMap.has(key)) {
+        contractMap.set(key, c.contractId || null);
+        influencerMap.set(key, c.influencerId || null);
+        feeMap.set(key, Number(c.feeAmount || 0));
+        statusMap.set(key, c.status || null);
+      }
+
+      signedCountByCampaign.set(key, (signedCountByCampaign.get(key) || 0) + 1);
+    }
+
+    // ✅ campaign query (by ids only)
     const filter = { campaignsId: { $in: campaignIds } };
     if (search?.trim()) filter.$or = buildSearchOr(search.trim());
 
@@ -1087,21 +1336,46 @@ exports.getAcceptedCampaigns = async (req, res) => {
 
     const [total, campaigns] = await Promise.all([
       Campaign.countDocuments(filter),
-      Campaign.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limNum).lean()
+      Campaign.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limNum)
+        .lean(),
     ]);
 
-    const annotated = campaigns.map((c) => ({
-      ...c,
-      contractId: contractMap.get(c.campaignsId),
-      influencerId: influencerMap.get(c.campaignsId),
-      feeAmount: feeMap.get(c.campaignsId),
-      isAccepted: 1
-    }));
+    const annotated = campaigns.map((camp) => {
+      const key = String(camp.campaignsId);
+      const totalAcceptedMembers = signedCountByCampaign.get(key) || 0;
 
-    return res.json({ meta: { total, page: pageNum, limit: limNum, totalPages: Math.ceil(total / limNum) }, campaigns: annotated });
+      // optional: keep your old reduced applicantCount logic
+      const reducedApplicantCount = Math.max(
+        0, (Number(camp.applicantCount) || 0));
+
+      return {
+        ...camp,
+        contractId: contractMap.get(key) || null,
+        influencerId: influencerMap.get(key) || null,
+        feeAmount: feeMap.get(key) || 0,
+        contractStatus: statusMap.get(key) || null,
+
+        isAccepted: 1, // keep for UI
+        totalAcceptedMembers,
+        applicantCount: reducedApplicantCount,
+      };
+    });
+
+    return res.json({
+      meta: {
+        total,
+        page: pageNum,
+        limit: limNum,
+        totalPages: Math.ceil(total / limNum),
+      },
+      campaigns: annotated,
+    });
   } catch (err) {
-    console.error('Error in getAcceptedCampaigns:', err);
-    return res.status(500).json({ message: 'Internal server error' });
+    console.error("Error in getAcceptedCampaigns:", err);
+    return res.status(500).json({ message: "Internal server error" });
   }
 };
 
@@ -1111,42 +1385,66 @@ exports.getAcceptedCampaigns = async (req, res) => {
 exports.getAcceptedInfluencers = async (req, res) => {
   const {
     campaignId,
-    search = '',
+    search = "",
     page = 1,
     limit = 10,
-    sortBy = 'createdAt',
-    order = 'desc'
+    sortBy = "createdAt",
+    order = "desc",
   } = req.body;
 
   if (!campaignId) {
-    return res.status(400).json({ message: 'campaignId is required' });
+    return res.status(400).json({ message: "campaignId is required" });
   }
 
   try {
-    const contracts = await Contract.find(
-      { campaignId, isAccepted: 1 },
-      'influencerId contractId feeAmount'
-    ).lean();
+    const FINAL_STATUSES = [
+      CONTRACT_STATUS.CONTRACT_SIGNED,
+      CONTRACT_STATUS.MILESTONES_CREATED,
+    ];
 
-    const influencerIds = contracts.map((c) => c.influencerId);
+    // ✅ FIX: contracts was missing — now defined
+    const contracts = await Contract.find(
+      {
+        ...campaignIdFilter(campaignId),
+        isRejected: { $ne: 1 },
+        status: { $in: FINAL_STATUSES },
+        $or: [
+          { supersededBy: { $exists: false } },
+          { supersededBy: null },
+          { supersededBy: "" },
+        ],
+      },
+      "influencerId contractId feeAmount lastActionAt createdAt status"
+    )
+      .sort({ lastActionAt: -1, createdAt: -1 })
+      .lean();
+
+    const influencerIds = contracts.map((c) => String(c.influencerId));
     if (!influencerIds.length) {
       return res.status(200).json({
-        meta: { total: 0, page, limit, totalPages: 0 },
-        influencers: []
+        meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 },
+        influencers: [],
       });
     }
 
+    // ✅ latest contract per influencer (sorted already)
     const contractMap = new Map();
     const feeMap = new Map();
-    contracts.forEach((c) => {
-      contractMap.set(String(c.influencerId), c.contractId);
-      feeMap.set(String(c.influencerId), c.feeAmount);
-    });
 
-    const filter = { influencerId: { $in: influencerIds } };
-    if (search && search.trim()) {
+    for (const c of contracts) {
+      const key = String(c.influencerId);
+      if (!contractMap.has(key)) {
+        contractMap.set(key, c.contractId || null);
+        feeMap.set(key, Number(c.feeAmount || 0));
+      }
+    }
+
+    // ✅ influencer filter
+    const filter = { influencerId: { $in: Array.from(contractMap.keys()) } };
+
+    if (search?.trim()) {
       const term = search.trim();
-      const regex = new RegExp(term, 'i');
+      const regex = new RegExp(term, "i");
       filter.$or = [{ name: regex }, { handle: regex }, { email: regex }];
     }
 
@@ -1155,80 +1453,71 @@ exports.getAcceptedInfluencers = async (req, res) => {
     const skip = (pageNum - 1) * limNum;
 
     const SORT_WHITELIST = {
-      createdAt: 'createdAt',
-      name: 'name',
-      followerCount: 'followerCount',
-      feeAmount: 'feeAmount'
+      createdAt: "createdAt",
+      name: "name",
+      followerCount: "followerCount",
+      feeAmount: "feeAmount",
     };
-    const sortField = SORT_WHITELIST[sortBy] || 'createdAt';
-    const sortDir = order === 'asc' ? 1 : -1;
-    const needPostSort = sortField === 'feeAmount';
+
+    const sortField = SORT_WHITELIST[sortBy] || "createdAt";
+    const sortDir = String(order).toLowerCase() === "asc" ? 1 : -1;
+    const needPostSort = sortField === "feeAmount";
     const mongoSort = needPostSort ? {} : { [sortField]: sortDir };
 
-    // 1️⃣ Fetch influencers (paged)
     const [total, rawInfluencers] = await Promise.all([
       Influencer.countDocuments(filter),
       Influencer.find(filter)
         .sort(mongoSort)
         .skip(skip)
         .limit(limNum)
-        .select('-passwordHash -__v')
-        .lean()
+        .select("-passwordHash -__v")
+        .lean(),
     ]);
 
     if (!rawInfluencers.length) {
       return res.json({
         meta: { total: 0, page: pageNum, limit: limNum, totalPages: 0 },
-        influencers: []
+        influencers: [],
       });
     }
 
-    // 2️⃣ Fetch Modash profiles for ONLY these paged influencers
     const pageInfluencerIds = rawInfluencers.map((i) => String(i.influencerId));
+
+    // ✅ modash profiles (handle + followers)
     const modashProfiles = await Modash.find(
       { influencerId: { $in: pageInfluencerIds } },
-      'influencerId username handle followers provider'
+      "influencerId username handle followers provider"
     ).lean();
 
-    // Group Modash docs by influencerId
     const modashByInfluencerId = new Map();
-    modashProfiles.forEach((m) => {
+    for (const m of modashProfiles) {
       const key = String(m.influencerId);
-      if (!modashByInfluencerId.has(key)) {
-        modashByInfluencerId.set(key, []);
-      }
+      if (!modashByInfluencerId.has(key)) modashByInfluencerId.set(key, []);
       modashByInfluencerId.get(key).push(m);
-    });
+    }
 
-    const ALLOWED_PROVIDERS = ['youtube', 'instagram', 'tiktok'];
+    const ALLOWED_PROVIDERS = ["youtube", "instagram", "tiktok"];
 
-    // Helper: pick "primary" Modash profile
     function pickPrimaryProfile(influencerDoc, profilesForInfluencer) {
       if (!Array.isArray(profilesForInfluencer) || profilesForInfluencer.length === 0) {
         return null;
       }
 
-      const primaryPlatform = (influencerDoc.primaryPlatform || '').toLowerCase();
-
+      const primaryPlatform = (influencerDoc.primaryPlatform || "").toLowerCase();
       if (ALLOWED_PROVIDERS.includes(primaryPlatform)) {
         const direct = profilesForInfluencer.find(
-          (p) => (p.provider || '').toLowerCase() === primaryPlatform
+          (p) => String(p.provider || "").toLowerCase() === primaryPlatform
         );
         if (direct) return direct;
       }
 
-      // Fallback → profile with highest followers
       return profilesForInfluencer.reduce((best, current) => {
-        if (!best) return current;
-        const bestFollowers =
-          typeof best.followers === 'number' ? best.followers : 0;
-        const currentFollowers =
-          typeof current.followers === 'number' ? current.followers : 0;
-        return currentFollowers > bestFollowers ? current : best;
+        const bestFollowers = Number(best?.followers || 0);
+        const curFollowers = Number(current?.followers || 0);
+        return curFollowers > bestFollowers ? current : best;
       }, null);
     }
 
-    // 3️⃣ Merge in contract info + **primary** social handle + **primary** audience size
     let influencers = rawInfluencers.map((inf) => {
       const key = String(inf.influencerId);
       const profiles = modashByInfluencerId.get(key) || [];
@@ -1240,25 +1529,24 @@ exports.getAcceptedInfluencers = async (req, res) => {
         null;
 
       const audienceSize =
-        primaryProfile && typeof primaryProfile.followers === 'number'
+        primaryProfile && typeof primaryProfile.followers === "number"
           ? primaryProfile.followers
-          : typeof inf.followerCount === 'number'
-          ? inf.followerCount
-          : 0;
+          : typeof inf.followerCount === "number"
+            ? inf.followerCount
+            : 0;
 
       return {
         ...inf,
         contractId: contractMap.get(key) || null,
         feeAmount: feeMap.get(key) || 0,
         isAccepted: 1,
-        socialHandle,        // handle of primary account
-        audienceSize,        // followers of primary account
+        socialHandle,
+        audienceSize,
         primaryPlatform: inf.primaryPlatform || null,
-        primaryProvider: primaryProfile ? primaryProfile.provider : null
+        primaryProvider: primaryProfile ? primaryProfile.provider : null,
       };
     });
 
-    // 4️⃣ Optional post-sort by feeAmount (unchanged)
     if (needPostSort) {
       influencers.sort((a, b) =>
         sortDir === 1 ? a.feeAmount - b.feeAmount : b.feeAmount - a.feeAmount
@@ -1270,25 +1558,24 @@ exports.getAcceptedInfluencers = async (req, res) => {
         total,
         page: pageNum,
         limit: limNum,
-        totalPages: Math.ceil(total / limNum)
+        totalPages: Math.ceil(total / limNum),
       },
-      influencers
+      influencers,
     });
   } catch (err) {
-    console.error('Error in getAcceptedInfluencers:', err);
-    return res
-      .status(500)
-      .json({ message: 'Internal server error' });
+    console.error("Error in getAcceptedInfluencers:", err);
+    return res.status(500).json({ message: "Internal server error" });
   }
 };
 
-
 exports.getContractedCampaignsByInfluencer = async (req, res) => {
   const { influencerId, search, page = 1, limit = 10 } = req.body;
-  if (!influencerId) return res.status(400).json({ message: "influencerId is required" });
+  if (!influencerId) {
+    return res.status(400).json({ message: "influencerId is required" });
+  }
 
   try {
-    // ✅ Canonical statuses (what your schema normalizes to)
+    // ✅ Contracted statuses (pre-milestone). We will ALSO exclude "signed + milestone exists"
     const CANONICAL_CONTRACTED = [
       CONTRACT_STATUS.BRAND_SENT_DRAFT,
       CONTRACT_STATUS.BRAND_EDITED,
@@ -1296,18 +1583,22 @@ exports.getContractedCampaignsByInfluencer = async (req, res) => {
       CONTRACT_STATUS.BRAND_ACCEPTED,
       CONTRACT_STATUS.INFLUENCER_ACCEPTED,
       CONTRACT_STATUS.READY_TO_SIGN,
-      CONTRACT_STATUS.CONTRACT_SIGNED,
-      CONTRACT_STATUS.MILESTONES_CREATED,
+      CONTRACT_STATUS.CONTRACT_SIGNED, // keep signed here, but will hide if milestone exists
     ];
 
-    // ✅ Optional: include legacy values for older rows that haven't been resaved/migrated
+    // ✅ Optional legacy values for older rows
     const LEGACY_CONTRACTED = ["sent", "viewed", "negotiation", "finalize", "signing", "locked"];
 
+    // ✅ Pull newest-first so Map keeps the newest per campaign
     const contracts = await Contract.find(
       {
         influencerId: String(influencerId),
         isRejected: { $ne: 1 },
-        status: { $in: Array.from(new Set([...CANONICAL_CONTRACTED, ...LEGACY_CONTRACTED])) },
+        status: {
+          $in: Array.from(new Set([...CANONICAL_CONTRACTED, ...LEGACY_CONTRACTED])),
+        },
+        // ✅ avoid superseded contract rows (if you use this field elsewhere)
+        $or: [{ supersededBy: { $exists: false } }, { supersededBy: null }, { supersededBy: "" }],
       },
       "campaignId contractId feeAmount isAccepted status lastActionAt createdAt"
     )
@@ -1315,44 +1606,119 @@ exports.getContractedCampaignsByInfluencer = async (req, res) => {
       .lean();
 
     if (!contracts.length) {
-      return res.json({ meta: { total: 0, page: +page, limit: +limit, totalPages: 0 }, campaigns: [] });
+      return res.json({
+        meta: { total: 0, page: +page, limit: +limit, totalPages: 0 },
+        campaigns: [],
+      });
     }
 
-    // Keep the newest contract per campaign
-    const contractByCampaign = new Map();
+    // ✅ Keep newest contract per campaignId
+    const contractByCampaignId = new Map();
     for (const c of contracts) {
-      const key = String(c.campaignId);
+      const key = String(c.campaignId || "");
       if (!key) continue;
-      if (!contractByCampaign.has(key)) {
-        contractByCampaign.set(key, {
+
+      if (!contractByCampaignId.has(key)) {
+        contractByCampaignId.set(key, {
           contractId: c.contractId || null,
           feeAmount: Number(c.feeAmount || 0),
           isAccepted: c.isAccepted === 1 ? 1 : 0,
-          status: c.status,
+          status: c.status || null,
+          campaignIdRaw: c.campaignId, // keep original for linking
         });
       }
     }
 
-    const campaignIds = Array.from(contractByCampaign.keys());
-    if (!campaignIds.length) {
-      return res.json({ meta: { total: 0, page: +page, limit: +limit, totalPages: 0 }, campaigns: [] });
+
+    let candidateCampaignIds = Array.from(contractByCampaignId.keys());
+    if (!candidateCampaignIds.length) {
+      return res.json({
+        meta: { total: 0, page: +page, limit: +limit, totalPages: 0 },
+        campaigns: [],
+      });
     }
 
-    // If some old contracts stored campaignId as ObjectId string, support both
+    // -------------------------------------------------------
+    // ✅ EXCLUDE: if milestone already exists for influencer+campaign
+    // Condition: (status is CONTRACT_SIGNED OR already milestones created) AND milestone exists
+    // Also: if status is MILESTONES_CREATED, never show here
+    // -------------------------------------------------------
+    const idsStr = candidateCampaignIds.map((x) => String(x));
+    const idsObj = idsStr
+      .filter((id) => mongoose.Types.ObjectId.isValid(id))
+      .map((id) => new mongoose.Types.ObjectId(id));
+
+    // milestoneHistory.campaignId might be stored as string OR ObjectId
+    const milestoneDocs = await Milestone.find(
+      {
+        milestoneHistory: {
+          $elemMatch: {
+            influencerId: String(influencerId),
+            campaignId: { $in: [...idsStr, ...idsObj] },
+          },
+        },
+      },
+      "milestoneHistory.campaignId milestoneHistory.influencerId"
+    ).lean();
+
+    const milestoneCampaignSet = new Set();
+    for (const d of milestoneDocs) {
+      for (const h of d.milestoneHistory || []) {
+        if (String(h.influencerId) === String(influencerId)) {
+          milestoneCampaignSet.add(String(h.campaignId));
+        }
+      }
+    }
+
+    // filter contracted list
+    for (const [campId, details] of contractByCampaignId.entries()) {
+      const st = details?.status;
+
+      // never show if already milestone status (defensive)
+      if (st === CONTRACT_STATUS.MILESTONES_CREATED) {
+        contractByCampaignId.delete(campId);
+        continue;
+      }
+
+      // hide if signed and milestone exists
+      const hasMilestone = milestoneCampaignSet.has(String(campId));
+      const isSigned = st === CONTRACT_STATUS.CONTRACT_SIGNED;
+
+      if (hasMilestone && isSigned) {
+        contractByCampaignId.delete(campId);
+      }
+    }
+
+    candidateCampaignIds = Array.from(contractByCampaignId.keys());
+    if (!candidateCampaignIds.length) {
+      return res.json({
+        meta: { total: 0, page: +page, limit: +limit, totalPages: 0 },
+        campaigns: [],
+      });
+    }
+
+    // -------------------------------------------------------
+    // ✅ Campaign query: support campaignsId (string/uuid) + _id (ObjectId)
+    // -------------------------------------------------------
     const uuidIds = [];
     const objIds = [];
-    for (const id of campaignIds) {
+
+    for (const id of candidateCampaignIds) {
       if (mongoose.Types.ObjectId.isValid(id) && String(new mongoose.Types.ObjectId(id)) === id) {
         objIds.push(new mongoose.Types.ObjectId(id));
       } else {
-        uuidIds.push(id);
+        uuidIds.push(String(id));
       }
     }
 
     let baseFilter;
-    if (uuidIds.length && objIds.length) baseFilter = { $or: [{ campaignsId: { $in: uuidIds } }, { _id: { $in: objIds } }] };
-    else if (uuidIds.length) baseFilter = { campaignsId: { $in: uuidIds } };
-    else baseFilter = { _id: { $in: objIds } };
+    if (uuidIds.length && objIds.length) {
+      baseFilter = { $or: [{ campaignsId: { $in: uuidIds } }, { _id: { $in: objIds } }] };
+    } else if (uuidIds.length) {
+      baseFilter = { campaignsId: { $in: uuidIds } };
+    } else {
+      baseFilter = { _id: { $in: objIds } };
+    }
 
     let filter = baseFilter;
     if (search?.trim()) {
@@ -1368,15 +1734,26 @@ exports.getContractedCampaignsByInfluencer = async (req, res) => {
       Campaign.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limNum).lean(),
     ]);
 
+    // -------------------------------------------------------
+    // ✅ Attach contract info
+    // Important: campaign key might be campaignsId (string) or _id (ObjectId)
+    // And contractByCampaignId keys are based on Contract.campaignId
+    // We'll try both ids to find matching contract record.
+    // -------------------------------------------------------
     const campaigns = rawCampaigns.map((c) => {
-      const key = String(c.campaignsId || c._id);
-      const details = contractByCampaign.get(key) || {};
+      const key1 = String(c.campaignsId || "");
+      const key2 = String(c._id || "");
+
+      const details = contractByCampaignId.get(key1) || contractByCampaignId.get(key2) || {};
+
+      const hasMilestone = milestoneCampaignSet.has(key1) || milestoneCampaignSet.has(key2);
+
       return {
         ...c,
         hasApplied: 1,
         isContracted: 1,
         isAccepted: details.isAccepted || 0,
-        hasMilestone: c.hasMilestone ?? 0,
+        hasMilestone: hasMilestone ? 1 : 0,
         contractId: details.contractId ?? null,
         feeAmount: details.feeAmount ?? 0,
         contractStatus: details.status ?? null,
@@ -1384,7 +1761,12 @@ exports.getContractedCampaignsByInfluencer = async (req, res) => {
     });
 
     return res.json({
-      meta: { total, page: pageNum, limit: limNum, totalPages: Math.ceil(total / limNum) },
+      meta: {
+        total,
+        page: pageNum,
+        limit: limNum,
+        totalPages: Math.ceil(total / limNum),
+      },
       campaigns,
     });
   } catch (err) {
@@ -1419,7 +1801,11 @@ exports.getCampaignsByFilter = async (req, res) => {
       sortOrder = 'desc'
     } = req.body;
 
-    const filter = {};
+    // ✅ NEW: open only + exclude drafts + active only (influencer side)
+    const filter = addInfluencerOpenStatusGate({
+      isActive: 1,
+      isDraft: { $ne: 1 }
+    });
 
     if (Array.isArray(subcategoryIds) && subcategoryIds.length) {
       filter['categories.subcategoryId'] = { $in: subcategoryIds.map(String) };
@@ -1831,5 +2217,407 @@ exports.getDraftCampaignByBrand = async (req, res) => {
     return res
       .status(500)
       .json({ message: "Internal server error while fetching draft." });
+  }
+};
+
+exports.getCampaignHistoryByBrand = async (req, res) => {
+  try {
+    const {
+      brandId,
+      page = 1,
+      limit = 10,
+      search = "",
+      sortBy = "createdAt",
+      sortOrder = "desc",
+      includeDescription = 1,
+
+      // ✅ ONLY filters allowed
+      campaignStatus,   // "open" | "paused"
+      timelineState,    // none|running|expired
+      goal,             // "Brand Awareness" | "Sales" | "Engagement"
+      minBudget,
+      maxBudget,
+    } = req.body || {};
+
+    if (!brandId) {
+      return res.status(400).json({ message: "brandId is required." });
+    }
+
+    // Base filter
+    const filter = { brandId };
+
+    // Always hide drafts (since drafts filter removed)
+    filter.isDraft = { $ne: 1 };
+
+    // -------------------------
+    // Search
+    // -------------------------
+    if (search && String(search).trim()) {
+      filter.$or = buildSearchOr(String(search).trim());
+    }
+
+    // -------------------------
+    // Campaign Status
+    // -------------------------
+    if (campaignStatus) {
+      const s = String(campaignStatus).toLowerCase().trim();
+      if (s === "open" || s === "paused") {
+        filter.campaignStatus = s;
+      }
+    }
+
+    // -------------------------
+    // Goal
+    // -------------------------
+    if (goal) {
+      // keep exact string match (as stored)
+      filter.goal = String(goal);
+    }
+
+    // -------------------------
+    // Budget
+    // -------------------------
+    const hasMin = minBudget !== undefined && minBudget !== null && String(minBudget).trim() !== "";
+    const hasMax = maxBudget !== undefined && maxBudget !== null && String(maxBudget).trim() !== "";
+
+    if (hasMin || hasMax) {
+      filter.budget = {};
+      if (hasMin) {
+        const v = Number(minBudget);
+        if (Number.isFinite(v)) filter.budget.$gte = v;
+      }
+      if (hasMax) {
+        const v = Number(maxBudget);
+        if (Number.isFinite(v)) filter.budget.$lte = v;
+      }
+      if (!Object.keys(filter.budget).length) delete filter.budget;
+    }
+
+    // -------------------------
+    // Timeline State (Mongo condition)
+    // allowed: none | running | expired
+    // running includes upcoming (startDate > now)
+    // -------------------------
+    const now = new Date();
+    const startOfTodayUTC = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+
+    if (timelineState) {
+      const state = String(timelineState).toLowerCase().trim();
+      filter.$and = filter.$and || [];
+
+      if (state === "none") {
+        filter.$and.push({
+          $and: [
+            { $or: [{ "timeline.startDate": { $exists: false } }, { "timeline.startDate": null }] },
+            { $or: [{ "timeline.endDate": { $exists: false } }, { "timeline.endDate": null }] },
+          ],
+        });
+      }
+
+      if (state === "expired") {
+        filter.$and.push({
+          "timeline.endDate": { $exists: true, $ne: null, $lt: startOfTodayUTC },
+        });
+      }
+
+      if (state === "running") {
+        // ✅ running = has timeline AND NOT expired
+        // includes: upcoming (startDate > now), and active now
+        filter.$and.push({
+          $and: [
+            // must have some timeline
+            {
+              $or: [
+                { "timeline.startDate": { $exists: true, $ne: null } },
+                { "timeline.endDate": { $exists: true, $ne: null } },
+              ],
+            },
+            // not expired: endDate is missing/null OR endDate >= today
+            {
+              $or: [
+                { "timeline.endDate": { $exists: false } },
+                { "timeline.endDate": null },
+                { "timeline.endDate": { $gte: startOfTodayUTC } },
+              ],
+            },
+          ],
+        });
+      }
+    }
+
+    // -------------------------
+    // Sorting + Pagination
+    // -------------------------
+    const SORT_WHITELIST = {
+      createdAt: "createdAt",
+      budget: "budget",
+      campaignStatus: "campaignStatus",
+      statusUpdatedAt: "statusUpdatedAt",
+      productOrServiceName: "productOrServiceName",
+      isActive: "isActive",
+    };
+
+    const sortField = SORT_WHITELIST[sortBy] || "createdAt";
+    const sortDir = String(sortOrder).toLowerCase() === "asc" ? 1 : -1;
+    const sortObj = { [sortField]: sortDir };
+
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const perPage = Math.max(parseInt(limit, 10) || 10, 1);
+    const skip = (pageNum - 1) * perPage;
+
+    const projection = Number(includeDescription) === 1 ? undefined : "-description";
+
+    const [rows, total] = await Promise.all([
+      Campaign.find(filter, projection).sort(sortObj).skip(skip).limit(perPage).lean(),
+      Campaign.countDocuments(filter),
+    ]);
+
+    // Influencer working (kept)
+    const idsOnPage = rows.map((c) => String(c.campaignsId || c._id));
+    const workingIds = await Contract.distinct("campaignId", {
+      brandId,
+      campaignId: { $in: idsOnPage },
+      ...activeAcceptedFilter(),
+    });
+    const workingSet = new Set(workingIds.map(String));
+
+    function getTimelineState(timeline) {
+      const tl = timeline || {};
+      const hasTL = !!(tl.startDate || tl.endDate);
+      if (!hasTL) return "none";
+
+      if (tl.endDate && new Date(tl.endDate) < startOfTodayUTC) return "expired";
+
+      return "running";
+    }
+
+    const data = rows.map((c) => {
+      const cid = String(c.campaignsId || "");
+      const oid = String(c._id || "");
+      const state = getTimelineState(c.timeline);
+
+      return {
+        ...c,
+        computedIsActive: computeIsActive(c.timeline),
+        timelineState: state,
+        hasTimeline: state !== "none",
+        influencerWorking: workingSet.has(cid) || workingSet.has(oid),
+      };
+    });
+
+    return res.json({
+      data,
+      pagination: {
+        total,
+        page: pageNum,
+        limit: perPage,
+        totalPages: Math.ceil(total / perPage),
+      },
+    });
+  } catch (error) {
+    console.error("Error in getCampaignHistoryByBrand:", error);
+    return res.status(500).json({
+      message: "Internal server error while fetching campaign history.",
+    });
+  }
+};
+
+exports.listApplicants = async (req, res) => {
+  const {
+    campaignId,
+    page = 1,
+    limit = 10,
+    search = "",
+    sortField = "createdAt",
+    sortOrder = 1, // 1=desc, 0=asc (matching your FE)
+    audienceBucket = "all", // ✅ NEW (K/M/all)
+  } = req.body || {};
+
+  if (!campaignId) return res.status(400).json({ message: "campaignId is required" });
+
+  try {
+    const record = await ApplyCampaign.findOne({ campaignId }).lean();
+    if (!record) {
+      return res.json({
+        meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 },
+        applicantCount: 0,
+        influencers: [],
+      });
+    }
+
+    const influencerIds = (record.applicants || [])
+      .map((a) => a?.influencerId)
+      .filter(Boolean)
+      .map(String);
+
+    if (!influencerIds.length) {
+      return res.json({
+        meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 },
+        applicantCount: record.applicants?.length || 0,
+        influencers: [],
+      });
+    }
+
+    // Pull influencers (no search here; we’ll do “smart search” after we compute handle/audience)
+    const influencersRaw = await Influencer.find(
+      { influencerId: { $in: influencerIds } },
+      "influencerId name primaryPlatform onboarding.categoryName onboarding.subcategories"
+    ).lean();
+
+    // Modash profiles (for handle + followers)
+    const modashProfiles = await Modash.find(
+      { influencerId: { $in: influencerIds } },
+      "influencerId provider handle username fullname followers"
+    ).lean();
+
+    const modashByInf = new Map();
+    for (const p of modashProfiles) {
+      const key = String(p.influencerId || "");
+      if (!key) continue;
+      if (!modashByInf.has(key)) modashByInf.set(key, []);
+      modashByInf.get(key).push(p);
+    }
+
+    function pickModashProfile(profiles = [], primaryPlatform) {
+      if (!profiles.length) return null;
+      if (primaryPlatform) {
+        const hit = profiles.find((p) => String(p.provider).toLowerCase() === String(primaryPlatform).toLowerCase());
+        if (hit) return hit;
+      }
+      return profiles.slice().sort((a, b) => (Number(b.followers) || 0) - (Number(a.followers) || 0))[0] || null;
+    }
+
+    // Contracts per influencer for this campaign
+    const contracts = await Contract.find(
+      { campaignId: String(campaignId), influencerId: { $in: influencerIds } },
+      "influencerId contractId feeAmount isAccepted isAssigned isRejected rejectedReason status"
+    ).lean();
+
+    const contractByInf = new Map();
+    for (const c of contracts) contractByInf.set(String(c.influencerId), c);
+
+    // Milestone exists per influencer for this campaign
+    const milestoneDocs = await Milestone.find(
+      {
+        milestoneHistory: {
+          $elemMatch: {
+            campaignId: String(campaignId),
+            influencerId: { $in: influencerIds },
+          },
+        },
+      },
+      "milestoneHistory"
+    ).lean();
+
+    const milestoneInfSet = new Set();
+    for (const doc of milestoneDocs) {
+      for (const h of doc.milestoneHistory || []) {
+        if (String(h.campaignId) === String(campaignId)) {
+          milestoneInfSet.add(String(h.influencerId));
+        }
+      }
+    }
+
+    // createdAt (ApplyCampaign doesn’t store per-applicant time, so keep record time)
+    const applicationCreatedAt = record.createdAt || record._id?.getTimestamp?.() || null;
+
+    // Build final rows
+    let rows = (influencersRaw || []).map((inf) => {
+      const infId = String(inf.influencerId);
+
+      const profiles = modashByInf.get(infId) || [];
+      const chosen = pickModashProfile(profiles, inf.primaryPlatform);
+
+      const audienceSize = profiles.reduce((sum, p) => sum + (Number(p?.followers) || 0), 0);
+
+      let handle = null;
+      if (chosen) handle = (chosen.handle || chosen.username || chosen.fullname || "").trim() || null;
+      if (handle && !handle.startsWith("@")) handle = "@" + handle;
+
+      const c = contractByInf.get(infId);
+
+      const isRejected = c?.isRejected === 1 ? 1 : 0;
+
+      return {
+        _id: inf._id || "",
+        influencerId: inf.influencerId,
+        name: inf.name || "",
+        handle,
+        categoryName: inf?.onboarding?.categoryName || "—",
+        audienceSize,
+        createdAt: applicationCreatedAt,
+
+        // ✅ statuses
+        isRejected,
+        rejectedReason: c?.rejectedReason || null,
+
+        // If rejected, force others off (prevents wrong badge)
+        isAssigned: isRejected ? 0 : (c?.isAssigned === 1 ? 1 : 0),
+        isAccepted: isRejected ? 0 : (c?.isAccepted === 1 ? 1 : 0),
+
+        isContracted: c ? 1 : 0,
+        contractId: c?.contractId || null,
+        hasMilestone: milestoneInfSet.has(infId) ? 1 : 0,
+      };
+
+    });
+
+    // ✅ Search (smart: supports name, handle, category)
+    const term = String(search || "").trim().toLowerCase();
+    if (term) {
+      rows = rows.filter((r) => {
+        const name = String(r.name || "").toLowerCase();
+        const handle = String(r.handle || "").toLowerCase();
+        const cat = String(r.categoryName || "").toLowerCase();
+        return name.includes(term) || handle.includes(term) || cat.includes(term);
+      });
+    }
+
+    // ✅ Audience bucket filter (K / M / all)
+    if (audienceBucket === "k") {
+      rows = rows.filter((r) => Number(r.audienceSize) >= 1000 && Number(r.audienceSize) < 1_000_000);
+    } else if (audienceBucket === "m") {
+      rows = rows.filter((r) => Number(r.audienceSize) >= 1_000_000);
+    }
+
+    // ✅ Sorting
+    const dir = sortOrder === 1 ? -1 : 1;
+    const allowed = new Set(["name", "handle", "categoryName", "audienceSize", "createdAt"]);
+    if (allowed.has(sortField)) {
+      rows.sort((a, b) => {
+        const av = a[sortField];
+        const bv = b[sortField];
+
+        if (sortField === "createdAt") {
+          const ta = av ? new Date(av).getTime() : 0;
+          const tb = bv ? new Date(bv).getTime() : 0;
+          return dir * (ta - tb);
+        }
+        if (sortField === "audienceSize") {
+          return dir * ((Number(av) || 0) - (Number(bv) || 0));
+        }
+        return dir * String(av ?? "").localeCompare(String(bv ?? ""));
+      });
+    }
+
+    // ✅ Pagination (after filters)
+    const pageNum = Math.max(1, parseInt(page, 10));
+    const limNum = Math.max(1, parseInt(limit, 10));
+    const start = (pageNum - 1) * limNum;
+    const paged = rows.slice(start, start + limNum);
+
+    return res.json({
+      meta: {
+        total: rows.length,
+        page: pageNum,
+        limit: limNum,
+        totalPages: Math.ceil(rows.length / limNum),
+      },
+      applicantCount: record.applicants?.length || 0, // keep actual applicants count
+      influencers: paged,
+    });
+  } catch (err) {
+    console.error("Error in listApplicants:", err);
+    return res.status(500).json({ message: "Internal server error" });
   }
 };

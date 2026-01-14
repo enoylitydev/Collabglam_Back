@@ -18,6 +18,8 @@ const {
   verifyEmailUpdate,
   getMetaOptions,
   uploadLogoMiddleware,
+  getOnboardingStatus,
+  markBrandTourSeen,
 } = require('../controllers/brandController');
 
 const { searchInfluencers } = require('../controllers/influencerController');
@@ -52,13 +54,16 @@ router.post(
   searchInfluencers
 );
 
-router.post('/update', verifyToken, updateProfile);
+router.post('/update', uploadLogoMiddleware, verifyToken, updateProfile);
 
 router.post('/requestEmailUpdate', verifyToken, requestEmailUpdate);
 
 router.post('/verifyEmailUpdate', verifyToken, verifyEmailUpdate);
 
 router.get('/metaOptions', getMetaOptions);
+
+router.get('/onboarding', verifyToken, getOnboardingStatus);
+router.post('/onboarding/brand-tour/seen', verifyToken, markBrandTourSeen);
 
 
 module.exports = router;

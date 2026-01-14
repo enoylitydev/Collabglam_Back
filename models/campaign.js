@@ -108,7 +108,7 @@ const campaignSchema = new mongoose.Schema({
   },
   timeline: {
     startDate: { type: Date },
-    endDate:   { type: Date }
+    endDate: { type: Date }
   },
   images: [{ type: String }],
   creativeBrief: [{ type: String }],
@@ -116,6 +116,15 @@ const campaignSchema = new mongoose.Schema({
     type: String,
     default: ''
   },
+
+  campaignStatus: {
+    type: String,
+    enum: ['open', 'paused'],
+    default: 'open',
+    index: true
+  },
+  statusUpdatedAt: { type: Date, default: Date.now },
+  pausedAt: { type: Date, default: null },
   isActive: {
     type: Number,
     enum: [0, 1],
@@ -131,10 +140,10 @@ const campaignSchema = new mongoose.Schema({
     default: 0
   },
   isDraft: {
-  type: Number,
-  enum: [0, 1],
-  default: 0 // 0 = normal, 1 = draft
-},
+    type: Number,
+    enum: [0, 1],
+    default: 0 // 0 = normal, 1 = draft
+  },
   createdAt: {
     type: Date,
     default: Date.now
@@ -144,6 +153,7 @@ const campaignSchema = new mongoose.Schema({
 // 🔧 Helpful indexes for this query pattern
 campaignSchema.index({ 'categories.subcategoryId': 1 });
 campaignSchema.index({ 'categories.categoryId': 1 });
+campaignSchema.index({ brandId: 1, isDraft: 1, isActive: 1, campaignStatus: 1, createdAt: -1 });
 
 /* Create & export model */
 const Campaign = mongoose.models.Campaign || mongoose.model('Campaign', campaignSchema);
