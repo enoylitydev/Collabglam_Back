@@ -372,7 +372,7 @@ function signaturePanelHTML(contract) {
         contract.other?.influencerProfile?.legalName || contract.influencerName || "—"
       )}`,
     },
-    { key: "collabglam", label: "CollabGlam: CollabGlam, Inc." },
+    { key: "collabglam", label: "CollabGlam: CollabGlam LLC" },
   ];
 
   const blocks = roles

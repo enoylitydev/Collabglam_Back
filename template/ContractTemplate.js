@@ -183,7 +183,7 @@ Name: {{Influencer.ContactName}}
 Title: ________________________
 Date: {{Agreement.EffectiveDate}}
 
-CollabGlam: CollabGlam, Inc.
+CollabGlam: CollabGlam LLC
 By: __________________________
 Name: {{CollabGlam.SignatoryName}}
 Title: ________________________
