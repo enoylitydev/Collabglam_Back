@@ -1384,6 +1384,283 @@ async function legacySearch(req, res) {
   }
 }
 
+
+function escapeRegex(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function influencerTierFromFollowers(followers) {
+  const f = Number(followers || 0);
+
+  if (f < 10_000) return { key: 'nano', label: 'Nano (0-10K)' };
+  if (f < 100_000) return { key: 'micro', label: 'Micro (10K-100K)' };
+  if (f < 500_000) return { key: 'mid', label: 'Mid (100K-500K)' };
+  if (f < 1_000_000) return { key: 'macro', label: 'Macro (500K-1M)' };
+  return { key: 'mega', label: 'Mega (1M+)' };
+}
+
+function groupCategories(categoryLinks) {
+  const links = Array.isArray(categoryLinks) ? categoryLinks : [];
+  const catMap = new Map(); // categoryId -> {categoryId, categoryName, subcategories:[]}
+
+  for (const c of links) {
+    if (!c) continue;
+
+    const categoryId = c.categoryId;
+    const categoryName = cleanStr(c.categoryName);
+
+    const subcategoryId = cleanStr(c.subcategoryId);
+    const subcategoryName = cleanStr(c.subcategoryName);
+
+    const key = String(categoryId ?? categoryName ?? '');
+    if (!key) continue;
+
+    if (!catMap.has(key)) {
+      catMap.set(key, {
+        categoryId: categoryId ?? null,
+        categoryName: categoryName || null,
+        subcategories: [],
+      });
+    }
+
+    if (subcategoryId || subcategoryName) {
+      const obj = catMap.get(key);
+      const exists = obj.subcategories.some((s) => String(s.subcategoryId) === String(subcategoryId));
+      if (!exists) {
+        obj.subcategories.push({
+          subcategoryId: subcategoryId || null,
+          subcategoryName: subcategoryName || null,
+        });
+      }
+    }
+  }
+
+  return Array.from(catMap.values());
+}
+
+async function getSavedInfluencers(req, res) {
+  try {
+    const provider = cleanStr(req.query.provider || req.query.platform || '').toLowerCase();
+    const q = cleanStr(req.query.q || '');
+    const influencerId = cleanStr(req.query.influencerId || req.query.influencer_id || '');
+
+    const page = Math.max(0, parseInt(req.query.page, 10) || 0);
+    const limitRaw = parseInt(req.query.limit, 10);
+    const limit = Math.min(100, Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 20));
+
+    const sortKey = cleanStr(req.query.sort || 'updatedAt').toLowerCase();
+    const dirParam = cleanStr(req.query.dir || 'desc').toLowerCase();
+    const dir = dirParam === 'asc' ? 1 : -1;
+
+    if (provider && !ALLOWED_PLATFORMS.has(provider)) {
+      return res.status(400).json({ error: 'provider must be instagram|tiktok|youtube' });
+    }
+
+    const filter = {};
+    if (provider) filter.provider = provider;
+    if (influencerId) filter.influencerId = influencerId;
+
+    if (q) {
+      const rx = new RegExp(escapeRegex(q), 'i');
+      filter.$or = [
+        { username: rx },
+        { fullname: rx },
+        { handle: rx },
+        { url: rx },
+        { userId: rx },
+        { influencerId: rx },
+      ];
+    }
+
+    // Keep list payload light (avoid providerRaw, posts, audience, etc.)
+    const projection = {
+      provider: 1,
+      userId: 1,
+      username: 1,
+      fullname: 1,
+      handle: 1,
+      url: 1,
+      picture: 1,
+
+      followers: 1,
+      engagements: 1,
+      engagementRate: 1,
+      averageViews: 1,
+
+      isVerified: 1,
+      isPrivate: 1,
+
+      country: 1,
+      state: 1,
+      city: 1,
+      gender: 1,
+      ageGroup: 1,
+      language: 1,
+
+      influencerId: 1,
+      influencer: 1,
+
+      createdAt: 1,
+      updatedAt: 1,
+    };
+
+    const sort = (() => {
+      if (sortKey === 'followers') return { followers: dir, updatedAt: -1 };
+      if (sortKey === 'createdat') return { createdAt: dir };
+      return { updatedAt: dir };
+    })();
+
+    const [results, total] = await Promise.all([
+      ModashProfile.find(filter)
+        .select(projection)
+        .sort(sort)
+        .skip(page * limit)
+        .limit(limit)
+        .lean(),
+      ModashProfile.countDocuments(filter),
+    ]);
+
+    return res.json({
+      page,
+      limit,
+      total,
+      results,
+    });
+  } catch (err) {
+    console.error('[getSavedInfluencers] Error:', err);
+    return res.status(500).json({ error: 'Internal error' });
+  }
+}
+
+async function getRandomInfluencers(req, res) {
+  try {
+    const limitRaw = parseInt(req.query.limit, 10);
+    const limit = Math.min(50, Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 10));
+
+    const provider = cleanStr(req.query.provider || req.query.platform || '').toLowerCase();
+    if (provider && !ALLOWED_PLATFORMS.has(provider)) {
+      return res.status(400).json({ error: 'provider must be instagram|tiktok|youtube' });
+    }
+
+    // optional filters
+    const minFollowers = Number.isFinite(Number(req.query.minFollowers)) ? Number(req.query.minFollowers) : undefined;
+    const maxFollowers = Number.isFinite(Number(req.query.maxFollowers)) ? Number(req.query.maxFollowers) : undefined;
+
+    // require linked to your Influencer (either influencer ObjectId or influencerId string)
+    const requireLinked = (cleanStr(req.query.requireLinked || '0') === '1');
+
+    // require categories to exist
+    const requireCategories = (cleanStr(req.query.requireCategories || '0') === '1');
+
+    const match = {};
+    if (provider) match.provider = provider;
+
+    if (minFollowers !== undefined || maxFollowers !== undefined) {
+      match.followers = {};
+      if (minFollowers !== undefined) match.followers.$gte = minFollowers;
+      if (maxFollowers !== undefined) match.followers.$lte = maxFollowers;
+    }
+
+    if (requireLinked) {
+      match.$or = [
+        { influencer: { $exists: true, $ne: null } },
+        { influencerId: { $exists: true, $ne: '' } },
+      ];
+    }
+
+    if (requireCategories) {
+      match['categories.0'] = { $exists: true };
+    }
+
+    const pipeline = [
+      { $match: match },
+      { $sample: { size: limit } },
+      {
+        $project: {
+          _id: 1,
+          influencer: 1,
+          influencerId: 1,
+          provider: 1,
+          userId: 1,
+
+          fullname: 1,
+          username: 1,
+          handle: 1,
+          url: 1,
+          picture: 1,
+
+          followers: 1,
+          engagementRate: 1,
+          engagements: 1,
+          averageViews: 1,
+
+          isVerified: 1,
+          isPrivate: 1,
+
+          country: 1,
+          state: 1,
+          city: 1,
+
+          categories: 1,
+          updatedAt: 1,
+        },
+      },
+    ];
+
+    const rows = await ModashProfile.aggregate(pipeline);
+
+    const results = rows.map((r) => {
+      const username = cleanStr(r.username).replace(/^@/, '');
+      const handle = cleanStr(r.handle || (username ? `@${username}` : ''));
+
+      const followers = Number(r.followers || 0);
+      const tier = influencerTierFromFollowers(followers);
+
+      return {
+        ids: {
+          modashId: String(r._id),
+          influencerObjectId: r.influencer ? String(r.influencer) : null,
+          influencerId: cleanStr(r.influencerId) || null,
+          userId: cleanStr(r.userId) || null,
+        },
+
+        name: cleanStr(r.fullname) || null,
+        username: username || null,
+        handle: handle || null,
+
+        platform: cleanStr(r.provider) || null,
+        followers,
+
+        tier, // {key,label}
+
+        categories: groupCategories(r.categories),
+
+        picture: cleanStr(r.picture) || null,
+        url: cleanStr(r.url) || null,
+        isVerified: !!r.isVerified,
+        isPrivate: !!r.isPrivate,
+
+        stats: {
+          engagementRate: (typeof r.engagementRate === 'number' ? r.engagementRate : null),
+          engagements: (typeof r.engagements === 'number' ? r.engagements : null),
+          averageViews: (typeof r.averageViews === 'number' ? r.averageViews : null),
+        },
+
+        location: {
+          country: cleanStr(r.country) || null,
+          state: cleanStr(r.state) || null,
+          city: cleanStr(r.city) || null,
+        },
+      };
+    });
+
+    return res.json({ count: results.length, results });
+  } catch (err) {
+    console.error('[getRandomInfluencers] Error:', err);
+    return res.status(500).json({ error: 'Internal error' });
+  }
+}
+
 /* -------------------------------------------------------------------------- */
 /*                                   Exports                                  */
 /* -------------------------------------------------------------------------- */
@@ -1402,4 +1679,6 @@ module.exports = {
   normalizeReportData,
   upsertModashProfileFromReport,
   findCachedReport,
+  getSavedInfluencers,
+  getRandomInfluencers,
 };

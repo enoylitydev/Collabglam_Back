@@ -13,5 +13,8 @@ router.get('/report', ModashController.frontendReport);
 router.post('/resolve-profile', ModashController.resolveProfile);
 router.post('/search-legacy', ModashController.search);
 
+router.get('/saved', ModashController.getSavedInfluencers);
+router.get('/random', ModashController.getRandomInfluencers);
+
 
 module.exports = router;

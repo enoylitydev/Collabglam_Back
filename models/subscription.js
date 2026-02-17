@@ -1,70 +1,87 @@
 // models/subscription.js
-const mongoose = require('mongoose');
-const { v4: uuidv4 } = require('uuid');
+const mongoose = require("mongoose");
+const { v4: uuidv4 } = require("uuid");
 
 const featureSchema = new mongoose.Schema(
   {
-    key:   { type: String, required: true },
+    key: { type: String, required: true, trim: true },
     value: { type: mongoose.Schema.Types.Mixed, required: true },
-    note:  { type: String } // optional human-readable hint
+    note: { type: String }, // optional human-readable hint
   },
   { _id: false }
 );
 
 const addOnSchema = new mongoose.Schema(
   {
-    key:      { type: String, required: true },
-    name:     { type: String, required: true },
-    type:     { type: String, enum: ['one_time', 'recurring'], default: 'one_time' },
-    price:    { type: Number, required: true, min: 0 },
-    currency: { type: String, default: 'USD' },
-    payload:  { type: mongoose.Schema.Types.Mixed }
+    key: { type: String, required: true, trim: true },
+    name: { type: String, required: true },
+    type: { type: String, enum: ["one_time", "recurring"], default: "one_time" },
+    price: { type: Number, required: true, min: 0 },
+    currency: { type: String, default: "USD" },
+    payload: { type: mongoose.Schema.Types.Mixed },
+  },
+  { _id: false }
+);
+
+const ctaSchema = new mongoose.Schema(
+  {
+    text: { type: String }, // e.g. "Start Pro", "Book a Call"
+    action: {
+      type: String,
+      enum: ["start", "upgrade", "book_call", "contact_sales"],
+      default: "start",
+    },
+    url: { type: String }, // optional deep link
   },
   { _id: false }
 );
 
 const subscriptionPlanSchema = new mongoose.Schema({
-  planId:   { type: String, required: true, unique: true, default: uuidv4 },
+  planId: { type: String, required: true, unique: true, default: uuidv4 },
 
-  /** Audience */
-  role:     { type: String, enum: ['Brand', 'Influencer'], required: true },
+  role: {
+    type: String,
+    enum: ["Brand", "Influencer", "Creator", "Agency"],
+    required: true,
+  },
 
-  /** Identifiers for UI */
-  name:        { type: String, required: true },      // slug (e.g., 'free', 'growth', 'creator_plus')
-  displayName: { type: String },                      // UI label (e.g., 'FREE', 'GROWTH', 'CREATOR PLUS')
-  label:       { type: String },                      // accent like 'Best Value'
+  name: { type: String, required: true, lowercase: true, trim: true },
+  displayName: { type: String },
+  label: { type: String },
 
-  /** Pricing */
-  monthlyCost:     { type: Number, required: true, min: 0 },
-  currency:        { type: String, default: 'USD' },
-  isCustomPricing: { type: Boolean, default: false },  // Enterprise-style plans
+  monthlyCost: { type: Number, required: true, min: 0 },
+  annualCost: { type: Number, min: 0 },
+  currency: { type: String, default: "USD" },
 
-  /** Descriptions */
-  overview:   { type: String },                       // short plan overview text
+  isCustomPricing: { type: Boolean, default: false },
+  isStartingAt: { type: Boolean, default: false },
+  annualBillingNote: {
+    type: String,
+    default: "discounted annual total (12 months)",
+  },
 
-  /** Feature catalogue – ONLY THIS FIELD */
-  features:   { type: [featureSchema], default: [] },
+  bestFor: { type: String },
+  mainOutcome: { type: String },
+  overview: { type: String },
 
-  /** Optional add-ons */
-  addons:     { type: [addOnSchema], default: [] },
+  cta: { type: ctaSchema, default: {} },
 
-  /** Billing & lifecycle flags */
-  autoRenew:  { type: Boolean, default: false },
-  status:     { type: String, enum: ['active', 'archived'], default: 'active' },
+  features: { type: [featureSchema], default: [] },
 
-  /** Cycle length (mins) – useful for local testing */
-  durationMins:    { type: Number, default: 43200 },     // 30 days
-  // optional extra duration fields – keep if you use them
+  addons: { type: [addOnSchema], default: [] },
+
+  autoRenew: { type: Boolean, default: false },
+  status: { type: String, enum: ["active", "archived"], default: "active" },
+
+  durationMins: { type: Number, default: 43200 },
   durationMinutes: { type: Number },
-  durationDays:    { type: Number },
+  durationDays: { type: Number },
 
-  /** Sorting in price table (lower first). Enterprise kept last with a higher number */
-  sortOrder:  { type: Number, default: 100 },
+  sortOrder: { type: Number, default: 100 },
 
-  createdAt:  { type: Date, default: Date.now }
+  createdAt: { type: Date, default: Date.now },
 });
 
-// Guard: unique per (role, name)
 subscriptionPlanSchema.index({ role: 1, name: 1 }, { unique: true });
 
-module.exports = mongoose.model('SubscriptionPlan', subscriptionPlanSchema);
+module.exports = mongoose.model("SubscriptionPlan", subscriptionPlanSchema);
