@@ -15,7 +15,7 @@ function normalizeUrl(u) {
   if (!s) return undefined;
   return /^https?:\/\//i.test(s) ? s : `https://${s}`;
 }
-const DEFAULT_FREE_PLAN_ID = 'e5f81ea2-ebb7-471c-be89-6d8a0f7d8fc4';
+const DEFAULT_FREE_PLAN_ID = 'dcd11cf7-50ca-4891-ae15-5045080f72fe';
 
 const subscriptionFeatureSchema = new mongoose.Schema(
   {

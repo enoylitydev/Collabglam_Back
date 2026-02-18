@@ -14,5 +14,6 @@ router.post('/delete', ctrl.deletePlan);
 router.post('/assign', ctrl.assignPlan);
 router.post('/renew',  ctrl.renewPlan);
 router.post('/me',     ctrl.getMyPlan);
+router.post("/check-brand", ctrl.checkBrandPlanChange);
 
 module.exports = router;

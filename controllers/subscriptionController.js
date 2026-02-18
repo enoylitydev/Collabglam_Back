@@ -1,4 +1,5 @@
 // controllers/subscriptionController.js
+
 const SubscriptionPlan = require("../models/subscription");
 const Brand = require("../models/brand");
 const Influencer = require("../models/influencer");
@@ -12,6 +13,35 @@ function featureValueToLimit(value) {
   if (typeof value === "number") return value;
   if (value && typeof value === "object" && value.unlimited === true) return -1;
   return 0;
+}
+
+/**
+ * HIDE THESE FROM ANY "GET PLANS" RESPONSE
+ * Brand: marketplace_fee_percent
+ * Influencer: platform_fee_on_payouts_percent
+ */
+const HIDDEN_FEATURE_KEYS = new Set([
+  "marketplace_fee_percent",
+  "platform_fee_on_payouts_percent",
+]);
+
+function sanitizePlanForResponse(plan) {
+  if (!plan || typeof plan !== "object") return plan;
+
+  const out = { ...plan };
+
+  if (Array.isArray(plan.features)) {
+    out.features = plan.features.filter(
+      (f) => f && typeof f === "object" && !HIDDEN_FEATURE_KEYS.has(f.key)
+    );
+  }
+
+  return out;
+}
+
+function sanitizePlansForResponse(plans) {
+  if (!Array.isArray(plans)) return [];
+  return plans.map(sanitizePlanForResponse);
 }
 
 // POST /subscription-plans/create
@@ -120,7 +150,10 @@ exports.getPlans = async (req, res) => {
       .sort({ sortOrder: 1, monthlyCost: 1 })
       .lean();
 
-    return res.status(200).json({ message: "Plans retrieved", plans });
+    // Hide fee features in response
+    const safePlans = sanitizePlansForResponse(plans);
+
+    return res.status(200).json({ message: "Plans retrieved", plans: safePlans });
   } catch (err) {
     console.error("getPlans error:", err);
     return res.status(500).json({ message: "Internal server error" });
@@ -136,7 +169,10 @@ exports.getPlanById = async (req, res) => {
     const plan = await SubscriptionPlan.findOne({ planId: id }).lean();
     if (!plan) return res.status(404).json({ message: "Plan not found" });
 
-    return res.status(200).json({ message: "Plan retrieved", plan });
+    // Hide fee features in response
+    const safePlan = sanitizePlanForResponse(plan);
+
+    return res.status(200).json({ message: "Plan retrieved", plan: safePlan });
   } catch (err) {
     console.error("getPlanById error:", err);
     return res.status(500).json({ message: "Internal server error" });
@@ -225,9 +261,6 @@ exports.assignPlan = async (req, res) => {
     const expire = subscriptionHelper.computeExpiry(plan);
 
     // Snapshot for usage tracking:
-    // numeric => limit=number
-    // unlimited => limit=-1
-    // other => limit=0
     const featureSnapshot = (plan.features || []).map((f) => ({
       key: f.key,
       limit: featureValueToLimit(f.value),
@@ -303,7 +336,10 @@ exports.renewPlan = async (req, res) => {
     if (!plan) return res.status(404).json({ message: "Plan not found" });
 
     const now = new Date();
-    const newExpires = subscriptionHelper.computeExpiry(plan, user.subscription.expiresAt);
+    const newExpires = subscriptionHelper.computeExpiry(
+      plan,
+      user.subscription.expiresAt
+    );
 
     user.subscription.startedAt = now;
     user.subscription.expiresAt = newExpires;
@@ -352,15 +388,149 @@ exports.getMyPlan = async (req, res) => {
       ? await SubscriptionPlan.findOne({ planId: sub.planId }).lean()
       : null;
 
+    // Hide fee features in response
+    const safePlanDoc = planDoc ? sanitizePlanForResponse(planDoc) : null;
+
     return res.json({
       message: "Current subscription fetched",
-      plan: planDoc, // full plan metadata
+      plan: safePlanDoc, // full plan metadata (with hidden fee features removed)
       startedAt: sub.startedAt || null,
       expiresAt: sub.expiresAt || null,
       expired: !!user.subscriptionExpired,
     });
   } catch (err) {
     console.error("getMyPlan error:", err);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};
+
+function normalizedMonthlyCost(plan) {
+  if (!plan) return 0;
+
+  // Treat custom pricing as highest tier (so it always counts as "higher")
+  if (plan.isCustomPricing) return Number.MAX_SAFE_INTEGER;
+
+  if (typeof plan.monthlyCost === "number") return plan.monthlyCost;
+
+  // fallback: if only annual exists
+  if (typeof plan.annualCost === "number") return plan.annualCost / 12;
+
+  return 0;
+}
+
+exports.checkBrandPlanChange = async (req, res) => {
+  try {
+    const { brandId, planId } = req.body || {};
+
+    if (!brandId || !planId) {
+      return res.status(400).json({ message: "brandId & planId are required" });
+    }
+
+    const brand = await Brand.findOne({ brandId }).lean();
+    if (!brand) return res.status(404).json({ message: "Brand not found" });
+
+    const requestedPlan = await SubscriptionPlan.findOne({ planId }).lean();
+    if (!requestedPlan) return res.status(404).json({ message: "Requested plan not found" });
+
+    const sub = brand.subscription || {};
+    const currentPlanId = sub.planId;
+
+    // No subscription at all
+    if (!currentPlanId) {
+      return res.status(200).json({
+        status: "can_subscribe",
+        canProceed: true,
+        message: "You have no active plan. You can subscribe to this plan.",
+        currentPlanId: null,
+        requestedPlanId: requestedPlan.planId,
+        requestedPlan: sanitizePlanForResponse(requestedPlan),
+      });
+    }
+
+    // Expired subscription -> treat as can subscribe
+    const now = new Date();
+    const isExpired =
+      brand.subscriptionExpired === true ||
+      (sub.expiresAt && new Date(sub.expiresAt).getTime() < now.getTime());
+
+    if (isExpired) {
+      return res.status(200).json({
+        status: "expired_can_subscribe",
+        canProceed: true,
+        message: "Your subscription is expired. You can subscribe to this plan.",
+        currentPlanId,
+        requestedPlanId: requestedPlan.planId,
+        requestedPlan: sanitizePlanForResponse(requestedPlan),
+      });
+    }
+
+    // Same plan
+    if (currentPlanId === requestedPlan.planId) {
+      return res.status(200).json({
+        status: "same_plan",
+        canProceed: false,
+        message: "You are already subscribed to the same plan.",
+        currentPlanId,
+        requestedPlanId: requestedPlan.planId,
+      });
+    }
+
+    // Load current plan doc
+    const currentPlan = await SubscriptionPlan.findOne({ planId: currentPlanId }).lean();
+
+    // If current plan doc missing in DB, allow subscribe (fallback)
+    if (!currentPlan) {
+      return res.status(200).json({
+        status: "can_subscribe",
+        canProceed: true,
+        message: "Current plan details not found, you can subscribe to this plan.",
+        currentPlanId,
+        requestedPlanId: requestedPlan.planId,
+        requestedPlan: sanitizePlanForResponse(requestedPlan),
+      });
+    }
+
+    const currentRank = normalizedMonthlyCost(currentPlan);
+    const requestedRank = normalizedMonthlyCost(requestedPlan);
+
+    // Requested is lower (downgrade attempt)
+    if (requestedRank < currentRank) {
+      return res.status(200).json({
+        status: "already_higher",
+        canProceed: false,
+        message: `You are already on a higher plan (${currentPlan.name}).`,
+        currentPlanId: currentPlan.planId,
+        requestedPlanId: requestedPlan.planId,
+        currentPlan: sanitizePlanForResponse(currentPlan),
+        requestedPlan: sanitizePlanForResponse(requestedPlan),
+      });
+    }
+
+    // Requested is higher (upgrade)
+    if (requestedRank > currentRank) {
+      return res.status(200).json({
+        status: "can_upgrade",
+        canProceed: true,
+        message: `You can upgrade from ${currentPlan.name} to ${requestedPlan.name}.`,
+        currentPlanId: currentPlan.planId,
+        requestedPlanId: requestedPlan.planId,
+        currentPlan: sanitizePlanForResponse(currentPlan),
+        requestedPlan: sanitizePlanForResponse(requestedPlan),
+      });
+    }
+
+    // Same "rank" (same price), but different planId (rare)
+    return res.status(200).json({
+      status: "same_tier_different_plan",
+      canProceed: true,
+      message: `This plan is in the same tier as your current plan (${currentPlan.name}). You can switch if allowed.`,
+      currentPlanId: currentPlan.planId,
+      requestedPlanId: requestedPlan.planId,
+      currentPlan: sanitizePlanForResponse(currentPlan),
+      requestedPlan: sanitizePlanForResponse(requestedPlan),
+    });
+  } catch (err) {
+    console.error("checkBrandPlanChange error:", err);
     return res.status(500).json({ message: "Internal server error" });
   }
 };

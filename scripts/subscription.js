@@ -10,11 +10,14 @@ const INFLUENCER_CURRENCY = "USD";
 // REMOVE FEATURES (per request)
 // Influencer: remove profile boost, campaign analytics, team seats, early access,
 //            team workspace, media kit pdf export, verified badge, AI pitch system,
-//            manage creators
-// Brand: remove post campaign analytics
+//            manage creators, AND platform_fee_on_payouts_percent
+// Brand: remove post campaign analytics, AND marketplace_fee_percent
 // ─────────────────────────────────────────────────────────────────────────────
 const REMOVED_FEATURE_KEYS_BY_ROLE = {
-  Brand: new Set(["post_campaign_analytics_report"]),
+  Brand: new Set([
+    "post_campaign_analytics_report",
+    "marketplace_fee_percent",
+  ]),
   Influencer: new Set([
     "profile_boosts_in_brand_browse_per_month",
     "campaign_analytics",
@@ -43,7 +46,7 @@ function stripRemovedFeatures(plan) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // BRAND PLANS (USD)
-// FREE / GROWTH / PRO / FULLY MANAGED (Peace Of Mind)
+// FREE / GROWTH / PRO / FULLY MANAGED
 // ─────────────────────────────────────────────────────────────────────────────
 const brandPlans = [
   {
@@ -81,9 +84,9 @@ const brandPlans = [
       { key: "creator_sourcing_and_outreach", value: "Self-serve" },
       { key: "shortlist_delivered", value: "—" },
       { key: "negotiation_and_followups", value: "Self-serve" },
-      { key: "post_campaign_analytics_report", value: "—" }, // will be stripped
+      { key: "post_campaign_analytics_report", value: "—" }, // stripped
 
-      { key: "marketplace_fee_percent", value: 10, note: "Deducted from creator payouts" },
+      { key: "marketplace_fee_percent", value: 10, note: "Deducted from creator payouts" }, // stripped
     ],
     addons: [],
   },
@@ -118,9 +121,9 @@ const brandPlans = [
       { key: "creator_sourcing_and_outreach", value: "Self-serve" },
       { key: "shortlist_delivered", value: "—" },
       { key: "negotiation_and_followups", value: "Self-serve" },
-      { key: "post_campaign_analytics_report", value: "—" }, // will be stripped
+      { key: "post_campaign_analytics_report", value: "—" }, // stripped
 
-      { key: "marketplace_fee_percent", value: 10, note: "Deducted from creator payouts" },
+      { key: "marketplace_fee_percent", value: 10, note: "Deducted from creator payouts" }, // stripped
     ],
     addons: [],
   },
@@ -155,9 +158,9 @@ const brandPlans = [
       { key: "creator_sourcing_and_outreach", value: "Self-serve" },
       { key: "shortlist_delivered", value: "—" },
       { key: "negotiation_and_followups", value: "Self-serve" },
-      { key: "post_campaign_analytics_report", value: "Basic" }, // will be stripped
+      { key: "post_campaign_analytics_report", value: "Basic" }, // stripped
 
-      { key: "marketplace_fee_percent", value: 10, note: "Deducted from creator payouts" },
+      { key: "marketplace_fee_percent", value: 10, note: "Deducted from creator payouts" }, // stripped
     ],
     addons: [],
   },
@@ -171,7 +174,7 @@ const brandPlans = [
     isStartingAt: true,
     bestFor: "Brands who want us to run everything end-to-end",
     mainOutcome: "Get shortlists + execution without doing the work",
-    cta: { text: "Book a Call", action: "book_call" },
+    cta: { text: "Start Fully Managed", action: "start" }, // updated (no book a call)
     sortOrder: 4,
     autoRenew: false,
     features: [
@@ -193,10 +196,10 @@ const brandPlans = [
       { key: "creator_sourcing_and_outreach", value: "Done-for-you" },
       { key: "shortlist_delivered", value: "Shortlist in 48 hours" },
       { key: "negotiation_and_followups", value: "Done-for-you" },
-      { key: "post_campaign_analytics_report", value: "Full reporting pack" }, // will be stripped
+      { key: "post_campaign_analytics_report", value: "Full reporting pack" }, // stripped
 
       { key: "managed_plan_budget_note", value: true, note: "Creator budget paid separately; you set budget, we execute" },
-      { key: "marketplace_fee_percent", value: 10, note: "Deducted from creator payouts" },
+      { key: "marketplace_fee_percent", value: 10, note: "Deducted from creator payouts" }, // stripped
     ],
     addons: [],
   },
@@ -242,7 +245,7 @@ const influencerPlans = [
 
       { key: "milestone_payment_protection", value: true },
       { key: "payout_speed_after_milestone_approval", value: "Standard (14 days)" },
-      { key: "platform_fee_on_payouts_percent", value: 10 },
+      { key: "platform_fee_on_payouts_percent", value: 10 }, // stripped
 
       { key: "dispute_help", value: false, note: "—" },
       { key: "support", value: "Chat" },
@@ -287,7 +290,7 @@ const influencerPlans = [
 
       { key: "milestone_payment_protection", value: true },
       { key: "payout_speed_after_milestone_approval", value: "Faster (7 days)" },
-      { key: "platform_fee_on_payouts_percent", value: 10 },
+      { key: "platform_fee_on_payouts_percent", value: 10 }, // stripped
 
       { key: "dispute_help", value: true },
       { key: "support", value: "Chat" },
@@ -332,7 +335,7 @@ const influencerPlans = [
 
       { key: "milestone_payment_protection", value: true },
       { key: "payout_speed_after_milestone_approval", value: "Express (3 days)" },
-      { key: "platform_fee_on_payouts_percent", value: 9 },
+      { key: "platform_fee_on_payouts_percent", value: 9 }, // stripped
 
       { key: "dispute_help", value: true, note: "Priority" },
       { key: "support", value: "Email + Chat" },
@@ -377,7 +380,7 @@ const influencerPlans = [
 
       { key: "milestone_payment_protection", value: true },
       { key: "payout_speed_after_milestone_approval", value: "Express+ (2 days)" },
-      { key: "platform_fee_on_payouts_percent", value: 8 },
+      { key: "platform_fee_on_payouts_percent", value: 8 }, // stripped
 
       { key: "dispute_help", value: true, note: "Priority + escalation" },
       { key: "support", value: "Email + Phone" },
