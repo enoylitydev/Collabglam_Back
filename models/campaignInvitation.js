@@ -7,15 +7,15 @@ const CampaignInvitationSchema = new mongoose.Schema(
     invitationId: { type: String, default: uuidv4, index: true, unique: true },
 
     // campaign + brand
-    brandId: { type: String, required: true, index: true },
-    campaignId: { type: mongoose.Schema.Types.ObjectId, ref: "Campaign", required: true, index: true },
+    brandId: { type: String, required: true, },
+    campaignId: { type: mongoose.Schema.Types.ObjectId, ref: "Campaign", required: true},
     campaignsId: { type: String, default: null }, // optional (if you also store string id)
 
     // influencer identity
-    platform: { type: String, default: "youtube", index: true },
-    handle: { type: String, required: true, index: true }, // normalized @handle
-    modashUserId: { type: String, required: true, index: true }, // what UI sends
-    influencerId: { type: String, default: null }, // if linked to Influencer model
+    platform: { type: String, default: "youtube", },
+    handle: { type: String, required: true, }, 
+    modashUserId: { type: String, required: true, }, 
+    influencerId: { type: String, default: null }, 
 
     // email resolution
     missingEmailId: { type: String, default: null },
@@ -39,9 +39,6 @@ const CampaignInvitationSchema = new mongoose.Schema(
 );
 
 // prevent duplicates (same brand + campaign + handle + platform)
-CampaignInvitationSchema.index(
-  { brandId: 1, campaignId: 1, handle: 1, platform: 1 },
-  { unique: true }
-);
+
 
 module.exports = mongoose.model("CampaignInvitation", CampaignInvitationSchema);

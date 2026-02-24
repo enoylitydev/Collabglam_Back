@@ -42,7 +42,7 @@ const Invitationsroutes = require('./routes/Invitationsroutes');
 const unseenMessageNotifier = require('./jobs/unseenMessageNotifier');
 const youtubeRoutes = require('./routes/youtubeRoutes');
 const campaignInvitationRoutes = require('./routes/campaignInvitationRoutes');
-
+ const delieverableRoutes = require('./routes/delieverableRoute')
 // sockets (Socket.IO + native WS)
 const sockets = require('./sockets');
 
@@ -103,7 +103,7 @@ app.use('/emails', emailRoutes);
 app.use('/newinvitations', Invitationsroutes);
 app.use('/youtube', youtubeRoutes);
 app.use('/admin-invitations', campaignInvitationRoutes);
-
+app.use('/deliverable', delieverableRoutes);
 
 // Friendly 413 response (must be after body parsers)
 app.use((err, req, res, next) => {
@@ -114,7 +114,7 @@ app.use((err, req, res, next) => {
 });
 
 /* Mongo & start */
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 8000;
 startReminderCron();
 
 mongoose.connect(process.env.MONGODB_URI)
