@@ -3,6 +3,7 @@
 
 require('dotenv').config();
 const { fetch } = require('undici');
+const mongoose = require('mongoose');
 
 const ModashProfile = require('../models/modash');
 const Influencer = require('../models/influencer'); // kept for future use
@@ -980,11 +981,16 @@ function toCalcMethod(input) {
 async function frontendReport(req, res) {
   try {
     const brandId = cleanStr(req.query.brandId || req.query.brand_id || '');
+    const adminId = cleanStr(req.query.adminId || req.query.admin_id || '');
 
-    if (!brandId) {
-      return res
-        .status(400)
-        .json({ error: 'brandId is required for profile views' });
+    // ✅ Admin override: if adminId exists, skip subscription/quota checks
+    const isAdmin = !!adminId;
+
+    // ✅ Require either brandId or adminId
+    if (!brandId && !adminId) {
+      return res.status(400).json({
+        error: 'brandId or adminId is required for profile views',
+      });
     }
 
     const platform = cleanStr(req.query.platform || '').toLowerCase();
@@ -1004,38 +1010,39 @@ async function frontendReport(req, res) {
         error: 'platform must be instagram|tiktok|youtube',
       });
     }
+
     if (!userId) {
       return res.status(400).json({ error: 'userId is required' });
     }
 
     // ---------------------------------------------------------
     // 0) Compute monthly periodKey & check if already viewed
+    //    ✅ Only for BRAND users (not admin)
     // ---------------------------------------------------------
     const now = new Date();
-    const periodKey = `${now.getUTCFullYear()}-${String(
-      now.getUTCMonth() + 1
-    ).padStart(2, '0')}`;
+    const periodKey = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
 
     let alreadyViewedThisPeriod = false;
-    try {
-      const existingView = await BrandProfileView.findOne({
-        brandId,
-        platform,
-        userId,
-        periodKey,
-      }).lean();
-      alreadyViewedThisPeriod = !!existingView;
-    } catch (e) {
-      console.error(
-        '[frontendReport] Failed to check BrandProfileView:',
-        e.message
-      );
+
+    if (!isAdmin && brandId) {
+      try {
+        const existingView = await BrandProfileView.findOne({
+          brandId,
+          platform,
+          userId,
+          periodKey,
+        }).lean();
+        alreadyViewedThisPeriod = !!existingView;
+      } catch (e) {
+        console.error('[frontendReport] Failed to check BrandProfileView:', e.message);
+      }
     }
 
     // ---------------------------------------------------------
     // Quota enforcement – only for FIRST view this month
+    // ✅ Only for BRAND users (not admin)
     // ---------------------------------------------------------
-    if (!alreadyViewedThisPeriod) {
+    if (!isAdmin && brandId && !alreadyViewedThisPeriod) {
       try {
         await ensureBrandQuota(brandId, 'profile_views_per_month', 1);
       } catch (e) {
@@ -1059,44 +1066,40 @@ async function frontendReport(req, res) {
           userId,
           influencerId,
         });
+
         if (cached && cached.providerRaw) {
-          console.log(
-            `[frontendReport] ✓ Returning cached report for ${platform}/${userId}`
-          );
+          console.log(`[frontendReport] ✓ Returning cached report for ${platform}/${userId}`);
+
           const out = Object.assign({}, cached.providerRaw);
+
           if (cached.lastFetchedAt) {
             const d = new Date(cached.lastFetchedAt);
-            if (!isNaN(d.getTime())) {
-              out._lastFetchedAt = d.toISOString();
-            }
+            if (!isNaN(d.getTime())) out._lastFetchedAt = d.toISOString();
           }
 
-          // record that this brand viewed this profile this month
-          await recordBrandProfileView({
-            brandId,
-            platform,
-            userId,
-            influencerId,
-            periodKey,
-            at: now,
-          });
+          // ✅ Record view only for BRAND (not admin)
+          if (!isAdmin && brandId) {
+            await recordBrandProfileView({
+              brandId,
+              platform,
+              userId,
+              influencerId,
+              periodKey,
+              at: now,
+            });
+          }
 
           return res.json(out);
         }
       } catch (cacheErr) {
-        console.error(
-          '[frontendReport] ✗ Cache lookup failed:',
-          cacheErr.message
-        );
+        console.error('[frontendReport] ✗ Cache lookup failed:', cacheErr.message);
       }
     }
 
     // ---------------------------------------------------------
     // 2) Fresh from Modash
     // ---------------------------------------------------------
-    console.log(
-      `[frontendReport] Fetching fresh report from Modash API for ${platform}/${userId}`
-    );
+    console.log(`[frontendReport] Fetching fresh report from Modash API for ${platform}/${userId}`);
 
     let reportJSON;
     try {
@@ -1111,10 +1114,12 @@ async function frontendReport(req, res) {
       try {
         const errResp = apiErr && apiErr.response;
         const rawMsg = (errResp && (errResp.message || errResp.error)) || raw;
+
         const isSensitive =
           /api token|developer section|modash|authorization|bearer|modash_api_key|marketer\.modash\.io/i.test(
             String(rawMsg)
           );
+
         safeMsg = isSensitive ? 'Report unavailable' : rawMsg || safeMsg;
       } catch {
         // ignore
@@ -1130,9 +1135,7 @@ async function frontendReport(req, res) {
     // 3) Save normalized copy in ModashProfile cache (existing logic)
     // ---------------------------------------------------------
     try {
-      console.log(
-        '[frontendReport] Normalizing and saving report to database'
-      );
+      console.log('[frontendReport] Normalizing and saving report to database');
       const normalized = normalizeReportData(reportJSON);
 
       await upsertModashProfileFromReport(normalized, platform, {
@@ -1140,31 +1143,29 @@ async function frontendReport(req, res) {
         influencerId,
       });
 
-      console.log(
-        `[frontendReport] Successfully saved report for ${platform}/${userId}`
-      );
+      console.log(`[frontendReport] Successfully saved report for ${platform}/${userId}`);
     } catch (saveErr) {
-      console.error(
-        '[frontendReport] Failed to save Modash profile to database:',
-        saveErr
-      );
+      console.error('[frontendReport] Failed to save Modash profile to database:', saveErr);
     }
 
     // ---------------------------------------------------------
     // 4) Return + mark profile as viewed for this month
+    // ✅ Only for BRAND (not admin)
     // ---------------------------------------------------------
     const out = Object.assign({}, reportJSON, {
       _lastFetchedAt: fetchedAt.toISOString(),
     });
 
-    await recordBrandProfileView({
-      brandId,
-      platform,
-      userId,
-      influencerId,
-      periodKey,
-      at: fetchedAt,
-    });
+    if (!isAdmin && brandId) {
+      await recordBrandProfileView({
+        brandId,
+        platform,
+        userId,
+        influencerId,
+        periodKey,
+        at: fetchedAt,
+      });
+    }
 
     return res.json(out);
   } catch (err) {
@@ -1441,7 +1442,9 @@ function groupCategories(categoryLinks) {
 async function getSavedInfluencers(req, res) {
   try {
     const provider = cleanStr(req.query.provider || req.query.platform || '').toLowerCase();
-    const q = cleanStr(req.query.q || '');
+
+    // ✅ support q OR search
+    const qRaw = cleanStr(req.query.q || req.query.search || '');
     const influencerId = cleanStr(req.query.influencerId || req.query.influencer_id || '');
 
     const page = Math.max(0, parseInt(req.query.page, 10) || 0);
@@ -1460,8 +1463,16 @@ async function getSavedInfluencers(req, res) {
     if (provider) filter.provider = provider;
     if (influencerId) filter.influencerId = influencerId;
 
-    if (q) {
+    // ✅ SEARCH
+    if (qRaw) {
+      // normalize handle searches
+      const q = qRaw.trim();
+      const qNoAt = q.replace(/^@/, '').trim();
+
+      // safe regex
       const rx = new RegExp(escapeRegex(q), 'i');
+      const rxNoAt = qNoAt ? new RegExp(escapeRegex(qNoAt), 'i') : null;
+
       filter.$or = [
         { username: rx },
         { fullname: rx },
@@ -1469,10 +1480,13 @@ async function getSavedInfluencers(req, res) {
         { url: rx },
         { userId: rx },
         { influencerId: rx },
+
+        // ✅ extra: if user typed @something but db stores without @ (or vice versa)
+        ...(rxNoAt ? [{ username: rxNoAt }, { handle: rxNoAt }] : []),
       ];
     }
 
-    // Keep list payload light (avoid providerRaw, posts, audience, etc.)
+    // Keep list payload light
     const projection = {
       provider: 1,
       userId: 1,
@@ -1520,12 +1534,7 @@ async function getSavedInfluencers(req, res) {
       ModashProfile.countDocuments(filter),
     ]);
 
-    return res.json({
-      page,
-      limit,
-      total,
-      results,
-    });
+    return res.json({ page, limit, total, results });
   } catch (err) {
     console.error('[getSavedInfluencers] Error:', err);
     return res.status(500).json({ error: 'Internal error' });
@@ -1661,6 +1670,273 @@ async function getRandomInfluencers(req, res) {
   }
 }
 
+
+
+async function exportSavedInfluencersCsv(req, res) {
+  try {
+    const body = req.body || {};
+
+    // ---------------- config
+    const MAX_EXPORT = 100_000;
+
+    // ✅ selected export
+    const idsRaw = body.modashIds ?? body.ids ?? body.selectedIds ?? null;
+    const selectedIds = Array.isArray(idsRaw)
+      ? idsRaw.map((x) => String(x || '').trim()).filter(Boolean)
+      : [];
+
+    // ✅ limit export
+    const limitRaw = body.limit ?? body.downloadLimit ?? body.count ?? 1000;
+    const limitFromBody = Math.min(MAX_EXPORT, Math.max(1, parseInt(String(limitRaw), 10) || 1000));
+    const limit = selectedIds.length ? Math.min(MAX_EXPORT, selectedIds.length) : limitFromBody;
+
+    // ---------------- filters (no pagination)
+    const provider = cleanStr(body.provider || body.platform || '').toLowerCase();
+    const qRaw = cleanStr(body.q || body.search || '');
+    const influencerId = cleanStr(body.influencerId || body.influencer_id || '');
+
+    const minFollowers = Number.isFinite(Number(body.minFollowers)) ? Number(body.minFollowers) : undefined;
+    const maxFollowers = Number.isFinite(Number(body.maxFollowers)) ? Number(body.maxFollowers) : undefined;
+
+    const requireLinked = cleanStr(body.requireLinked || '0') === '1';
+    const requireCategories = cleanStr(body.requireCategories || '0') === '1';
+
+    // sort
+    const sortKey = cleanStr(body.sort || body.sortBy || 'updatedAt').toLowerCase();
+    const dirParam = cleanStr(body.dir || body.sortOrder || 'desc').toLowerCase();
+    const dir = dirParam === 'asc' ? 1 : -1;
+
+    // base filter
+    const filter = {};
+
+    if (provider) {
+      if (!ALLOWED_PLATFORMS.has(provider)) {
+        return res.status(400).json({ error: 'provider must be instagram|tiktok|youtube' });
+      }
+      filter.provider = provider;
+    }
+
+    if (influencerId) filter.influencerId = influencerId;
+
+    // ✅ selection filter by _id
+    if (selectedIds.length) {
+      const objIds = selectedIds
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      if (!objIds.length) {
+        return res.status(400).json({ error: 'No valid modashIds provided.' });
+      }
+      filter._id = { $in: objIds };
+    }
+
+    // followers range
+    if (minFollowers !== undefined || maxFollowers !== undefined) {
+      filter.followers = {};
+      if (minFollowers !== undefined) filter.followers.$gte = minFollowers;
+      if (maxFollowers !== undefined) filter.followers.$lte = maxFollowers;
+    }
+
+    // require linked
+    if (requireLinked) {
+      filter.$or = [
+        { influencer: { $exists: true, $ne: null } },
+        { influencerId: { $exists: true, $ne: '' } },
+      ];
+    }
+
+    // require categories
+    if (requireCategories) {
+      filter['categories.0'] = { $exists: true };
+    }
+
+    // ✅ search like getSavedInfluencers
+    if (qRaw) {
+      const q = qRaw.trim();
+      const qNoAt = q.replace(/^@/, '').trim();
+
+      const rx = new RegExp(escapeRegex(q), 'i');
+      const rxNoAt = qNoAt ? new RegExp(escapeRegex(qNoAt), 'i') : null;
+
+      // merge with existing $or if present
+      const orSearch = [
+        { username: rx },
+        { fullname: rx },
+        { handle: rx },
+        { url: rx },
+        { userId: rx },
+        { influencerId: rx },
+        ...(rxNoAt ? [{ username: rxNoAt }, { handle: rxNoAt }] : []),
+      ];
+
+      if (filter.$or && Array.isArray(filter.$or)) {
+        filter.$and = filter.$and || [];
+        filter.$and.push({ $or: filter.$or });
+        filter.$and.push({ $or: orSearch });
+        delete filter.$or;
+      } else {
+        filter.$or = orSearch;
+      }
+    }
+
+    // sort mapping
+    const sort = (() => {
+      if (sortKey === 'followers') return { followers: dir, updatedAt: -1 };
+      if (sortKey === 'createdat') return { createdAt: dir };
+      return { updatedAt: dir };
+    })();
+
+    // keep light projection
+    const projection = {
+      provider: 1,
+      userId: 1,
+      username: 1,
+      fullname: 1,
+      handle: 1,
+      url: 1,
+      picture: 1,
+
+      followers: 1,
+      engagements: 1,
+      engagementRate: 1,
+      averageViews: 1,
+
+      isVerified: 1,
+      isPrivate: 1,
+
+      country: 1,
+      state: 1,
+      city: 1,
+      gender: 1,
+      ageGroup: 1,
+      language: 1,
+
+      influencerId: 1,
+      influencer: 1,
+
+      createdAt: 1,
+      updatedAt: 1,
+    };
+
+    let items = await ModashProfile.find(filter)
+      .select(projection)
+      .sort(sort)
+      .limit(limit)
+      .lean();
+
+    // ✅ if selectedIds passed: preserve the same order as selected list
+    if (selectedIds.length) {
+      const rank = new Map(selectedIds.map((id, idx) => [String(id), idx]));
+      items.sort((a, b) => {
+        const ra = rank.get(String(a._id)) ?? 999999;
+        const rb = rank.get(String(b._id)) ?? 999999;
+        return ra - rb;
+      });
+    }
+
+    // ---------------- CSV helpers
+    const dash = '—';
+
+    const csvEscape = (v) => {
+      const s = String(v ?? '');
+      return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+
+    const fmt = (v) => (v == null || v === '' ? dash : String(v));
+    const fmtNum = (v) => (v == null || Number.isNaN(Number(v)) ? dash : String(v));
+    const fmtPercent = (v) => {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return dash;
+      return `${(n * 100).toFixed(2)}%`;
+    };
+    const fmtBool = (v) => (v === true ? 'Yes' : v === false ? 'No' : dash);
+    const fmtDateOnly = (v) => {
+      if (!v) return dash;
+      const d = v instanceof Date ? v : new Date(v);
+      if (Number.isNaN(d.getTime())) return dash;
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      return `${yyyy}-${mm}-${dd}`;
+    };
+
+    // ---------------- CSV header (edit if you want)
+    const header = [
+      'Sr. No.',
+      'Modash Doc ID',
+      'Platform',
+      'User ID',
+      'Username',
+      'Handle',
+      'Full Name',
+      'Profile URL',
+      'Followers',
+      'Engagement Rate',
+      'Avg Engagements',
+      'Avg Views',
+      'Verified',
+      'Private',
+      'Country',
+      'State',
+      'City',
+      'Language',
+      'Gender',
+      'Age Group',
+      'InfluencerId (linked)',
+      'Created At',
+      'Updated At',
+    ];
+
+    const lines = [];
+    lines.push(header.map(csvEscape).join(','));
+
+    items.forEach((doc, idx) => {
+      const row = [
+        idx + 1,
+        fmt(doc._id),
+        fmt(doc.provider),
+        fmt(doc.userId),
+        fmt(doc.username),
+        fmt(doc.handle),
+        fmt(doc.fullname),
+        fmt(doc.url),
+        fmtNum(doc.followers),
+        fmtPercent(doc.engagementRate),
+        fmtNum(doc.engagements),
+        fmtNum(doc.averageViews),
+        fmtBool(doc.isVerified),
+        fmtBool(doc.isPrivate),
+        fmt(doc.country),
+        fmt(doc.state),
+        fmt(doc.city),
+        fmt(doc.language),
+        fmt(doc.gender),
+        fmt(doc.ageGroup),
+        fmt(doc.influencerId),
+        fmtDateOnly(doc.createdAt),
+        fmtDateOnly(doc.updatedAt),
+      ];
+
+      lines.push(row.map(csvEscape).join(','));
+    });
+
+    const csv = lines.join('\n');
+
+    // filename
+    const ts = new Date();
+    const stamp = `${ts.getFullYear()}${String(ts.getMonth() + 1).padStart(2, '0')}${String(ts.getDate()).padStart(2, '0')}_${String(
+      ts.getHours()
+    ).padStart(2, '0')}${String(ts.getMinutes()).padStart(2, '0')}${String(ts.getSeconds()).padStart(2, '0')}`;
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="modash_saved_${stamp}.csv"`);
+    return res.status(200).send(csv);
+  } catch (err) {
+    console.error('[exportSavedInfluencersCsv] Error:', err);
+    return res.status(500).json({ error: err?.message || 'Failed to export CSV' });
+  }
+}
+
 /* -------------------------------------------------------------------------- */
 /*                                   Exports                                  */
 /* -------------------------------------------------------------------------- */
@@ -1681,4 +1957,5 @@ module.exports = {
   findCachedReport,
   getSavedInfluencers,
   getRandomInfluencers,
+  exportSavedInfluencersCsv,
 };

@@ -55,6 +55,59 @@ function buildSubscriptionFromPlan(plan, options = {}) {
   };
 }
 
+const isObjectId = (v) => mongoose.Types.ObjectId.isValid(String(v || ""));
+
+async function findCampaignByAnyId(campaignId) {
+  const id = String(campaignId || "").trim();
+  if (!id) return null;
+
+  // your codebase uses BOTH: _id (mongo) and campaignsId (string)
+  if (isObjectId(id)) {
+    const byMongo = await Campaign.findById(id).lean();
+    if (byMongo) return byMongo;
+  }
+  return Campaign.findOne({ campaignsId: id }).lean();
+}
+
+async function findModashByUserId(userId) {
+  const id = String(userId || "").trim();
+  if (!id) return null;
+
+  // If UI passes Modash _id
+  if (isObjectId(id)) {
+    const byId = await Modash.findById(id).lean();
+    if (byId) return byId;
+  }
+
+  // Otherwise try common fields (adjust to your schema if needed)
+  return Modash.findOne({
+    $or: [
+      { userId: id },
+      { modashUserId: id },
+      { profileId: id },
+      { providerUserId: id },
+      { platformUserId: id },
+      { "user.userId": id },
+      { "profile.userId": id },
+    ],
+  }).lean();
+}
+
+function extractHandleFromModash(modashDoc) {
+  const cand = [
+    modashDoc?.handle,
+    modashDoc?.username,
+    modashDoc?.userName,
+    modashDoc?.providerUsername,
+    modashDoc?.user?.username,
+    modashDoc?.profile?.username,
+    modashDoc?.profile?.handle,
+  ].filter(Boolean);
+
+  if (!cand.length) return null;
+  return normalizeHandle(cand[0]);
+}
+
 // ---------------- Subscription Subschemas ----------------
 exports.adminAssignBrandPlan = async (req, res) => {
   try {
@@ -1169,3 +1222,61 @@ exports.getAllPayments = async (req, res) => {
     return res.status(500).json({ message: 'Internal server error' });
   }
 };
+
+
+
+
+exports.getAllCampaignsLite = async (req, res) => {
+  try {
+    const search = (req.body.search || "").trim();
+    const statusFlag = parseInt(req.body.type, 10) || 0; // 0=all, 1=active, 2=inactive
+
+    // ✅ brandId from request
+    const brandIdRaw = req.body.brandId ?? req.body.brand_id ?? req.body.brand ?? "";
+    const brandId = String(brandIdRaw || "").trim();
+
+    // Build filter
+    const filter = {};
+
+    // ✅ Filter by brandId (if provided)
+    if (brandId) {
+      filter.brandId = brandId; // if stored as string
+      // If stored as ObjectId, use:
+      // filter.brandId = new mongoose.Types.ObjectId(brandId);
+    }
+
+    // Search (productOrServiceName)
+    if (search) {
+      const re = new RegExp(search, "i");
+      filter.productOrServiceName = re;
+    }
+
+    // Status filter
+    if (statusFlag === 1) filter.isActive = 1;
+    else if (statusFlag === 2) filter.isActive = 0;
+
+    // Fetch minimal fields INCLUDING campaignsId
+    const rows = await Campaign.find(filter)
+      .select("brandId campaignsId productOrServiceName")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    // Shape response: send campaignsId (NOT _id)
+    const campaigns = rows.map((c) => ({
+      brandId: c.brandId,
+      campaignsId: c.campaignsId || null,
+      productOrServiceName: c.productOrServiceName,
+    }));
+
+    return res.status(200).json({
+      status: statusFlag,
+      brandId: brandId || null,
+      total: campaigns.length,
+      campaigns,
+    });
+  } catch (err) {
+    console.error("Error in getAllCampaignsLite:", err);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};
+

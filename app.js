@@ -41,7 +41,8 @@ const emailRoutes = require('./routes/emailRoutes');
 const Invitationsroutes = require('./routes/Invitationsroutes');
 const unseenMessageNotifier = require('./jobs/unseenMessageNotifier');
 const youtubeRoutes = require('./routes/youtubeRoutes');
-
+const campaignInvitationRoutes = require('./routes/campaignInvitationRoutes');
+ const delieverableRoutes = require('./routes/delieverableRoute')
 // sockets (Socket.IO + native WS)
 const sockets = require('./sockets');
 
@@ -101,7 +102,8 @@ app.use('/notifications', notificationsRoutes);
 app.use('/emails', emailRoutes);
 app.use('/newinvitations', Invitationsroutes);
 app.use('/youtube', youtubeRoutes);
-
+app.use('/admin-invitations', campaignInvitationRoutes);
+app.use('/deliverable', delieverableRoutes);
 
 // Friendly 413 response (must be after body parsers)
 app.use((err, req, res, next) => {
