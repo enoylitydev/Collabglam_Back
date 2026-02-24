@@ -622,3 +622,291 @@ exports.patchInfluencerEmail = asyncHandler(async (req, res) => {
 
   return res.json({ status: 'ok', matched: r.matchedCount, modified: r.modifiedCount });
 });
+
+exports.exportInfluencersCsv = asyncHandler(async (req, res) => {
+  try {
+    const body = req.body || {};
+
+    // -------- config
+    const MAX_EXPORT = 100_000;
+
+    // ✅ NEW: selected export (handleIds)
+    const handleIdsRaw = body.handleIds ?? body.ids ?? null;
+    const handleIds = Array.isArray(handleIdsRaw)
+      ? handleIdsRaw.map((x) => String(x || '').trim()).filter(Boolean)
+      : [];
+
+    // If selected ids provided -> export exactly those (up to MAX_EXPORT)
+    const limitRaw = body.limit ?? body.downloadLimit ?? body.count ?? 500;
+    const limitFromBody = Math.min(MAX_EXPORT, Math.max(1, parseInt(String(limitRaw), 10) || 500));
+    const limit = handleIds.length ? Math.min(MAX_EXPORT, handleIds.length) : limitFromBody;
+
+    const _escapeRegex =
+      typeof escapeRegex === 'function'
+        ? escapeRegex
+        : (str = '') => String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    const search = typeof body.search === 'string' ? body.search.trim() : '';
+    const sortBy = ALLOWED_SORT.has(String(body.sortBy)) ? String(body.sortBy) : 'createdAt';
+    const sortOrder = String(body.sortOrder || 'desc').toLowerCase() === 'asc' ? 1 : -1;
+
+    // -------- filters (same as getAllInfluencers)
+    const followersMinRaw = body.followersMin ?? body.minFollowers ?? body.followers_from ?? null;
+    const followersMaxRaw = body.followersMax ?? body.maxFollowers ?? body.followers_to ?? null;
+
+    const countryRaw = body.country ?? null;
+    const countriesRaw = body.countries ?? null;
+
+    const categoryRaw = body.category ?? null;
+    const categoriesRaw = body.categories ?? null;
+
+    const baseQuery = { platform: 'youtube' };
+    const and = [];
+
+    const followersMin = followersMinRaw != null && followersMinRaw !== '' ? Number(followersMinRaw) : null;
+    const followersMax = followersMaxRaw != null && followersMaxRaw !== '' ? Number(followersMaxRaw) : null;
+
+    if (Number.isFinite(followersMin) || Number.isFinite(followersMax)) {
+      const range = {};
+      if (Number.isFinite(followersMin)) range.$gte = followersMin;
+      if (Number.isFinite(followersMax)) range.$lte = followersMax;
+      and.push({ subscriberCount: range });
+    }
+
+    const countries = Array.isArray(countriesRaw)
+      ? countriesRaw.map((x) => String(x || '').trim()).filter(Boolean)
+      : [];
+    const country = typeof countryRaw === 'string' ? countryRaw.trim() : '';
+
+    if (countries.length) {
+      const rxList = countries.map((c) => new RegExp(`^${_escapeRegex(c)}$`, 'i'));
+      and.push({ country: { $in: rxList } });
+    } else if (country) {
+      and.push({ country: new RegExp(`^${_escapeRegex(country)}$`, 'i') });
+    }
+
+    const categories = Array.isArray(categoriesRaw)
+      ? categoriesRaw.map((x) => String(x || '').trim()).filter(Boolean)
+      : [];
+    const category = typeof categoryRaw === 'string' ? categoryRaw.trim() : '';
+
+    if (categories.length) {
+      const rxList = categories.map((c) => new RegExp(_escapeRegex(c), 'i'));
+      and.push({
+        $or: [{ topicLabels: { $in: rxList } }, { topicCategories: { $in: rxList } }],
+      });
+    } else if (category) {
+      const rx = new RegExp(_escapeRegex(category), 'i');
+      and.push({
+        $or: [{ topicLabels: rx }, { topicCategories: rx }],
+      });
+    }
+
+    if (search) {
+      const needleRaw = search;
+      const needleNoAt = search.startsWith('@') ? search.slice(1) : search;
+
+      const rxRaw = _escapeRegex(needleRaw);
+      const rxNoAt = _escapeRegex(needleNoAt);
+
+      const handleRx = new RegExp(rxRaw.startsWith('@') ? rxRaw : `@${rxNoAt}`, 'i');
+      const plainRx = new RegExp(rxNoAt, 'i');
+
+      and.push({
+        $or: [
+          { email: plainRx },
+          { handle: handleRx },
+          { title: plainRx },
+          { channelId: plainRx },
+          { instagramHandle: plainRx },
+          { handleId: plainRx },
+          { lastSponsor: plainRx },
+          { topAudienceCountry: plainRx },
+          { workingHandle: plainRx },
+        ],
+      });
+    }
+
+    // ✅ Build query
+    const query = { ...baseQuery };
+
+    // ✅ If handleIds passed -> limit to only those docs (still can combine with filters)
+    if (handleIds.length) {
+      query.handleId = { $in: handleIds };
+    }
+
+    if (and.length) query.$and = and;
+
+    // -------- fetch docs
+    const items = await InfluencerProfile.find(query)
+      .sort({ [sortBy]: sortOrder })
+      .limit(limit)
+      .select({
+        __v: 0,
+        rawChannel: 0,
+        rawPlaylists: 0,
+      })
+      .lean();
+
+    // -------- helpers for CSV
+    const dash = '—';
+
+    const csvEscape = (v) => {
+      const s = String(v ?? '');
+      return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+
+    const fmt = (v) => {
+      if (v == null || v === '') return dash;
+      return String(v);
+    };
+
+    const fmtNum = (v) => {
+      if (v == null || Number.isNaN(Number(v))) return dash;
+      return String(v);
+    };
+
+    const fmtPercent = (v) => {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return dash;
+      return `${(n * 100).toFixed(2)}%`;
+    };
+
+    const fmtBool = (v) => {
+      if (v === true) return 'Yes';
+      if (v === false) return 'No';
+      return dash;
+    };
+
+    const fmtDateOnly = (v) => {
+      if (!v) return dash;
+      const d = v instanceof Date ? v : new Date(v);
+      if (Number.isNaN(d.getTime())) return dash;
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      return `${yyyy}-${mm}-${dd}`;
+    };
+
+    const ytLink = (doc) => (doc?.handle ? `https://www.youtube.com/${doc.handle}` : dash);
+
+    const igLink = (doc) => {
+      const h = doc?.instagramHandle ? String(doc.instagramHandle).trim() : '';
+      if (!h) return dash;
+      const username = h.startsWith('@') ? h.slice(1) : h;
+      return `https://www.instagram.com/${username}`;
+    };
+
+    const ttLink = () => dash;
+
+    const niche = (doc) => {
+      const labels = Array.isArray(doc?.topicLabels) ? doc.topicLabels : [];
+      return labels[0] ? String(labels[0]) : dash;
+    };
+
+    const subNiche = (doc) => {
+      const labels = Array.isArray(doc?.topicLabels) ? doc.topicLabels : [];
+      return labels[1] ? String(labels[1]) : dash;
+    };
+
+    const followups = (doc) => {
+      const arr = Array.isArray(doc?.followUpDates) ? doc.followUpDates : [];
+      const dates = arr
+        .map((x) => (x instanceof Date ? x : new Date(x)))
+        .filter((d) => d && !Number.isNaN(d.getTime()))
+        .sort((a, b) => b.getTime() - a.getTime());
+
+      return {
+        f1: dates[0] ? fmtDateOnly(dates[0]) : dash,
+        f2: dates[1] ? fmtDateOnly(dates[1]) : dash,
+      };
+    };
+
+    // -------- CSV header in exact order requested
+    const header = [
+      'Sr. No.',
+      'Handle Title',
+      'Influencer Handle',
+      'Email',
+      'Phone',
+      'YouTube Handle link',
+      'Instagram Handle link',
+      'TikTok Handle link',
+      'Country/Region',
+      'Language',
+      'Niche',
+      'Sub-Niche',
+      'Subscriber/Follower count',
+      'Avg Views (last 15 videos)',
+      'Engagement Rate',
+      'Upload Frequency',
+      'Last Sponsor',
+      'Managed by Any Agency',
+      'Top Audience Country',
+      'Average Audience Age',
+      'CollabGlam Demographics link',
+      'Last Contacted Date',
+      'Last Working Handle',
+      'Last 1st followup date',
+      'Last 2nd followup date',
+      'Status',
+      'Reply',
+      'Notes',
+    ];
+
+    const lines = [];
+    lines.push(header.map(csvEscape).join(','));
+
+    items.forEach((doc, idx) => {
+      const fu = followups(doc);
+
+      const row = [
+        idx + 1,
+        fmt(doc.title),
+        fmt(doc.handle),
+        fmt(doc.email),
+        dash, // Phone
+        ytLink(doc),
+        igLink(doc),
+        ttLink(doc),
+        fmt(doc.country),
+        fmt(doc.defaultLanguage),
+        niche(doc),
+        subNiche(doc),
+        fmtNum(doc.subscriberCount),
+        fmtNum(doc.avgViewsLast15),
+        fmtPercent(doc.engagementRateLast15),
+        doc.uploadFrequencyPerWeek != null ? String(doc.uploadFrequencyPerWeek) : dash,
+        fmt(doc.lastSponsor),
+        fmtBool(doc.managedByAgency),
+        fmt(doc.topAudienceCountry),
+        doc.averageAudienceAge != null ? String(doc.averageAudienceAge) : dash,
+        dash, // CollabGlam Demographics link
+        fmtDateOnly(doc.lastContactedAt),
+        fmt(doc.workingHandle),
+        fu.f1,
+        fu.f2,
+        dash, // Status
+        dash, // Reply
+        dash, // Notes
+      ];
+
+      lines.push(row.map(csvEscape).join(','));
+    });
+
+    const csv = lines.join('\n');
+
+    // filename
+    const ts = new Date();
+    const stamp = `${ts.getFullYear()}${String(ts.getMonth() + 1).padStart(2, '0')}${String(ts.getDate()).padStart(2, '0')}_${String(
+      ts.getHours()
+    ).padStart(2, '0')}${String(ts.getMinutes()).padStart(2, '0')}${String(ts.getSeconds()).padStart(2, '0')}`;
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="influencers_${stamp}.csv"`);
+    return res.status(200).send(csv);
+  } catch (err) {
+    console.error('exportInfluencersCsv error:', err);
+    return res.status(400).json({ status: 'error', message: err?.message || 'Failed to export influencers.' });
+  }
+});

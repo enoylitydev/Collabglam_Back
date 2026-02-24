@@ -3,7 +3,7 @@ const router = express.Router();
 const { login, getAllBrands, getList, getAllCampaigns, getBrandById,
   getByInfluencerId, getCampaignById, getCampaignsByBrandId, adminGetInfluencerById,
   adminGetInfluencerList, adminAddYouTubeEmail, listMissingEmail, updateMissingEmail, checkMissingEmailByHandle,
-  getAllPayments, adminAssignBrandPlan, adminAssignInfluencerPlan
+  getAllPayments, adminAssignBrandPlan, adminAssignInfluencerPlan,getAllCampaignsLite
 } = require('../controllers/adminController');
 
 const {
@@ -16,6 +16,9 @@ router.post('/login', login);
 router.post('/brand/getlist', getAllBrands);
 router.post('/influencer/getlist', getList);
 router.post('/campaign/getlist', getAllCampaigns);
+router.post('/campaign/lite', getAllCampaignsLite);
+
+
 // GET /admin/brand/getById
 router.get('/brand/getById', getBrandById);
 router.get('/influencer/getById', getByInfluencerId);
