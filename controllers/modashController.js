@@ -1676,7 +1676,6 @@ async function exportSavedInfluencersCsv(req, res) {
   try {
     const body = req.body || {};
 
-    // ---------------- config
     const MAX_EXPORT = 100_000;
 
     // ✅ selected export
@@ -1690,7 +1689,7 @@ async function exportSavedInfluencersCsv(req, res) {
     const limitFromBody = Math.min(MAX_EXPORT, Math.max(1, parseInt(String(limitRaw), 10) || 1000));
     const limit = selectedIds.length ? Math.min(MAX_EXPORT, selectedIds.length) : limitFromBody;
 
-    // ---------------- filters (no pagination)
+    // filters (no pagination)
     const provider = cleanStr(body.provider || body.platform || '').toLowerCase();
     const qRaw = cleanStr(body.q || body.search || '');
     const influencerId = cleanStr(body.influencerId || body.influencer_id || '');
@@ -1706,7 +1705,6 @@ async function exportSavedInfluencersCsv(req, res) {
     const dirParam = cleanStr(body.dir || body.sortOrder || 'desc').toLowerCase();
     const dir = dirParam === 'asc' ? 1 : -1;
 
-    // base filter
     const filter = {};
 
     if (provider) {
@@ -1750,7 +1748,7 @@ async function exportSavedInfluencersCsv(req, res) {
       filter['categories.0'] = { $exists: true };
     }
 
-    // ✅ search like getSavedInfluencers
+    // search like getSavedInfluencers
     if (qRaw) {
       const q = qRaw.trim();
       const qNoAt = q.replace(/^@/, '').trim();
@@ -1758,7 +1756,6 @@ async function exportSavedInfluencersCsv(req, res) {
       const rx = new RegExp(escapeRegex(q), 'i');
       const rxNoAt = qNoAt ? new RegExp(escapeRegex(qNoAt), 'i') : null;
 
-      // merge with existing $or if present
       const orSearch = [
         { username: rx },
         { fullname: rx },
@@ -1779,14 +1776,13 @@ async function exportSavedInfluencersCsv(req, res) {
       }
     }
 
-    // sort mapping
     const sort = (() => {
       if (sortKey === 'followers') return { followers: dir, updatedAt: -1 };
       if (sortKey === 'createdat') return { createdAt: dir };
       return { updatedAt: dir };
     })();
 
-    // keep light projection
+    // ✅ projection (+categories for niche/sub-niche)
     const projection = {
       provider: 1,
       userId: 1,
@@ -1794,28 +1790,16 @@ async function exportSavedInfluencersCsv(req, res) {
       fullname: 1,
       handle: 1,
       url: 1,
-      picture: 1,
-
       followers: 1,
-      engagements: 1,
       engagementRate: 1,
+      engagements: 1,
       averageViews: 1,
-
-      isVerified: 1,
-      isPrivate: 1,
-
       country: 1,
-      state: 1,
-      city: 1,
-      gender: 1,
-      ageGroup: 1,
       language: 1,
-
-      influencerId: 1,
-      influencer: 1,
-
+      categories: 1,
       createdAt: 1,
       updatedAt: 1,
+      influencerId: 1,
     };
 
     let items = await ModashProfile.find(filter)
@@ -1824,7 +1808,7 @@ async function exportSavedInfluencersCsv(req, res) {
       .limit(limit)
       .lean();
 
-    // ✅ if selectedIds passed: preserve the same order as selected list
+    // preserve selection order if selectedIds passed
     if (selectedIds.length) {
       const rank = new Map(selectedIds.map((id, idx) => [String(id), idx]));
       items.sort((a, b) => {
@@ -1835,7 +1819,7 @@ async function exportSavedInfluencersCsv(req, res) {
     }
 
     // ---------------- CSV helpers
-    const dash = '—';
+    const dash = '--';
 
     const csvEscape = (v) => {
       const s = String(v ?? '');
@@ -1849,72 +1833,125 @@ async function exportSavedInfluencersCsv(req, res) {
       if (!Number.isFinite(n)) return dash;
       return `${(n * 100).toFixed(2)}%`;
     };
-    const fmtBool = (v) => (v === true ? 'Yes' : v === false ? 'No' : dash);
-    const fmtDateOnly = (v) => {
-      if (!v) return dash;
-      const d = v instanceof Date ? v : new Date(v);
-      if (Number.isNaN(d.getTime())) return dash;
-      const yyyy = d.getFullYear();
-      const mm = String(d.getMonth() + 1).padStart(2, '0');
-      const dd = String(d.getDate()).padStart(2, '0');
-      return `${yyyy}-${mm}-${dd}`;
+
+    const getUsernameNoAt = (doc) => cleanStr(doc.username || doc.handle || '').replace(/^@/, '');
+    const getHandleAt = (doc) => {
+      const u = getUsernameNoAt(doc);
+      return u ? `@${u}` : dash;
     };
 
-    // ---------------- CSV header (edit if you want)
+    const getLang = (doc) => {
+      const l = doc.language;
+      if (!l) return dash;
+      if (typeof l === 'string') return l || dash;
+      if (typeof l === 'object') return cleanStr(l.name) || cleanStr(l.code) || dash;
+      return dash;
+    };
+
+    const getLinks = (doc) => {
+      const u = getUsernameNoAt(doc);
+      const prov = cleanStr(doc.provider).toLowerCase();
+      const rawUrl = cleanStr(doc.url);
+
+      const yt =
+        prov === 'youtube'
+          ? rawUrl || (doc.userId ? `https://www.youtube.com/channel/${doc.userId}` : (u ? `https://www.youtube.com/@${u}` : dash))
+          : dash;
+
+      const ig =
+        prov === 'instagram'
+          ? rawUrl || (u ? `https://www.instagram.com/${u}` : dash)
+          : dash;
+
+      const tt =
+        prov === 'tiktok'
+          ? rawUrl || (u ? `https://www.tiktok.com/@${u}` : dash)
+          : dash;
+
+      return { yt, ig, tt };
+    };
+
+    const getNiche = (doc) => {
+      const cats = Array.isArray(doc.categories) ? doc.categories : [];
+      const first = cats[0] || null;
+      const name = cleanStr(first?.categoryName || first?.name || '');
+      return name || dash;
+    };
+
+    const getSubNiche = (doc) => {
+      const cats = Array.isArray(doc.categories) ? doc.categories : [];
+      const first = cats[0] || null;
+      const sub = cleanStr(first?.subcategoryName || first?.subName || first?.subcategory || '');
+      return sub || dash;
+    };
+
+    // ---------------- ✅ CollabGlam header format
     const header = [
       'Sr. No.',
-      'Modash Doc ID',
-      'Platform',
-      'User ID',
-      'Username',
-      'Handle',
-      'Full Name',
-      'Profile URL',
-      'Followers',
-      'Engagement Rate',
-      'Avg Engagements',
-      'Avg Views',
-      'Verified',
-      'Private',
-      'Country',
-      'State',
-      'City',
+      'Handle Title',
+      'Influencer Handle',
+      'Email',
+      'Phone',
+      'YouTube Handle link',
+      'Instagram Handle link',
+      'TikTok Handle link',
+      'Country/Region',
       'Language',
-      'Gender',
-      'Age Group',
-      'InfluencerId (linked)',
-      'Created At',
-      'Updated At',
+      'Niche',
+      'Sub-Niche',
+      'Subscriber/Follower count',
+      'Avg Views (last 15 videos)',
+      'Engagement Rate',
+      'Upload Frequency',
+      'Last Sponsor',
+      'Managed by Any Agency',
+      'Top Audience Country',
+      'Average Audience Age',
+      'CollabGlam Demographics link',
+      'Last Contacted Date',
+      'Last Working Handle',
+      'Last 1st followup date',
+      'Last 2nd followup date',
+      'Status',
+      'Reply',
+      'Notes',
     ];
 
     const lines = [];
     lines.push(header.map(csvEscape).join(','));
 
     items.forEach((doc, idx) => {
+      const links = getLinks(doc);
+
       const row = [
         idx + 1,
-        fmt(doc._id),
-        fmt(doc.provider),
-        fmt(doc.userId),
-        fmt(doc.username),
-        fmt(doc.handle),
-        fmt(doc.fullname),
-        fmt(doc.url),
-        fmtNum(doc.followers),
-        fmtPercent(doc.engagementRate),
-        fmtNum(doc.engagements),
-        fmtNum(doc.averageViews),
-        fmtBool(doc.isVerified),
-        fmtBool(doc.isPrivate),
-        fmt(doc.country),
-        fmt(doc.state),
-        fmt(doc.city),
-        fmt(doc.language),
-        fmt(doc.gender),
-        fmt(doc.ageGroup),
-        fmt(doc.influencerId),
-        fmtDateOnly(doc.createdAt),
-        fmtDateOnly(doc.updatedAt),
+        fmt(doc.fullname),               // Handle Title
+        fmt(getHandleAt(doc)),           // Influencer Handle
+        dash,                            // Email (not in ModashProfile)
+        dash,                            // Phone
+        fmt(links.yt),                   // YouTube link
+        fmt(links.ig),                   // Instagram link
+        fmt(links.tt),                   // TikTok link
+        fmt(doc.country),                // Country/Region
+        fmt(getLang(doc)),               // Language
+        fmt(getNiche(doc)),              // Niche
+        fmt(getSubNiche(doc)),           // Sub-Niche
+        fmtNum(doc.followers),           // Follower count
+        fmtNum(doc.averageViews),        // Avg Views (best available)
+        fmtPercent(doc.engagementRate),  // Engagement Rate
+        dash,                            // Upload Frequency
+        dash,                            // Last Sponsor
+        dash,                            // Managed by Any Agency
+        dash,                            // Top Audience Country
+        dash,                            // Average Audience Age
+        dash,                            // CollabGlam Demographics link
+        dash,                            // Last Contacted Date
+        fmt(getHandleAt(doc)),           // Last Working Handle
+        dash,                            // Last 1st followup date
+        dash,                            // Last 2nd followup date
+        dash,                            // Status
+        dash,                            // Reply
+        dash,                            // Notes
       ];
 
       lines.push(row.map(csvEscape).join(','));
@@ -1922,7 +1959,6 @@ async function exportSavedInfluencersCsv(req, res) {
 
     const csv = lines.join('\n');
 
-    // filename
     const ts = new Date();
     const stamp = `${ts.getFullYear()}${String(ts.getMonth() + 1).padStart(2, '0')}${String(ts.getDate()).padStart(2, '0')}_${String(
       ts.getHours()
