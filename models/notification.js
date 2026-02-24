@@ -9,7 +9,7 @@ const NotificationSchema = new mongoose.Schema(
     // Exactly one of these must be present:
     brandId: { type: String, default: null, index: true },
     influencerId: { type: String, default: null, index: true },
-
+    adminId: { type: String, default: null, index: true },
     type: { type: String, required: true },          // e.g. "campaign.match", "contract.accepted", "apply.submitted"
     title: { type: String, required: true },
     message: { type: String, default: '' },
@@ -25,12 +25,19 @@ const NotificationSchema = new mongoose.Schema(
 );
 
 // XOR validation: must target brand OR influencer (not both, not none)
-NotificationSchema.pre('validate', function (next) {
-  const hasBrand = !!this.brandId;
-  const hasInf = !!this.influencerId;
-  if ((hasBrand && hasInf) || (!hasBrand && !hasInf)) {
-    return next(new Error('Notification must target exactly one recipient: brandId or influencerId.'));
+NotificationSchema.pre("validate", function (next) {
+  const recipients = [this.brandId, this.influencerId, this.adminId].filter(
+    (v) => v !== null && v !== undefined && String(v).trim() !== ""
+  );
+
+  if (recipients.length !== 1) {
+    return next(
+      new Error(
+        "Notification must target exactly one recipient: brandId, influencerId, or adminId."
+      )
+    );
   }
+
   next();
 });
 

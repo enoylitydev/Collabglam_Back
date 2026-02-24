@@ -90,6 +90,11 @@ function emitToInfluencer(influencerId, event, payload) {
   io.to(`influencer:${influencerId}`).emit(event, payload);
 }
 
+function emitToAdmin(adminId, event, payload) {
+  if (!adminId || !io) return;
+  io.to(`admin:${adminId}`).emit(event, payload);
+}
+
 /** ---------- initialize both transports ---------- */
 function init(server) {
   // Socket.IO (keep default path /socket.io — do NOT set to /ws)
@@ -107,6 +112,7 @@ function init(server) {
       try {
         if (brandId) socket.join(`brand:${brandId}`);
         if (influencerId) socket.join(`influencer:${influencerId}`);
+        if (adminId) socket.join(`admin:${adminId}`);
       } catch (_) {}
     });
 
@@ -212,6 +218,7 @@ function init(server) {
 
 module.exports = {
   init,
+  emitToAdmin,
   emitToBrand,
   emitToInfluencer,
   broadcastToChatRoom,

@@ -17,4 +17,10 @@ router.post('/brand/delete', ctrl.deleteForBrand);
 
 router.post('/influencer/delete', ctrl.deleteForInfluencer);
 
+// Admin notifications
+router.get('/admin', ctrl.listForAdmin);
+router.post('/admin/mark-read', ctrl.markReadForAdmin);
+router.post('/admin/mark-all-read', ctrl.markAllReadForAdmin);
+router.post('/admin/delete', ctrl.deleteForAdmin);
+
 module.exports = router;

@@ -83,4 +83,11 @@ router.post("/status", campaignController.updateCampaignStatus);
 
 router.post("/history-list", campaignController.listApplicants);
 
+router.post("/update-pending", campaignController.approveCampaignPendingUpdate);
+router.post("/reject-pending", campaignController.rejectCampaignPendingUpdate);
+
+router.post('/request-review', campaignController.requestBrandReview);
+router.post('/confirm-readiness', campaignController.confirmCampaignReadiness);
+router.post('/publish', campaignController.publishCampaign);
+
 module.exports = router;
