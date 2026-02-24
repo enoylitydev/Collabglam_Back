@@ -17,52 +17,145 @@ const MissingEmail = require('../models/MissingEmail');
 const Invitation = require('../models/NewInvitations');
 const { _sendCampaignInvitationInternal } = require('../controllers/emailController');
 
-const { fetch, Agent } = require('undici');
+const SubscriptionPlan = require("../models/subscription");
+const PortalSettings = require("../models/portalSettings");
+const subscriptionHelper = require("../utils/subscriptionHelper");
 
-
-const { generateInvoicePdfBuffer } = require("../emails/paymentEmailController");
-
-function safeText(v) {
-  return String(v ?? "").trim();
+// same logic as subscriptionController (keep consistent)
+function featureValueToLimit(value) {
+  if (typeof value === "number") return value;
+  if (value && typeof value === "object" && value.unlimited === true) return -1;
+  return 0;
 }
 
-function pickDisplayName(user, role, userId) {
-  return (
-    user?.name ||
-    user?.fullName ||
-    user?.brandName ||
-    user?.companyName ||
-    user?.influencerName ||
-    user?.username ||
-    `${role} (${userId})`
-  );
+function buildSubscriptionFromPlan(plan, options = {}) {
+  const now = new Date();
+
+  const expire = subscriptionHelper.computeExpiry(plan, {
+    billingCycle: options.billingCycle || "monthly",
+    durationDays: options.durationDays,
+    durationMinutes: options.durationMinutes,
+    durationMins: options.durationMins,
+    expiresAt: options.expiresAt, // if passed, it wins
+  });
+
+  const featureSnapshot = (plan.features || []).map((f) => ({
+    key: f.key,
+    limit: featureValueToLimit(f.value),
+    used: 0,
+  }));
+
+  return {
+    planId: plan.planId,
+    planName: plan.name,
+    startedAt: now,
+    expiresAt: expire,
+    features: featureSnapshot,
+    billingCycle: options.billingCycle || "monthly", // optional (safe)
+  };
 }
 
-async function resolvePlanName({ planId, role, planName }) {
-  const direct = safeText(planName);
-  if (direct) return direct;
-
+// ---------------- Subscription Subschemas ----------------
+exports.adminAssignBrandPlan = async (req, res) => {
   try {
-    const plan = await SubscriptionPlan.findOne({ planId, role }).lean();
-    return safeText(plan?.displayName || plan?.name || "");
-  } catch {
-    return "";
+    const brandId = String(req.body?.brandId || "").trim();
+    const planId = String(req.body?.planId || "").trim();
+    const billingCycle = String(req.body?.billingCycle || "monthly").trim(); // monthly|annual
+
+    // NEW: admin can decide duration
+    const durationDays = req.body?.durationDays;
+    const durationMinutes = req.body?.durationMinutes;
+    const durationMins = req.body?.durationMins;
+    const expiresAt = req.body?.expiresAt;
+
+    if (!brandId || !planId) {
+      return res.status(400).json({ message: "brandId and planId required" });
+    }
+
+    const plan = await SubscriptionPlan.findOne({
+      planId,
+      role: "Brand",
+      status: "active",
+    }).lean();
+
+    if (!plan) return res.status(404).json({ message: "Brand plan not found/archived" });
+
+    // ✅ replace undefined buildBrandSubscriptionFromPlan
+    const subscription = buildSubscriptionFromPlan(plan, {
+      billingCycle,
+      durationDays,
+      durationMinutes,
+      durationMins,
+      expiresAt,
+    });
+
+    const updated = await Brand.findOneAndUpdate(
+      { brandId },
+      { $set: { subscription, subscriptionExpired: false } },
+      { new: true }
+    )
+      .select("brandId name email subscription subscriptionExpired")
+      .lean();
+
+    if (!updated) return res.status(404).json({ message: "Brand not found" });
+
+    return res.json({ status: "success", brand: updated });
+  } catch (e) {
+    console.error("adminAssignBrandPlan error:", e);
+    return res.status(500).json({ message: "Internal server error" });
   }
-}
+};
 
+exports.adminAssignInfluencerPlan = async (req, res) => {
+  try {
+    const influencerId = String(req.body?.influencerId || "").trim();
+    const planId = String(req.body?.planId || "").trim();
 
-// --- YouTube API bits (extracted) ---
-const YT_API_KEY    = process.env.YOUTUBE_API_KEY;          // required
-const YT_TIMEOUT_MS = Number(process.env.YOUTUBE_TIMEOUT_MS || 12000);
-const YT_BASE       = 'https://www.googleapis.com/youtube/v3/channels';
+    // NEW: admin can decide duration
+    const durationDays = req.body?.durationDays;
+    const durationMinutes = req.body?.durationMinutes;
+    const durationMins = req.body?.durationMins;
+    const expiresAt = req.body?.expiresAt;
 
-const ytAgent = new Agent({
-  keepAliveTimeout: (Number(process.env.KEEP_ALIVE_SECONDS || 60)) * 1000,
-  keepAliveMaxTimeout: (Number(process.env.KEEP_ALIVE_SECONDS || 60)) * 1000,
-});
+    if (!influencerId || !planId) {
+      return res.status(400).json({ message: "influencerId and planId required" });
+    }
 
+    const plan = await SubscriptionPlan.findOne({
+      planId,
+      role: "Influencer",
+      status: "active",
+    }).lean();
+
+    if (!plan) return res.status(404).json({ message: "Influencer plan not found/archived" });
+
+    // ✅ replace undefined buildInfluencerSubscriptionFromPlan
+    const subscription = buildSubscriptionFromPlan(plan, {
+      billingCycle: "monthly", // optional; or allow req.body.billingCycle if you want
+      durationDays,
+      durationMinutes,
+      durationMins,
+      expiresAt,
+    });
+
+    const updated = await Influencer.findOneAndUpdate(
+      { influencerId },
+      { $set: { subscription, subscriptionExpired: false } },
+      { new: true }
+    )
+      .select("influencerId name email subscription subscriptionExpired")
+      .lean();
+
+    if (!updated) return res.status(404).json({ message: "Influencer not found" });
+
+    return res.json({ status: "success", influencer: updated });
+  } catch (e) {
+    console.error("adminAssignInfluencerPlan error:", e);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};
 // shared regex for validation
-const EMAIL_RX  = /^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$/;
+const EMAIL_RX = /^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$/;
 const HANDLE_RX = /^@[A-Za-z0-9._\-]+$/;
 
 function normalizeHandle(h) {
@@ -72,283 +165,210 @@ function normalizeHandle(h) {
   return withAt.toLowerCase();
 }
 
-function labelFromWikiUrl(url) {
-  try {
-    const last = decodeURIComponent(String(url).split('/').pop() || '');
-    return last.replace(/_/g, ' ');
-  } catch {
-    return url;
-  }
-}
+exports.login = async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password)
+    return res.status(400).json({ message: 'Email & password are required' });
 
-async function fetchYouTubeChannelByHandle(ytHandle) {
-  if (!YT_API_KEY) {
-    throw new Error('Missing YOUTUBE_API_KEY environment variable.');
-  }
-  if (!ytHandle) {
-    throw new Error('Missing YouTube handle.');
+  const admin = await Admin.findOne({ email: email.toLowerCase() });
+  if (!admin || !(await admin.correctPassword(password))) {
+    return res.status(401).json({ message: 'Invalid credentials' });
   }
 
-  const forHandle = normalizeHandle(ytHandle);
-  const params = new URLSearchParams({
-    part: 'snippet,statistics,topicDetails',
-    forHandle,
-    key: YT_API_KEY
-  });
-
-  const ac = new AbortController();
-  const timeout = setTimeout(
-    () => ac.abort(new Error('YouTube API timeout')),
-    YT_TIMEOUT_MS
+  const token = jwt.sign(
+    { adminId: admin.adminId, email: admin.email },
+    process.env.JWT_SECRET,
+    { expiresIn: '12h' }
   );
 
-  try {
-    const r = await fetch(`${YT_BASE}?${params.toString()}`, {
-      method: 'GET',
-      dispatcher: ytAgent,
-      signal: ac.signal
-    });
-
-    if (!r.ok) {
-      const txt = await r.text().catch(() => '');
-      throw new Error(`YouTube API ${r.status}: ${txt || r.statusText}`);
-    }
-
-    const data = await r.json();
-    const item = data?.items?.[0];
-    if (!item) return null;
-
-    const { id: channelId, snippet = {}, statistics = {}, topicDetails = {} } = item;
-    const hidden = !!statistics.hiddenSubscriberCount;
-    const topicCategories = Array.isArray(topicDetails.topicCategories)
-      ? topicDetails.topicCategories
-      : [];
-
-    return {
-      channelId,
-      title: snippet.title || '',
-      handle: forHandle,
-      urlByHandle: `https://www.youtube.com/${forHandle}`,
-      urlById: channelId ? `https://www.youtube.com/channel/${channelId}` : null,
-      description: snippet.description || '',
-      country: snippet.country || null,
-      subscriberCount: hidden ? null : Number(statistics.subscriberCount ?? 0),
-      videoCount: Number(statistics.videoCount ?? 0),
-      viewCount: Number(statistics.viewCount ?? 0),
-      topicCategories,
-      topicCategoryLabels: topicCategories.map(labelFromWikiUrl),
-      fetchedAt: new Date()
-    };
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-
-exports.login = async (req, res) => {
-    const { email, password } = req.body;
-    if (!email || !password)
-        return res.status(400).json({ message: 'Email & password are required' });
-
-    const admin = await Admin.findOne({ email: email.toLowerCase() });
-    if (!admin || !(await admin.correctPassword(password))) {
-        return res.status(401).json({ message: 'Invalid credentials' });
-    }
-
-    const token = jwt.sign(
-        { adminId: admin.adminId, email: admin.email },
-        process.env.JWT_SECRET,
-        { expiresIn: '12h' }
-    );
-
-    res.json({
-        message: 'Login successful',
-        token,
-        admin: { adminId: admin.adminId, email: admin.email }
-    });
+  res.json({
+    message: 'Login successful',
+    token,
+    admin: { adminId: admin.adminId, email: admin.email }
+  });
 };
 
 
 exports.getAllBrands = async (req, res) => {
-    try {
-        // 1) Pull pagination, search & sort params from the body
-        const page = Math.max(parseInt(req.body.page, 10) || 1, 1);
-        const limit = Math.min(Math.max(parseInt(req.body.limit, 10) || 10, 1), 100);
-        const search = (req.body.search || '').trim();
-        const sortBy = req.body.sortBy || 'name';
-        const sortOrder = (req.body.sortOrder || 'asc').toLowerCase();
+  try {
+    // 1) Pull pagination, search & sort params from the body
+    const page = Math.max(parseInt(req.body.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.body.limit, 10) || 10, 1), 100);
+    const search = (req.body.search || '').trim();
+    const sortBy = req.body.sortBy || 'name';
+    const sortOrder = (req.body.sortOrder || 'asc').toLowerCase();
 
-        // 2) Build filter
-        const filter = {};
-        if (search) {
-            const re = new RegExp(search, 'i');
-            filter.$or = [{ name: re }, { email: re }];
-        }
-
-        // 3) Count total for meta
-        const total = await Brand.countDocuments(filter);
-
-        // 4) Validate sort inputs & build sort object
-        const ALLOWED_SORT_FIELDS = ['name', 'email', 'createdAt'];
-        const sortField = ALLOWED_SORT_FIELDS.includes(sortBy) ? sortBy : 'name';
-        const direction = sortOrder === 'desc' ? -1 : 1;
-        const sortObj = { [sortField]: direction };
-
-        // 5) Fetch the page with dynamic sort
-        const brands = await Brand.find(filter)
-            .select('-password -_id -__v')
-            .sort(sortObj)
-            .skip((page - 1) * limit)
-            .limit(limit)
-            .lean();
-
-        // 6) Return structured response
-        return res.status(200).json({
-            page,
-            limit,
-            total,
-            totalPages: Math.ceil(total / limit),
-            brands
-        });
-    } catch (error) {
-        console.error('Error in getAllBrands:', error);
-        return res.status(500).json({ message: 'Internal server error' });
+    // 2) Build filter
+    const filter = {};
+    if (search) {
+      const re = new RegExp(search, 'i');
+      filter.$or = [{ name: re }, { email: re }];
     }
+
+    // 3) Count total for meta
+    const total = await Brand.countDocuments(filter);
+
+    // 4) Validate sort inputs & build sort object
+    const ALLOWED_SORT_FIELDS = ['name', 'email', 'createdAt'];
+    const sortField = ALLOWED_SORT_FIELDS.includes(sortBy) ? sortBy : 'name';
+    const direction = sortOrder === 'desc' ? -1 : 1;
+    const sortObj = { [sortField]: direction };
+
+    // 5) Fetch the page with dynamic sort
+    const brands = await Brand.find(filter)
+      .select('-password -_id -__v')
+      .sort(sortObj)
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean();
+
+    // 6) Return structured response
+    return res.status(200).json({
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit),
+      brands
+    });
+  } catch (error) {
+    console.error('Error in getAllBrands:', error);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
 };
 
 
 // controllers/influencerController.js
 exports.getList = async (req, res) => {
-    try {
-        // 1) Pull pagination, search & sort params from the body
-        const page = Math.max(parseInt(req.body.page, 10) || 1, 1);
-        const limit = Math.min(Math.max(parseInt(req.body.limit, 10) || 10, 1), 100);
-        const search = (req.body.search || '').trim();
-        const sortBy = req.body.sortBy || 'name';
-        const sortOrder = (req.body.sortOrder || 'asc').toLowerCase();
+  try {
+    // 1) Pull pagination, search & sort params from the body
+    const page = Math.max(parseInt(req.body.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.body.limit, 10) || 10, 1), 100);
+    const search = (req.body.search || '').trim();
+    const sortBy = req.body.sortBy || 'name';
+    const sortOrder = (req.body.sortOrder || 'asc').toLowerCase();
 
-        // 2) Build filter (searching name or email)
-        const filter = {};
-        if (search) {
-            const re = new RegExp(search, 'i');
-            filter.$or = [{ name: re }, { email: re }];
-        }
-
-        // 3) Get total count for pagination meta
-        const total = await Influencer.countDocuments(filter);
-
-        // 4) Validate sort inputs & build sort object
-        const ALLOWED_SORT = ['name', 'email', 'createdAt'];
-        const field = ALLOWED_SORT.includes(sortBy) ? sortBy : 'name';
-        const dir = sortOrder === 'desc' ? -1 : 1;
-        const sortObj = { [field]: dir };
-
-        // 5) Fetch the page
-        const influencers = await Influencer.find(filter)
-            .select('-password -__v')
-            .sort(sortObj)
-            .skip((page - 1) * limit)
-            .limit(limit)
-            .lean();
-
-        // 6) Return structured response
-        return res.status(200).json({
-            page,
-            limit,
-            total,
-            totalPages: Math.ceil(total / limit),
-            influencers
-        });
-    } catch (error) {
-        console.error('Error fetching influencers:', error);
-        return res.status(500).json({ message: 'Internal server error' });
+    // 2) Build filter (searching name or email)
+    const filter = {};
+    if (search) {
+      const re = new RegExp(search, 'i');
+      filter.$or = [{ name: re }, { email: re }];
     }
+
+    // 3) Get total count for pagination meta
+    const total = await Influencer.countDocuments(filter);
+
+    // 4) Validate sort inputs & build sort object
+    const ALLOWED_SORT = ['name', 'email', 'createdAt'];
+    const field = ALLOWED_SORT.includes(sortBy) ? sortBy : 'name';
+    const dir = sortOrder === 'desc' ? -1 : 1;
+    const sortObj = { [field]: dir };
+
+    // 5) Fetch the page
+    const influencers = await Influencer.find(filter)
+      .select('-password -__v')
+      .sort(sortObj)
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean();
+
+    // 6) Return structured response
+    return res.status(200).json({
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit),
+      influencers
+    });
+  } catch (error) {
+    console.error('Error fetching influencers:', error);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
 };
 
 
 exports.getAllCampaigns = async (req, res) => {
-    try {
-        // 1) Parse pagination, search, sort & status from body
-        const page = Math.max(parseInt(req.body.page, 10) || 1, 1);
-        const limit = Math.min(Math.max(parseInt(req.body.limit, 10) || 10, 1), 100);
-        const search = (req.body.search || '').trim();
-        const sortBy = req.body.sortBy || 'createdAt';
-        const sortOrder = (req.body.sortOrder || 'desc').toLowerCase();
-        const statusFlag = parseInt(req.body.type, 10) || 0;  // 0 = all, 1 = active, 2 = inactive
+  try {
+    // 1) Parse pagination, search, sort & status from body
+    const page = Math.max(parseInt(req.body.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.body.limit, 10) || 10, 1), 100);
+    const search = (req.body.search || '').trim();
+    const sortBy = req.body.sortBy || 'createdAt';
+    const sortOrder = (req.body.sortOrder || 'desc').toLowerCase();
+    const statusFlag = parseInt(req.body.type, 10) || 0;  // 0 = all, 1 = active, 2 = inactive
 
-        // 2) Build filter
-        const filter = {};
+    // 2) Build filter
+    const filter = {};
 
-        // 2a) text search on brandName, productOrServiceName or description
-        if (search) {
-            const re = new RegExp(search, 'i');
-            filter.$or = [
-                { brandName: re },
-                { productOrServiceName: re },
-                { description: re }
-            ];
-        }
-
-        // 2b) status filtering on isActive
-        if (statusFlag === 1) {
-            filter.isActive = 1;
-        } else if (statusFlag === 2) {
-            filter.isActive = 0;
-        }
-        // (statusFlag === 0 → no filter)
-
-        // 3) Count for pagination meta
-        const total = await Campaign.countDocuments(filter);
-
-        // 4) Validate sort field & direction
-        const ALLOWED_SORT = ['brandName', 'productOrServiceName', 'createdAt', 'timeline.startDate', 'timeline.endDate'];
-        const field = ALLOWED_SORT.includes(sortBy) ? sortBy : 'createdAt';
-        const dir = sortOrder === 'asc' ? 1 : -1;
-
-        // 5) Fetch paged results
-        const campaigns = await Campaign.find(filter)
-            .select('-__v')
-            .sort({ [field]: dir })
-            .skip((page - 1) * limit)
-            .limit(limit)
-            .lean();
-
-        // 6) Return structured response
-        return res.status(200).json({
-            page,
-            limit,
-            total,
-            totalPages: Math.ceil(total / limit),
-            status: statusFlag,
-            campaigns
-        });
-    } catch (err) {
-        console.error('Error in getAllCampaigns:', err);
-        return res.status(500).json({ message: 'Internal server error' });
+    // 2a) text search on brandName, productOrServiceName or description
+    if (search) {
+      const re = new RegExp(search, 'i');
+      filter.$or = [
+        { brandName: re },
+        { productOrServiceName: re },
+        { description: re }
+      ];
     }
+
+    // 2b) status filtering on isActive
+    if (statusFlag === 1) {
+      filter.isActive = 1;
+    } else if (statusFlag === 2) {
+      filter.isActive = 0;
+    }
+    // (statusFlag === 0 → no filter)
+
+    // 3) Count for pagination meta
+    const total = await Campaign.countDocuments(filter);
+
+    // 4) Validate sort field & direction
+    const ALLOWED_SORT = ['brandName', 'productOrServiceName', 'createdAt', 'timeline.startDate', 'timeline.endDate'];
+    const field = ALLOWED_SORT.includes(sortBy) ? sortBy : 'createdAt';
+    const dir = sortOrder === 'asc' ? 1 : -1;
+
+    // 5) Fetch paged results
+    const campaigns = await Campaign.find(filter)
+      .select('-__v')
+      .sort({ [field]: dir })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean();
+
+    // 6) Return structured response
+    return res.status(200).json({
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit),
+      status: statusFlag,
+      campaigns
+    });
+  } catch (err) {
+    console.error('Error in getAllCampaigns:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
 };
 
 
 exports.getBrandById = async (req, res) => {
-    try {
-        const brandId = req.query.id;
-        if (!brandId) return res.status(400).json({ message: 'Query parameter id is required.' });
+  try {
+    const brandId = req.query.id;
+    if (!brandId) return res.status(400).json({ message: 'Query parameter id is required.' });
 
-        // exclude password, internal fields
-        const brandDoc = await Brand.findOne({ brandId })
-            .select('-password -_id -__v')
-            .lean();
-        if (!brandDoc) return res.status(404).json({ message: 'Brand not found.' });
+    // exclude password, internal fields
+    const brandDoc = await Brand.findOne({ brandId })
+      .select('-password -_id -__v')
+      .lean();
+    if (!brandDoc) return res.status(404).json({ message: 'Brand not found.' });
 
-        // fetch wallet balance
-        const milestoneDoc = await Milestone.findOne({ brandId }).lean();
-        const walletBalance = milestoneDoc ? milestoneDoc.walletBalance : 0;
+    // fetch wallet balance
+    const milestoneDoc = await Milestone.findOne({ brandId }).lean();
+    const walletBalance = milestoneDoc ? milestoneDoc.walletBalance : 0;
 
-        return res.status(200).json({ ...brandDoc, walletBalance });
-    } catch (error) {
-        console.error('Error in getBrandById:', error);
-        return res.status(500).json({ message: 'Internal server error while fetching brand.' });
-    }
+    return res.status(200).json({ ...brandDoc, walletBalance });
+  } catch (error) {
+    console.error('Error in getBrandById:', error);
+    return res.status(500).json({ message: 'Internal server error while fetching brand.' });
+  }
 };
 
 // controllers/influencerController.js
@@ -405,25 +425,25 @@ exports.getByInfluencerId = async (req, res) => {
 
 
 exports.getCampaignById = async (req, res) => {
-    try {
-        const campaignsId = req.query.id;
-        if (!campaignsId) {
-            return res
-                .status(400)
-                .json({ message: 'Query parameter id (campaignsId) is required.' });
-        }
-
-        const campaign = await Campaign.findOne({ campaignsId }).populate('interestId', 'name');
-        if (!campaign) {
-            return res.status(404).json({ message: 'Campaign not found.' });
-        }
-        return res.json(campaign);
-    } catch (error) {
-        console.error('Error in getCampaignById:', error);
-        return res
-            .status(500)
-            .json({ message: 'Internal server error while fetching campaign.' });
+  try {
+    const campaignsId = req.query.id;
+    if (!campaignsId) {
+      return res
+        .status(400)
+        .json({ message: 'Query parameter id (campaignsId) is required.' });
     }
+
+    const campaign = await Campaign.findOne({ campaignsId }).populate('interestId', 'name');
+    if (!campaign) {
+      return res.status(404).json({ message: 'Campaign not found.' });
+    }
+    return res.json(campaign);
+  } catch (error) {
+    console.error('Error in getCampaignById:', error);
+    return res
+      .status(500)
+      .json({ message: 'Internal server error while fetching campaign.' });
+  }
 };
 
 
@@ -448,32 +468,32 @@ exports.getCampaignsByBrandId = async (req, res) => {
     }
 
     // 2) Normalize & build base filter
-    const page       = Math.max(parseInt(p, 10), 1);
-    const limit      = Math.min(Math.max(parseInt(l, 10), 1), 100);
+    const page = Math.max(parseInt(p, 10), 1);
+    const limit = Math.min(Math.max(parseInt(l, 10), 1), 100);
     const statusFlag = parseInt(status, 10) || 0;
-    const filter     = { brandId };
+    const filter = { brandId };
 
     // 2a) status filtering
-    if (statusFlag === 1)      filter.isActive = 1;
+    if (statusFlag === 1) filter.isActive = 1;
     else if (statusFlag === 2) filter.isActive = 0;
 
     // 2b) text & numeric search across whole schema
     if (search.trim()) {
       const term = search.trim();
-      const re   = new RegExp(term, 'i');
+      const re = new RegExp(term, 'i');
       const orClauses = [
         // string fields
-        { brandName:            re },
+        { brandName: re },
         { productOrServiceName: re },
-        { description:          re },
+        { description: re },
         { 'targetAudience.location': re },
-        { interestName:         re },
-        { goal:                 re },
-        { creativeBriefText:    re },
-        { additionalNotes:      re },
+        { interestName: re },
+        { goal: re },
+        { creativeBriefText: re },
+        { additionalNotes: re },
         // array-of-strings fields (no $elemMatch)
-        { images:       re },
-        { creativeBrief:re }
+        { images: re },
+        { creativeBrief: re }
       ];
 
       // if it's a number, search numeric fields too
@@ -482,8 +502,8 @@ exports.getCampaignsByBrandId = async (req, res) => {
         orClauses.push(
           { 'targetAudience.age.MinAge': num },
           { 'targetAudience.age.MaxAge': num },
-          { budget:            num },
-          { applicantCount:    num }
+          { budget: num },
+          { applicantCount: num }
         );
       }
 
@@ -503,7 +523,7 @@ exports.getCampaignsByBrandId = async (req, res) => {
       'budget'
     ];
     const field = ALLOWED_SORT.includes(sortBy) ? sortBy : 'createdAt';
-    const dir   = sortOrder.toLowerCase() === 'asc' ? 1 : -1;
+    const dir = sortOrder.toLowerCase() === 'asc' ? 1 : -1;
 
     // 5) Fetch paged results
     const campaigns = await Campaign.find(filter)
@@ -519,7 +539,7 @@ exports.getCampaignsByBrandId = async (req, res) => {
       limit,
       total,
       totalPages: Math.ceil(total / limit),
-      status:     statusFlag,
+      status: statusFlag,
       campaigns
     });
   } catch (err) {
@@ -555,7 +575,7 @@ exports.adminGetInfluencerById = async (req, res) => {
 exports.adminGetInfluencerList = async (req, res) => {
   try {
     // 1) Parse inputs
-    const page  = Math.max(parseInt(req.body.page, 10) || 1, 1);
+    const page = Math.max(parseInt(req.body.page, 10) || 1, 1);
     const limit = Math.min(Math.max(parseInt(req.body.limit, 10) || 10, 1), 100);
     const search = (req.body.search || '').trim();
     const sortBy = (req.body.sortBy || 'createdAt').trim();
@@ -590,7 +610,7 @@ exports.adminGetInfluencerList = async (req, res) => {
       'expiresAt'     // maps to subscription.expiresAt
     ]);
     const field = ALLOWED_SORT.has(sortBy) ? sortBy : 'createdAt';
-    const dir   = sortOrder === 'asc' ? 1 : -1;
+    const dir = sortOrder === 'asc' ? 1 : -1;
 
     // Build sort object (handle nested plan fields)
     const sortObj = {};
@@ -615,7 +635,7 @@ exports.adminGetInfluencerList = async (req, res) => {
     // 5a) Shape response and compute expiry flag robustly
     const now = new Date();
     const influencers = docs.map(d => {
-      const planName  = d.subscription?.planName ?? 'free';
+      const planName = d.subscription?.planName ?? 'free';
       const expiresAt = d.subscription?.expiresAt ?? null;
 
       // Treat as expired if explicit flag set OR expiry date in the past
@@ -653,8 +673,8 @@ exports.adminGetInfluencerList = async (req, res) => {
 
 exports.adminAddYouTubeEmail = async (req, res) => {
   const rawHandle = (req.body?.handle || '').trim();
-  const email     = (req.body?.email  || '').trim();
-  const platform  = 'youtube'; // fixed
+  const email = (req.body?.email || '').trim();
+  const platform = 'youtube'; // fixed
 
   if (!rawHandle || !email) {
     return res.status(400).json({
@@ -774,13 +794,13 @@ exports.listMissingEmail = async (req, res) => {
   const body = req.body || {};
 
   // Pagination
-  const page  = Math.max(1, parseInt(body.page  ?? '1', 10));
+  const page = Math.max(1, parseInt(body.page ?? '1', 10));
   const limit = Math.min(200, Math.max(1, parseInt(body.limit ?? '50', 10)));
 
   // Optional filters
-  const rawSearch         = typeof body.search === 'string' ? body.search.trim() : '';
-  const rawEmail          = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
-  const rawHandle         = typeof body.handle === 'string' ? body.handle.trim() : '';
+  const rawSearch = typeof body.search === 'string' ? body.search.trim() : '';
+  const rawEmail = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+  const rawHandle = typeof body.handle === 'string' ? body.handle.trim() : '';
   const rawCreatedByAdmin = typeof body.createdByAdminId === 'string' ? body.createdByAdminId.trim() : '';
 
   const query = {};
@@ -848,7 +868,7 @@ exports.listMissingEmail = async (req, res) => {
 
 exports.updateMissingEmail = async (req, res) => {
   const missingEmailId = (req.body?.missingEmailId || '').trim();
-  const newEmailRaw    = (req.body?.email || '').trim().toLowerCase();
+  const newEmailRaw = (req.body?.email || '').trim().toLowerCase();
 
   if (!missingEmailId) {
     return res.status(400).json({
@@ -969,7 +989,7 @@ exports.updateMissingEmail = async (req, res) => {
 
 exports.checkMissingEmailByHandle = async (req, res) => {
   try {
-    const rawHandle   = (req.body?.handle || '').trim();
+    const rawHandle = (req.body?.handle || '').trim();
     const rawPlatform = (req.body?.platform || '').trim().toLowerCase();
 
     if (!rawHandle) {
@@ -1034,7 +1054,7 @@ exports.getAllPayments = async (req, res) => {
     const search = (req.body.search || '').trim();
     const sortBy = (req.body.sortBy || 'createdAt').trim();
     const sortOrder = String(req.body.sortOrder || 'desc').toLowerCase();
-    
+
     // Filters
     const statusFilter = (req.body.status || '').trim(); // e.g., 'paid', 'created', 'failed'
     const roleFilter = (req.body.role || '').trim();     // e.g., 'Brand', 'Influencer'
@@ -1096,19 +1116,19 @@ exports.getAllPayments = async (req, res) => {
 
     // Create lookup maps
     const brandMap = {};
-    brands.forEach(b => { 
-      brandMap[b.brandId] = b.name || b.brandName || b.email || 'Unknown Brand'; 
+    brands.forEach(b => {
+      brandMap[b.brandId] = b.name || b.brandName || b.email || 'Unknown Brand';
     });
 
     const influencerMap = {};
-    influencers.forEach(i => { 
-      influencerMap[i.influencerId] = i.name || i.influencerName || i.email || 'Unknown Influencer'; 
+    influencers.forEach(i => {
+      influencerMap[i.influencerId] = i.name || i.influencerName || i.email || 'Unknown Influencer';
     });
 
     // 7) Format Response
     const data = payments.map(p => {
       let displayName = 'Unknown';
-      
+
       if (p.role === 'Brand') {
         displayName = brandMap[p.userId] || `Brand (${p.userId})`;
       } else if (p.role === 'Influencer') {

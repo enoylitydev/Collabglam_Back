@@ -1,61 +1,60 @@
 // utils/subscriptionHelper.js
-const SubscriptionPlan = require("../models/subscription");
 
-/**
- * Returns the FREE plan for a role ("Brand" or "Influencer").
- */
-exports.getFreePlan = async (role) => {
-  const targetName = "free";
-
-  if (!["Brand", "Influencer"].includes(role)) {
-    console.warn("[getFreePlan] Invalid role:", role);
-    return null;
-  }
-
-  // Exact match first
-  let plan = await SubscriptionPlan.findOne({ role, name: targetName })
-    .select("+features +durationMins +durationMinutes +durationDays")
-    .lean();
-
-  if (!plan) {
-    // Case-insensitive fallback
-    plan = await SubscriptionPlan.findOne({ role, name: new RegExp(`^${targetName}$`, "i") })
-      .select("+features +durationMins +durationMinutes +durationDays")
-      .lean();
-  }
-
-  if (!plan) {
-    console.warn("[getFreePlan] No free plan found for role:", role);
-    return null;
-  }
-
-  plan.features = Array.isArray(plan.features) ? plan.features : [];
-  return plan;
-};
-
-/**
- * Compute expiry date.
- * Priority:
- * 1) plan.durationMins (local testing)
- * 2) plan.durationMinutes (legacy)
- * 3) plan.durationDays
- * 4) Default: 30 days
- *
- * fromDate defaults to now, but you can pass existing expiry for renewals.
- */
-exports.computeExpiry = (plan = {}, fromDate = new Date()) => {
+exports.computeExpiry = (plan = {}, fromDate = new Date(), overrides = null) => {
   const toNum = (v) => {
     const n = Number(v);
     return Number.isFinite(n) ? n : 0;
   };
 
-  const minutes =
+  const isPlainObject = (v) =>
+    v && typeof v === "object" && !(v instanceof Date);
+
+  if (isPlainObject(fromDate)) {
+    overrides = fromDate;
+    fromDate = new Date();
+  }
+
+  overrides = isPlainObject(overrides) ? overrides : {};
+
+  const start = new Date(fromDate);
+
+  // 1) explicit expiresAt wins
+  if (overrides.expiresAt) {
+    const dt = new Date(overrides.expiresAt);
+    if (Number.isNaN(dt.getTime())) throw new Error("Invalid expiresAt");
+    if (dt.getTime() <= start.getTime()) {
+      // never past
+      return new Date(start.getTime() + 60 * 1000);
+    }
+    return dt;
+  }
+
+  // 2) duration overrides (admin-controlled)
+  let minutesOverride = 0;
+  if (overrides.durationMins != null) {
+    minutesOverride = toNum(overrides.durationMins);
+  } else if (overrides.durationMinutes != null) {
+    minutesOverride = toNum(overrides.durationMinutes);
+  } else if (overrides.durationDays != null) {
+    minutesOverride = toNum(overrides.durationDays) * 1440;
+  }
+
+  // 3) plan defaults (your existing priority)
+  const planMinutes =
     (toNum(plan.durationMins) > 0 && toNum(plan.durationMins)) ||
     (toNum(plan.durationMinutes) > 0 && toNum(plan.durationMinutes)) ||
     (toNum(plan.durationDays) > 0 && toNum(plan.durationDays) * 1440) ||
-    43200; // 30 days default
+    0;
 
-  const start = new Date(fromDate);
+  // 4) fallback default (monthly/annual optional)
+  const defaultMinutes =
+    overrides.billingCycle === "annual" ? 525600 : 43200; // 365d vs 30d
+
+  const minutes =
+    (minutesOverride > 0 && minutesOverride) ||
+    (planMinutes > 0 && planMinutes) ||
+    defaultMinutes;
+
   const exp = new Date(start.getTime() + minutes * 60 * 1000);
 
   // Safety guard: never return a past date
@@ -63,17 +62,4 @@ exports.computeExpiry = (plan = {}, fromDate = new Date()) => {
     return new Date(start.getTime() + 60 * 1000);
   }
   return exp;
-};
-
-exports.computePrice = (plan = {}, cycle = "monthly") => {
-  if (!plan) return 0;
-
-  if (cycle === "annual") {
-    // If annualCost missing, fallback to 12 * monthlyCost
-    if (typeof plan.annualCost === "number") return plan.annualCost;
-    if (typeof plan.monthlyCost === "number") return plan.monthlyCost * 12;
-    return 0;
-  }
-
-  return typeof plan.monthlyCost === "number" ? plan.monthlyCost : 0;
 };

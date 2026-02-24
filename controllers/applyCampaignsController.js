@@ -11,23 +11,40 @@ const Brand = require('../models/brand');
 const { sendMail } = require('../utils/mailer');
 
 const ACTIVE_CONTRACT_STATUSES = [
-  'draft', 'sent', 'viewed', 'negotiation', 'finalize', 'signing', 'locked', 'rejected'
+  'draft',
+  'sent',
+  'viewed',
+  'negotiation',
+  'finalize',
+  'signing',
+  'locked',
+  'rejected'
 ];
+
+// ✅ Keep feature keys consistent with influencerPlans
+const FEATURE_KEYS = {
+  APPLY_PER_MONTH: 'campaign_applications_per_month',
+  ACTIVE_COLLABS: 'active_collaborations'
+};
 
 // Optional socket.io emitters if app has them set
 function getEmitter(req, key) {
-  try { return req.app?.get?.(key) || (() => { }); } catch { return () => { }; }
+  try {
+    return req.app?.get?.(key) || (() => {});
+  } catch {
+    return () => {};
+  }
+}
+
+function getFeature(infDoc, key) {
+  return (infDoc?.subscription?.features || []).find((f) => f.key === key) || null;
 }
 
 async function countActiveCollaborationsForInfluencer(influencerId) {
   return Contract.countDocuments({
     influencerId: String(influencerId),
     isRejected: { $ne: 1 },
-    $or: [
-      { isAssigned: 1 },
-      { isAccepted: 1 },
-      { status: { $in: ACTIVE_CONTRACT_STATUSES } }
-    ]
+    $or: [{ isAssigned: 1 }, { isAccepted: 1 }, { status: { $in: ACTIVE_CONTRACT_STATUSES } }]
   });
 }
 
@@ -35,17 +52,49 @@ async function buildSubToParentNameMap() {
   const rows = await Category.find({}, 'name subcategories').lean();
   const map = new Map();
   for (const r of rows) {
-    for (const s of (r.subcategories || [])) {
+    for (const s of r.subcategories || []) {
       map.set(String(s.subcategoryId), r.name);
     }
   }
   return map;
 }
 
+/**
+ * Normalize plan/feature limits:
+ * - number (10)
+ * - string ("10")
+ * - object ({ unlimited: true })
+ */
+function readLimit(feature) {
+  if (!feature) return 0;
+
+  const raw = feature.limit ?? feature.value ?? 0;
+
+  // Unlimited object
+  if (raw && typeof raw === 'object') {
+    if (raw.unlimited === true) return 0;
+    // optional future format: { count: 10 }
+    if (Number.isFinite(Number(raw.count))) return Number(raw.count);
+    return 0;
+  }
+
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * Ensures monthly reset window exists for monthly features.
+ * Marks feature as monthly if:
+ * - feature.note contains "per month", OR
+ * - feature.resetsEvery === "monthly", OR
+ * - key ends with "_per_month"
+ */
 async function ensureMonthlyWindow(influencerId, featureKey, featureObj) {
   const isMonthly =
     /per\s*month/i.test(String(featureObj?.note || '')) ||
-    featureObj?.resetsEvery === 'monthly';
+    featureObj?.resetsEvery === 'monthly' ||
+    /_per_month$/i.test(String(featureKey));
+
   if (!isMonthly) return featureObj;
 
   const now = new Date();
@@ -61,60 +110,70 @@ async function ensureMonthlyWindow(influencerId, featureKey, featureObj) {
       {
         $set: {
           'subscription.features.$.used': 0,
-          'subscription.features.$.resetsAt': next
+          'subscription.features.$.resetsAt': next,
+          'subscription.features.$.resetsEvery': 'monthly'
         }
       }
     );
 
-    return { ...featureObj, used: 0, resetsAt: next };
+    return { ...featureObj, used: 0, resetsAt: next, resetsEvery: 'monthly' };
   }
-  return featureObj;
-}
 
-function readLimit(f) {
-  const raw = f?.limit ?? f?.value ?? 0;
-  const n = Number(raw);
-  return Number.isFinite(n) ? n : 0;
+  // Ensure used is always a number
+  const used = Number(featureObj?.used || 0);
+  return { ...featureObj, used: Number.isFinite(used) ? used : 0 };
 }
 
 /**
  * POST /apply
  * Body: { campaignId, influencerId }
  * - Records application
- * - Increments influencer plan usage (apply_to_campaigns_quota)
+ * - Increments influencer plan usage (campaign_applications_per_month)
  * - Updates Campaign applicantCount & hasApplied
  * - Sends:
  *    • Brand notification (apply.submitted) + socket push
  *    • Influencer receipt notification (apply.submitted.self)
  */
 exports.applyToCampaign = async (req, res) => {
-  const { campaignId, influencerId } = req.body;
+  const { campaignId, influencerId } = req.body || {};
   if (!campaignId || !influencerId) {
     return res.status(400).json({ message: 'Both campaignId and influencerId are required' });
   }
 
   try {
-    // 0) Influencer & feature checks
+    // 0) Validate influencer
     const inf = await Influencer.findOne({ influencerId }).lean();
     if (!inf) return res.status(404).json({ message: 'Influencer not found' });
 
-    let applyFeature = (inf.subscription?.features || []).find(f => f.key === 'apply_to_campaigns_quota');
+    // 0.1) Validate campaign exists (prevents applying to deleted/invalid id)
+    const camp = await Campaign.findOne(
+      { campaignsId: campaignId },
+      'campaignsId brandId brandName productOrServiceName'
+    ).lean();
+    if (!camp) return res.status(404).json({ message: 'Campaign not found' });
+
+    // 0.2) Application quota check
+    let applyFeature = getFeature(inf, FEATURE_KEYS.APPLY_PER_MONTH);
     if (!applyFeature) {
       return res.status(403).json({
         message: 'Your subscription plan does not permit campaign applications. Please upgrade.'
       });
     }
-    applyFeature = await ensureMonthlyWindow(influencerId, 'apply_to_campaigns_quota', applyFeature);
+
+    applyFeature = await ensureMonthlyWindow(influencerId, FEATURE_KEYS.APPLY_PER_MONTH, applyFeature);
+
     const applyLimit = readLimit(applyFeature); // 0 => unlimited
-    if (applyLimit > 0 && Number(applyFeature.used || 0) >= applyLimit) {
+    const usedNow = Number(applyFeature.used || 0);
+
+    if (applyLimit > 0 && usedNow >= applyLimit) {
       return res.status(403).json({
         message: `Application limit reached (${applyLimit}). Please upgrade your plan to apply more.`
       });
     }
 
-    // (Suggested) Also gate on active collaborations cap before letting them apply
-    const activeCapFeature = (inf.subscription?.features || []).find(f => f.key === 'active_collaborations_limit');
-    const activeCap = readLimit(activeCapFeature);
+    // 0.3) Active collaborations cap check (uses plan key: active_collaborations)
+    const activeCapFeature = getFeature(inf, FEATURE_KEYS.ACTIVE_COLLABS);
+    const activeCap = readLimit(activeCapFeature); // 0 => unlimited
     if (activeCap > 0) {
       const activeNow = await countActiveCollaborationsForInfluencer(influencerId);
       if (activeNow >= activeCap) {
@@ -125,12 +184,12 @@ exports.applyToCampaign = async (req, res) => {
     }
 
     // 1) Create/update application (dedupe)
-    let record = await ApplyCampaign.findOne({ campaignId }).lean();
-    if (record?.applicants?.some(a => String(a.influencerId) === String(influencerId))) {
+    const existing = await ApplyCampaign.findOne({ campaignId }, 'applicants').lean();
+    if (existing?.applicants?.some((a) => String(a.influencerId) === String(influencerId))) {
       return res.status(400).json({ message: 'You have already applied to this campaign' });
     }
 
-    if (!record) {
+    if (!existing) {
       await ApplyCampaign.create({
         campaignId,
         applicants: [{ influencerId, name: inf.name || '' }]
@@ -142,11 +201,12 @@ exports.applyToCampaign = async (req, res) => {
       );
     }
 
-    // 2) Increment influencer quota usage
+    // 2) Increment influencer quota usage (only if not unlimited)
+    // (Even for unlimited we can still track usage; harmless.)
     await Influencer.updateOne(
       { influencerId },
       { $inc: { 'subscription.features.$[feat].used': 1 } },
-      { arrayFilters: [{ 'feat.key': 'apply_to_campaigns_quota' }] }
+      { arrayFilters: [{ 'feat.key': FEATURE_KEYS.APPLY_PER_MONTH }] }
     );
 
     // 3) Sync applicantCount + hasApplied on Campaign
@@ -158,34 +218,21 @@ exports.applyToCampaign = async (req, res) => {
       { $set: { applicantCount, hasApplied: 1 } }
     );
 
-    // 4) Campaign basic data
-    const camp = await Campaign
-      .findOne({ campaignsId: campaignId }, 'campaignsId brandId brandName productOrServiceName')
-      .lean();
-
-    // 4.1) Fetch brand email
+    // 4) Brand email + display name
     let brandEmail = null;
     let brandDisplayName = camp?.brandName || '';
 
     if (camp?.brandId) {
-      const brandDoc = await Brand.findOne(
-        { brandId: camp.brandId },
-        'email name'
-      ).lean();
-
+      const brandDoc = await Brand.findOne({ brandId: camp.brandId }, 'email name').lean();
       if (brandDoc) {
         brandEmail = brandDoc.email || null;
-        if (!brandDisplayName && brandDoc.name) {
-          brandDisplayName = brandDoc.name;
-        }
+        if (!brandDisplayName && brandDoc.name) brandDisplayName = brandDoc.name;
       }
     }
 
-    // 4.2) Send email to brand (non-fatal on failure)
+    // 4.1) Send email to brand (non-fatal)
     if (brandEmail) {
-      const brandAppBaseUrl =
-        process.env.FRONTEND_ORIGIN || 'https://collabglam.com';
-
+      const brandAppBaseUrl = process.env.FRONTEND_ORIGIN || 'https://collabglam.com';
       const subject = `New application for "${camp?.productOrServiceName || 'your campaign'}"`;
       const dashboardLink = `${brandAppBaseUrl}/brand/created-campaign/applied-inf?id=${campaignId}`;
 
@@ -203,8 +250,8 @@ ${dashboardLink}
 — CollabGlam
       `.trim();
 
-      const accentFrom = "#FFA135";
-      const accentTo = "#FF7236";
+      const accentFrom = '#FFA135';
+      const accentTo = '#FF7236';
 
       const htmlBody = `
   <div style="background-color:#f5f5f7;padding:24px;margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
@@ -291,18 +338,13 @@ ${dashboardLink}
 `;
 
       try {
-        await sendMail({
-          to: brandEmail,
-          subject,
-          text: plainText,
-          html: htmlBody
-        });
+        await sendMail({ to: brandEmail, subject, text: plainText, html: htmlBody });
       } catch (e) {
         console.warn('Email to brand failed (applyToCampaign):', e?.message || e);
       }
     }
 
-    // 5A) ✅ Notify brand (persist + live, as before)
+    // 5A) Notify brand (persist + live)
     if (camp?.brandId) {
       try {
         await createAndEmit({
@@ -324,7 +366,6 @@ ${dashboardLink}
         console.warn('createAndEmit failed (brand apply.submitted):', e?.message || e);
       }
 
-      // Socket.IO (best-effort)
       const emitToBrand = getEmitter(req, 'emitToBrand');
       try {
         emitToBrand(String(camp.brandId), 'application:new', {
@@ -340,13 +381,13 @@ ${dashboardLink}
       }
     }
 
-    // 5B) ✅ Notify influencer (receipt) — appears in their bell immediately
+    // 5B) Notify influencer (receipt)
     try {
       await createAndEmit({
         recipientType: 'influencer',
         influencerId: String(influencerId),
         type: 'apply.submitted.self',
-        title: `Application sent`,
+        title: 'Application sent',
         message: `You applied to "${camp?.productOrServiceName || 'Campaign'}" by ${camp?.brandName || 'Brand'}.`,
         entityType: 'campaign',
         entityId: String(campaignId),
@@ -361,15 +402,20 @@ ${dashboardLink}
       console.warn('createAndEmit failed (influencer apply.submitted.self):', e?.message || e);
     }
 
-    const newUsed = Number(applyFeature.used || 0) + 1;
+    const newUsed = usedNow + 1;
+    const unlimited = applyLimit === 0;
+
     return res.status(200).json({
       message: 'Application recorded',
       campaignId,
       applicantCount,
-      applicationsRemaining: (applyLimit > 0)
-        ? Math.max(0, applyLimit - newUsed)
-        : 0,
-      hasApplied: 1
+      hasApplied: 1,
+
+      // ✅ safer for frontend: null means unlimited
+      applicationsRemaining: unlimited ? null : Math.max(0, applyLimit - newUsed),
+      unlimitedApplications: unlimited,
+      applicationsUsedThisWindow: newUsed,
+      resetsAt: applyFeature?.resetsAt || null
     });
   } catch (err) {
     console.error('Error in applyToCampaign:', err);
@@ -379,18 +425,11 @@ ${dashboardLink}
 
 // POST /ApplyCampaigns/list — body: { campaignId, ...pagination/sort }
 exports.getListByCampaign = async (req, res) => {
-  const {
-    campaignId,
-    page = 1,
-    limit = 10,
-    search,
-    sortField,
-    createdPage,
-    sortOrder = 0 // 0 = asc, 1 = desc
-  } = req.body || {};
+  const { campaignId, page = 1, limit = 10, search, sortField, createdPage, sortOrder = 0 } =
+    req.body || {};
 
   if (!campaignId) {
-    return res.status(400).json({ message: "campaignId is required" });
+    return res.status(400).json({ message: 'campaignId is required' });
   }
 
   try {
@@ -411,7 +450,7 @@ exports.getListByCampaign = async (req, res) => {
     const influencerIds = (record.applicants || [])
       .map((a) => a.influencerId)
       .filter(Boolean)
-      .map(String); // normalize to string
+      .map(String);
 
     if (!influencerIds.length) {
       return res.status(200).json({
@@ -424,18 +463,15 @@ exports.getListByCampaign = async (req, res) => {
     }
 
     const filter = { influencerId: { $in: influencerIds } };
-    if (search?.trim()) {
-      filter.name = { $regex: search.trim(), $options: "i" };
-    }
+    if (search?.trim()) filter.name = { $regex: search.trim(), $options: 'i' };
 
-    // Influencer basic fields only — socialProfiles are no longer in schema
     const projection = [
-      "influencerId",
-      "name",
-      "primaryPlatform",
-      "onboarding.categoryName",
-      "onboarding.subcategories"
-    ].join(" ");
+      'influencerId',
+      'name',
+      'primaryPlatform',
+      'onboarding.categoryName',
+      'onboarding.subcategories'
+    ].join(' ');
 
     const influencersRaw = await Influencer.find(filter).select(projection).lean();
 
@@ -449,13 +485,12 @@ exports.getListByCampaign = async (req, res) => {
       });
     }
 
-    // 🔹 Get Modash profiles using influencerId (UUID string) ONLY
+    // Modash profiles using influencerId only
     const modashProfiles = await Modash.find(
       { influencerId: { $in: influencerIds } },
-      "influencerId provider handle username fullname followers"
+      'influencerId provider handle username fullname followers'
     ).lean();
 
-    // Group Modash profiles by influencerId (string)
     const modashByInf = new Map();
     for (const p of modashProfiles) {
       if (!p.influencerId) continue;
@@ -464,22 +499,16 @@ exports.getListByCampaign = async (req, res) => {
       modashByInf.get(key).push(p);
     }
 
-    // Pick the best Modash profile for a given influencer
     function pickModashProfile(profiles = [], primaryPlatform) {
       if (!Array.isArray(profiles) || profiles.length === 0) return null;
-
-      // 1) Try to match their primaryPlatform
       if (primaryPlatform) {
         const hit = profiles.find((p) => p.provider === primaryPlatform);
         if (hit) return hit;
       }
-
-      // 2) Fallback: profile with most followers
       return (
         profiles
           .slice()
-          .sort((a, b) => (Number(b.followers) || 0) - (Number(a.followers) || 0))[0] ||
-        null
+          .sort((a, b) => (Number(b.followers) || 0) - (Number(a.followers) || 0))[0] || null
       );
     }
 
@@ -493,8 +522,8 @@ exports.getListByCampaign = async (req, res) => {
     const condensed = influencersRaw.map((inf) => {
       const infIdStr = String(inf.influencerId);
 
-      // Category name resolution (from onboarding or via Category map)
-      let categoryName = inf?.onboarding?.categoryName || "";
+      // Category name resolution
+      let categoryName = inf?.onboarding?.categoryName || '';
       if (!categoryName && Array.isArray(inf?.onboarding?.subcategories)) {
         for (const s of inf.onboarding.subcategories) {
           const cat = subIdToCatName.get(String(s?.subcategoryId));
@@ -506,19 +535,12 @@ exports.getListByCampaign = async (req, res) => {
       }
 
       const profiles = modashByInf.get(infIdStr) || [];
-
-      // Sum followers across all Modash profiles for this influencer
       const audienceSize = profiles.reduce((sum, p) => sum + (Number(p?.followers) || 0), 0);
-
-      // Choose the “best” Modash profile (primaryPlatform first, then highest followers)
       const chosen = pickModashProfile(profiles, inf.primaryPlatform);
 
-      // 🔹 Handle from Modash only
       let handle = null;
-      if (chosen) {
-        handle = (chosen.handle || chosen.username || chosen.fullname || "").trim() || null;
-      }
-      if (handle && !handle.startsWith("@")) handle = "@" + handle;
+      if (chosen) handle = (chosen.handle || chosen.username || chosen.fullname || '').trim() || null;
+      if (handle && !handle.startsWith('@')) handle = '@' + handle;
 
       const c = contractByInf.get(infIdStr);
       const isAssigned = approvedId === inf.influencerId ? 1 : 0;
@@ -528,7 +550,7 @@ exports.getListByCampaign = async (req, res) => {
 
       return {
         influencerId: inf.influencerId,
-        name: inf.name || "",
+        name: inf.name || '',
         primaryPlatform: inf.primaryPlatform || null,
         handle,
         category: categoryName || null,
@@ -541,64 +563,51 @@ exports.getListByCampaign = async (req, res) => {
         feeAmount: c?.feeAmount || 0,
         isAccepted,
         isRejected,
-        rejectedReason: isRejected ? (c?.rejectedReason || "") : ""
+        rejectedReason: isRejected ? c?.rejectedReason || '' : ''
       };
     });
 
-    // ✅ createdPage=true → filter OUT: status=READY_TO_SIGN & awaitingRole=collabglam
     const normalizeStatus = (s) =>
-      String(s || "")
+      String(s || '')
         .trim()
         .toUpperCase()
-        .replace(/\s+/g, "_"); // "ready to sign" -> "READY_TO_SIGN"
+        .replace(/\s+/g, '_');
 
-    const normalizeRole = (s) => String(s || "").trim().toLowerCase();
+    const normalizeRole = (s) => String(s || '').trim().toLowerCase();
 
     let filtered = condensed;
 
-    if (createdPage === true || createdPage === "true") {
+    if (createdPage === true || createdPage === 'true') {
       filtered = condensed.filter((row) => {
         const c = contractByInf.get(String(row.influencerId));
         if (!c) return true;
 
         const status = normalizeStatus(c.status || c.contractStatus);
-        const awaitingRole = normalizeRole(
-          c.awaitingRole || c.awaiting_role || c.awaiting?.role
-        );
+        const awaitingRole = normalizeRole(c.awaitingRole || c.awaiting_role || c.awaiting?.role);
 
-        // filter out this case only
-        if (status === "READY_TO_SIGN" && awaitingRole === "collabglam") {
-          return false;
-        }
+        if (status === 'READY_TO_SIGN' && awaitingRole === 'collabglam') return false;
         return true;
       });
     }
 
-    // Sorting (same logic, just applied to filtered)
+    // Sorting
     const dir = sortOrder === 1 ? -1 : 1;
     if (sortField) {
-      const allowed = new Set([
-        "name",
-        "primaryPlatform",
-        "category",
-        "audienceSize",
-        "handle",
-        "createdAt"
-      ]);
+      const allowed = new Set(['name', 'primaryPlatform', 'category', 'audienceSize', 'handle', 'createdAt']);
       if (allowed.has(sortField)) {
         filtered.sort((a, b) => {
           const av = a[sortField];
           const bv = b[sortField];
 
-          if (sortField === "createdAt") {
+          if (sortField === 'createdAt') {
             const ta = av ? new Date(av).getTime() : 0;
             const tb = bv ? new Date(bv).getTime() : 0;
             return dir * (ta - tb);
           }
-          if (typeof av === "number" && typeof bv === "number") {
+          if (typeof av === 'number' && typeof bv === 'number') {
             return dir * (av - bv);
           }
-          return dir * String(av ?? "").localeCompare(String(bv ?? ""));
+          return dir * String(av ?? '').localeCompare(String(bv ?? ''));
         });
       }
     }
@@ -615,20 +624,17 @@ exports.getListByCampaign = async (req, res) => {
     return res.status(200).json({
       meta: { total, page: pageNum, limit: limNum, totalPages: Math.ceil(total / limNum) },
 
-      // ✅ count reduces when createdPage is true (3 -> 2)
-      applicantCount:
-        createdPage === true || createdPage === "true" ? total : record.applicants.length,
+      applicantCount: createdPage === true || createdPage === 'true' ? total : record.applicants.length,
 
       isContracted: isContractedCampaign,
       contractId: null,
       influencers: paged
     });
   } catch (err) {
-    console.error("Error in getListByCampaign:", err);
-    return res.status(500).json({ message: "Internal server error" });
+    console.error('Error in getListByCampaign:', err);
+    return res.status(500).json({ message: 'Internal server error' });
   }
 };
-
 
 /**
  * POST /ApplyCampaigns/approve
@@ -637,7 +643,7 @@ exports.getListByCampaign = async (req, res) => {
  * - Notifies influencer
  */
 exports.approveInfluencer = async (req, res) => {
-  const { campaignId, influencerId } = req.body;
+  const { campaignId, influencerId } = req.body || {};
   if (!campaignId || !influencerId) {
     return res.status(400).json({ message: 'Both campaignId and influencerId are required' });
   }
@@ -645,7 +651,9 @@ exports.approveInfluencer = async (req, res) => {
   try {
     const inf = await Influencer.findOne({ influencerId }).lean();
     if (!inf) return res.status(404).json({ message: 'Influencer not found' });
-    const activeCapFeature = (inf.subscription?.features || []).find(f => f.key === 'active_collaborations_limit');
+
+    // ✅ active collaborations cap uses plan key: active_collaborations
+    const activeCapFeature = getFeature(inf, FEATURE_KEYS.ACTIVE_COLLABS);
     const activeCap = readLimit(activeCapFeature);
     if (activeCap > 0) {
       const activeNow = await countActiveCollaborationsForInfluencer(influencerId);
@@ -661,7 +669,7 @@ exports.approveInfluencer = async (req, res) => {
       return res.status(404).json({ message: 'No applications found for this campaign' });
     }
 
-    const applicant = record.applicants.find(a => String(a.influencerId) === String(influencerId));
+    const applicant = (record.applicants || []).find((a) => String(a.influencerId) === String(influencerId));
     if (!applicant) {
       return res.status(400).json({ message: 'Influencer did not apply for this campaign' });
     }
@@ -673,12 +681,12 @@ exports.approveInfluencer = async (req, res) => {
     record.approved = [{ influencerId: applicant.influencerId, name: applicant.name }];
     await record.save();
 
-    // Notify influencer
     const camp = await Campaign.findOne(
       { campaignsId: campaignId },
       'campaignsId productOrServiceName brandName brandId'
     ).lean();
 
+    // Notify influencer
     try {
       await createAndEmit({
         recipientType: 'influencer',
@@ -711,7 +719,7 @@ exports.approveInfluencer = async (req, res) => {
     return res.status(200).json({
       message: 'Influencer approved successfully',
       campaignId,
-      approved: record.approved[0]
+      approved: record.approved?.[0] || null
     });
   } catch (err) {
     console.error('Error in approveInfluencer:', err);

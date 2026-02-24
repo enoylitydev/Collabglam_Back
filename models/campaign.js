@@ -106,6 +106,10 @@ const campaignSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  influencerBudget: {
+    type: Number,
+    default: 0
+  },
   timeline: {
     startDate: { type: Date },
     endDate: { type: Date }

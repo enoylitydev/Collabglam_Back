@@ -19,6 +19,35 @@ const { CONTRACT_STATUS } = require("../constants/contract");
 // ✅ persisted notifications helper (creates DB row + emits via socket.io)
 const { createAndEmit } = require('../utils/notifier');
 
+function toNum(v, def = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : def;
+}
+
+// adjust role check as per your auth middleware
+function isAdminRequest(req) {
+  const role = String(req.user?.role || req.user?.userType || "").toLowerCase();
+  return role === "admin" || role === "superadmin";
+}
+
+// influencer should see influencerBudget if set, else budget
+function mapCampaignForInfluencer(c) {
+  if (!c) return c;
+  const brandBudget = toNum(c.budget, 0);
+  const infBudget = toNum(c.influencerBudget, 0);
+  return {
+    ...c,
+    // ✅ keep budget key but make it influencer-visible
+    budget: infBudget > 0 ? infBudget : brandBudget,
+    // optional debug fields
+    brandBudget,
+    influencerBudget: infBudget
+  };
+}
+
+function mapCampaignListForInfluencer(list = []) {
+  return list.map(mapCampaignForInfluencer);
+}
 // ===============================
 //  Multer setup (memory) + MIME filters
 // ===============================
@@ -249,7 +278,10 @@ function buildSearchOr(term) {
     { 'categories.categoryName': { $regex: term, $options: 'i' } }
   ];
   const num = Number(term);
-  if (!isNaN(num)) or.push({ budget: { $lte: num } });
+  if (!isNaN(num)) {
+    or.push({ budget: { $lte: num } });
+    or.push({ influencerBudget: { $lte: num } });
+  }
   return or;
 }
 
@@ -411,6 +443,7 @@ exports.createCampaign = (req, res) => {
         campaignType, // optional
         creativeBriefText,
         budget = 0,
+        influencerBudget = 0,
         timeline,
         additionalNotes = "",
       } = req.body;
@@ -442,6 +475,8 @@ exports.createCampaign = (req, res) => {
         "active_campaigns_limit"
       );
       const campLimit = readLimit(campFeat); // 0 => unlimited / enterprise
+      const finalBudget = toNum(budget, 0);
+      const finalInfluencerBudget = toNum(influencerBudget, 0);
 
       if (campLimit > 0) {
         const currentActive = await Campaign.countDocuments({
@@ -563,7 +598,8 @@ exports.createCampaign = (req, res) => {
         goal,
         campaignType: campaignType || "",
         creativeBriefText,
-        budget,
+        budget:finalBudget,
+        influencerBudget: finalInfluencerBudget,
         timeline: tlData,
         additionalNotes,
         isActive: isActiveFlag,

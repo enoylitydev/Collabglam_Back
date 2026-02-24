@@ -7,7 +7,6 @@ const BRAND_CURRENCY = "USD";
 const INFLUENCER_CURRENCY = "USD";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// REMOVE FEATURES (per request)
 // Influencer: remove profile boost, campaign analytics, team seats, early access,
 //            team workspace, media kit pdf export, verified badge, AI pitch system,
 //            manage creators, AND platform_fee_on_payouts_percent
@@ -29,7 +28,6 @@ const REMOVED_FEATURE_KEYS_BY_ROLE = {
     "ai_pitch_assistant_drafts_per_month",
     "manage_creators_for_agency",
 
-    // Optional but typically part of “boosts/placement boosts”
     "featured_placement_boosts_per_month",
   ]),
 };
@@ -62,7 +60,6 @@ const brandPlans = [
     sortOrder: 1,
     autoRenew: true,
 
-    // Optional: for local testing (remove in prod)
     durationMins: 5,
 
     features: [
@@ -396,7 +393,6 @@ const influencerPlans = [
   },
 ];
 
-// Build final plans list (with removals applied)
 const plans = [...brandPlans, ...influencerPlans].map(stripRemovedFeatures);
 
 async function seed() {
@@ -407,7 +403,6 @@ async function seed() {
     await mongoose.connect(MONGODB_URI);
     console.log("✅ MongoDB connected");
 
-    // Remove all previous plans
     await SubscriptionPlan.deleteMany({});
     console.log("🗑️  Cleared existing subscription plans");
 

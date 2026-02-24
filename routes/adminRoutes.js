@@ -1,21 +1,18 @@
 const express = require('express');
 const router = express.Router();
-const {login,getAllBrands,getList,getAllCampaigns,getBrandById,
-    getByInfluencerId, getCampaignById,getCampaignsByBrandId,adminGetInfluencerById,
-    adminGetInfluencerList,adminAddYouTubeEmail,listMissingEmail,updateMissingEmail,checkMissingEmailByHandle,
-    getAllPayments
-} = require('../controllers/adminController');  
-
+const { login, getAllBrands, getList, getAllCampaigns, getBrandById,
+  getByInfluencerId, getCampaignById, getCampaignsByBrandId, adminGetInfluencerById,
+  adminGetInfluencerList, adminAddYouTubeEmail, listMissingEmail, updateMissingEmail, checkMissingEmailByHandle,
+  getAllPayments, adminAssignBrandPlan, adminAssignInfluencerPlan
+} = require('../controllers/adminController');
 
 const {
   adminListPayouts,
   adminMarkMilestonePaid
 } = require('../controllers/milestoneController');
 
-
-
 // POST /admin/create
-router.post('/login', login);    
+router.post('/login', login);
 router.post('/brand/getlist', getAllBrands);
 router.post('/influencer/getlist', getList);
 router.post('/campaign/getlist', getAllCampaigns);
@@ -38,5 +35,8 @@ router.post('/updateMissingEmail', updateMissingEmail);
 router.post('/checkstatus', checkMissingEmailByHandle);
 
 router.post('/getpayments', getAllPayments);
+
+router.post('/assignBrandPlan', adminAssignBrandPlan);
+router.post('/assignInfluencerPlan', adminAssignInfluencerPlan);
 
 module.exports = router;

@@ -254,11 +254,23 @@ exports.assignPlan = async (req, res) => {
 
     const Model = userType === "Brand" ? Brand : Influencer;
 
-    const plan = await SubscriptionPlan.findOne({ planId }).lean();
+    const plan = await SubscriptionPlan.findOne({
+      planId,
+      role: userType,
+      status: "active",
+    }).lean();
     if (!plan) return res.status(404).json({ message: "Plan not found" });
 
     const now = new Date();
-    const expire = subscriptionHelper.computeExpiry(plan);
+    const { billingCycle, durationDays, durationMinutes, durationMins, expiresAt } = req.body || {};
+
+    const expire = subscriptionHelper.computeExpiry(plan, {
+      billingCycle: billingCycle || "monthly",
+      durationDays,
+      durationMinutes,
+      durationMins,
+      expiresAt
+    });
 
     // Snapshot for usage tracking:
     const featureSnapshot = (plan.features || []).map((f) => ({
@@ -531,6 +543,55 @@ exports.checkBrandPlanChange = async (req, res) => {
     });
   } catch (err) {
     console.error("checkBrandPlanChange error:", err);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};
+
+exports.getCurrentBrandPlanLite = async (req, res) => {
+  try {
+    const brandId = req.query?.brandId;
+
+    if (!brandId) {
+      return res.status(400).json({ message: "brandId is required in query" });
+    }
+
+    const brand = await Brand.findOne({ brandId }).lean();
+    if (!brand) {
+      return res.status(404).json({ message: "Brand not found" });
+    }
+
+    const sub = brand.subscription || {};
+    const now = new Date();
+
+    const isExpired =
+      brand.subscriptionExpired === true ||
+      (sub.expiresAt && new Date(sub.expiresAt).getTime() < now.getTime());
+
+    // ✅ expired OR no plan => free
+    if (isExpired || !sub.planId) {
+      return res.status(200).json({
+        brandPlanId: null,
+        brandPlanName: "free",
+      });
+    }
+
+    let brandPlanId = sub.planId || null;
+    let brandPlanName = sub.planName || null;
+
+    // fallback if planName missing
+    if (brandPlanId && !brandPlanName) {
+      const plan = await SubscriptionPlan.findOne({ planId: brandPlanId })
+        .select("name")
+        .lean();
+      brandPlanName = plan?.name || null;
+    }
+
+    return res.status(200).json({
+      brandPlanId,
+      brandPlanName: brandPlanName ? String(brandPlanName).toLowerCase() : null,
+    });
+  } catch (err) {
+    console.error("getCurrentBrandPlanLite error:", err);
     return res.status(500).json({ message: "Internal server error" });
   }
 };
