@@ -235,6 +235,17 @@ exports.syncYouTubeProfile = asyncHandler(async (req, res) => {
   const handle = normalizeHandle(body.handle);
   if (!handle) return res.status(400).json({ status: 'error', message: 'Valid handle required, e.g. "@mrbeast"' });
 
+  // ✅ Optional email (store only if entered)
+  const rawEmail = typeof body.email === 'string' ? body.email.trim() : '';
+  const email = rawEmail ? rawEmail.toLowerCase() : null;
+
+  if (email) {
+    const emailOk = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+    if (!emailOk) {
+      return res.status(400).json({ status: 'error', message: 'Invalid email format', email: rawEmail });
+    }
+  }
+
   const channel = await fetchChannelByHandle(handle);
   if (!channel) {
     return res.status(404).json({ status: 'error', message: `No channel found for ${handle}`, handle });
@@ -297,7 +308,8 @@ exports.syncYouTubeProfile = asyncHandler(async (req, res) => {
 
     rawChannel: channel,
     syncedAt: new Date(),
-    updatedAt: new Date(), // keep timestamps correct for findOneAndUpdate
+    updatedAt: new Date(),
+    ...(email ? { email } : {}), // ✅ only set if provided
   };
 
   const doc = await InfluencerProfile.findOneAndUpdate(
