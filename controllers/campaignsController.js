@@ -1593,3 +1593,40 @@ exports.rejectCampaignPendingUpdate = async (req, res) => {
     return res.status(500).json({ message: "Internal server error" });
   }
 };
+
+exports.getAdminCampaigns = async (req, res) => {
+  try {
+    const { brandId } = req.params;
+    console.log("Admin fetching campaigns for brandId:", brandId);
+    const limit = Math.min(parseInt(req.query.limit || "20", 10), 100);
+    const page = Math.max(parseInt(req.query.page || "1", 10), 1);
+    const skip = (page - 1) * limit;
+
+    const filter = {
+      brandId: String(brandId),
+      "createdBy.role": "admin",
+    };
+
+    const [data, total] = await Promise.all([
+      Campaign.find(filter)
+        .sort({ createdAt: -1 }) // or { ctredatedat: -1 } if that's your field
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Campaign.countDocuments(filter),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      page,
+      limit,
+      total,
+      data,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: err.message || "Server error",
+    });
+  }
+};
