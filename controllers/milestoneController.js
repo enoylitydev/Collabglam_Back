@@ -266,15 +266,17 @@ exports.createMilestone = async (req, res) => {
 exports.getMilestonesByCampaign = async (req, res) => {
   const { campaignId } = req.body;
   if (!campaignId) {
-    return res.status(400).json({ message: 'campaignId is required' });
+    return res.status(400).json({ message: "campaignId is required" });
   }
 
   try {
-    const docs = await Milestone.find({ 'milestoneHistory.campaignId': campaignId }).lean();
+    const docs = await Milestone.find({
+      "milestoneHistory.campaignId": String(campaignId),
+    }).lean();
 
     const entries = docs.flatMap((doc) =>
-      doc.milestoneHistory
-        .filter((e) => e.campaignId === campaignId)
+      (doc.milestoneHistory || [])
+        .filter((e) => String(e.campaignId) === String(campaignId))
         .map((e) => ({
           ...e,
           brandId: doc.brandId,
@@ -283,15 +285,48 @@ exports.getMilestonesByCampaign = async (req, res) => {
         }))
     );
 
-    entries.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    // ✅ influencerIds are UUID strings, so query by influencerId (NOT _id)
+    const influencerIds = [
+      ...new Set(
+        entries
+          .map((e) => e.influencerId)
+          .filter(Boolean)
+          .map(String)
+      ),
+    ];
+
+    const influencers = influencerIds.length
+      ? await Influencer.find(
+          { influencerId: { $in: influencerIds } },
+          "influencerId name fullName username"
+        ).lean()
+      : [];
+
+    const influencerMap = new Map(
+      influencers.map((u) => [
+        String(u.influencerId),
+        u.name || u.fullName || u.username || null,
+      ])
+    );
+
+    const entriesWithNames = entries.map((e) => ({
+      ...e,
+      influencerName: e.influencerId
+        ? influencerMap.get(String(e.influencerId)) || null
+        : null,
+    }));
+
+    entriesWithNames.sort(
+      (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
+    );
 
     return res.status(200).json({
-      message: 'Milestones fetched by campaign',
-      milestones: entries,
+      message: "Milestones fetched by campaign",
+      milestones: entriesWithNames,
     });
   } catch (err) {
-    console.error('Error in getMilestonesByCampaign:', err);
-    return res.status(500).json({ message: 'Internal server error' });
+    console.error("Error in getMilestonesByCampaign:", err);
+    return res.status(500).json({ message: "Internal server error" });
   }
 };
 
