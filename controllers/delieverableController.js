@@ -175,13 +175,13 @@ exports.listInfluencerDeliverablesByCampaign2 = async (req, res) => {
   try {
     const { campaignId } = req.params;
     const campaignIdStr = String(campaignId);
-
+console.log("Received campaignId:", campaignIdStr);
     // 1) Get invites by campaignsId (STRING)
     const invites = await CampaignInvite.find({ campaignsId: campaignIdStr })
       .select("campaignId campaignsId influencerId platform createdAt deliverables status")
       .sort({ createdAt: -1 })
       .lean();
-
+console.log("Found invites:", invites.length);
     // 2) Collect unique influencer UUIDs (STRING)
     const influencerIds = [
       ...new Set(
@@ -196,7 +196,7 @@ exports.listInfluencerDeliverablesByCampaign2 = async (req, res) => {
     // If your Influencer field name is different, replace `influencerId` below.
     const influencers = influencerIds.length
       ? await Influencer.find({ influencerId: { $in: influencerIds } })
-          .select("name username fullName profilePic socialLinks influencerId")
+          .select("name username fullName country socialLinks influencerId")
           .lean()
       : [];
 
