@@ -3,6 +3,7 @@ const mongoose = require("mongoose");
 const Delieverable = require("../models/delieverable");
 const CampaignInvite = require("../models/campaignInvitation"); 
 const Campaign = require("../models/campaign");
+const Influencer = require("../models/influencer");
 exports.createDeliverableApproval = async (req, res) => {
   try {
     const { brandId, influencerId, campaignId, title, description, url } = req.body;
@@ -151,6 +152,63 @@ exports.listInfluencerDeliverablesByCampaign = async (req, res) => {
     const docs = invites.map((inv) => ({
       ...inv,
       campaign: campaignMap.get(String(inv.campaignId)) || null,
+    }));
+
+    return res.status(200).json({
+      success: true,
+      message: "Deliverables fetched successfully.",
+      count: docs.length,
+      data: docs,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch deliverables.",
+      error: err.message,
+    });
+  }
+};
+
+
+
+exports.listInfluencerDeliverablesByCampaign2 = async (req, res) => {
+  try {
+    const { campaignId } = req.params;
+    const campaignIdStr = String(campaignId);
+
+    // 1) Get invites by campaignsId (STRING)
+    const invites = await CampaignInvite.find({ campaignsId: campaignIdStr })
+      .select("campaignId campaignsId influencerId platform createdAt deliverables status")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    // 2) Collect unique influencer UUIDs (STRING)
+    const influencerIds = [
+      ...new Set(
+        invites
+          .map((x) => x.influencerId)
+          .filter(Boolean)
+          .map((id) => String(id))
+      ),
+    ];
+
+    // 3) Fetch influencers using influencerId (UUID string)
+    // If your Influencer field name is different, replace `influencerId` below.
+    const influencers = influencerIds.length
+      ? await Influencer.find({ influencerId: { $in: influencerIds } })
+          .select("name username fullName profilePic socialLinks influencerId")
+          .lean()
+      : [];
+
+    // 4) Map influencers by influencerId (UUID)
+    const influencerMap = new Map(
+      influencers.map((inf) => [String(inf.influencerId), inf])
+    );
+
+    // 5) Attach influencer object to each invite
+    const docs = invites.map((inv) => ({
+      ...inv,
+      influencer: influencerMap.get(String(inv.influencerId)) || null,
     }));
 
     return res.status(200).json({

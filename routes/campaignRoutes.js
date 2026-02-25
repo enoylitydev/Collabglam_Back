@@ -89,5 +89,6 @@ router.post("/reject-pending", campaignController.rejectCampaignPendingUpdate);
 router.post('/request-review', campaignController.requestBrandReview);
 router.post('/confirm-readiness', campaignController.confirmCampaignReadiness);
 router.post('/publish', campaignController.publishCampaign);
+router.get('/created-by-admin/:brandId', campaignController.getAdminCampaigns);
 
 module.exports = router;
