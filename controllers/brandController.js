@@ -11,7 +11,7 @@ const Influencer = require('../models/influencer'); // needed by requestOtp
 const { EmailThread } = require('../models/email');
 const Country = require('../models/country');
 const Milestone = require('../models/milestone');
-const subscriptionHelper = require('../utils/subscriptionHelper');
+const { getFreePlan, computeExpiry } = require('../utils/subscriptionHelper');
 const VerifyEmail = require('../models/verifyEmail');
 const Category = require('../models/categories');        // DB-backed categories
 const BusinessType = require('../models/businessType');  // DB-backed business types
@@ -516,10 +516,10 @@ exports.register = async (req, res) => {
     });
 
     // Free plan
-    const freePlan = await subscriptionHelper.getFreePlan('Brand');
+    const freePlan = await getFreePlan('Brand');
     if (freePlan) {
       const start = new Date();
-      const expire = subscriptionHelper.computeExpiry(freePlan, start);
+      const expire = computeExpiry(freePlan, start);
 
       brand.subscription = {
         planId: freePlan.planId,

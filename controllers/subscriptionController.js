@@ -3,7 +3,7 @@
 const SubscriptionPlan = require("../models/subscription");
 const Brand = require("../models/brand");
 const Influencer = require("../models/influencer");
-const subscriptionHelper = require("../utils/subscriptionHelper");
+const { computeExpiry } = require("../utils/subscriptionHelper");
 
 // Helper: normalize feature value into a numeric limit for usage tracking snapshot
 // - number => that number

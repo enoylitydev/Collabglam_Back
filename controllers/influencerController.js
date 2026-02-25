@@ -23,8 +23,7 @@ const AudienceRange = require('../models/audienceRange');  // ensure this path e
 const Modash = require('../models/modash');
 const { linkConversationsForInfluencer } = require('../services/emailLinking');
 const { attachExternalEmailToInfluencer } = require('../utils/emailAliases');
-// Utils
-const subscriptionHelper = require('../utils/subscriptionHelper');
+const { getFreePlan, computeExpiry } = require("../utils/subscriptionHelper");
 const { escapeRegExp } = require('../utils/searchTokens');
 
 const UUIDv4Regex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -779,7 +778,7 @@ exports.registerInfluencer = async (req, res) => {
     }
 
     // Attach free subscription ONLY if they don't already have a plan
-    const freePlan = await subscriptionHelper.getFreePlan('Influencer');
+    const freePlan = await getFreePlan("Influencer");
     console.log('[registerInfluencer] freePlan for Influencer:', freePlan && {
       planId: freePlan.planId,
       role: freePlan.role,
@@ -791,7 +790,7 @@ exports.registerInfluencer = async (req, res) => {
         planId: freePlan.planId,
         planName: freePlan.name,
         startedAt: new Date(),
-        expiresAt: subscriptionHelper.computeExpiry(freePlan),
+        expiresAt:computeExpiry(freePlan),
         features: freePlan.features.map(f => ({
           key: f.key,
           limit: typeof f.value === 'number' ? f.value : 0,

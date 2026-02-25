@@ -180,7 +180,7 @@ async function notifyBrandApproved(campaign) {
     message: `Admin approved changes for "${campaign.productOrServiceName}".`,
     entityType: "campaign",
     entityId: String(campaign.campaignsId),
-    actionPath: { brand: `/brand/campaigns/view?id=${campaign.campaignsId}` },
+    actionPath: { brand: `/brand/edit-review-campaign/view?id=${campaign.campaignsId}` },
   });
 }
 
@@ -192,7 +192,7 @@ async function notifyBrandRejected(campaign, note) {
     message: `Admin rejected changes for "${campaign.productOrServiceName}". ${note ? `Reason: ${note}` : ""}`,
     entityType: "campaign",
     entityId: String(campaign.campaignsId),
-    actionPath: { brand: `/brand/campaigns/view?id=${campaign.campaignsId}` },
+    actionPath: { brand: `/brand/edit-review-campaign/view?id=${campaign.campaignsId}` },
   });
 }
 
