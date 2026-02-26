@@ -7,4 +7,6 @@ const campaignInvitationController = require("../controllers/campaignInvitationC
 router.post("/send", campaignInvitationController.storeInvitation);
 router.get("/list",campaignInvitationController.getInvitationsList)
 
+router.post("/get-by-campaign", campaignInvitationController.getInvitationsByCampaignsIdPost);
+
 module.exports = router;

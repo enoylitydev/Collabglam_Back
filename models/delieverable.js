@@ -1,6 +1,7 @@
 // models/delieverable.js
 const mongoose = require("mongoose");
 const { v4: uuidv4 } = require("uuid");
+const milestone = require("./milestone");
 
 const deliverableUrlSchema = new mongoose.Schema(
   {
@@ -21,13 +22,13 @@ const delieverableSchema = new mongoose.Schema({
   brandId: { type: String, required: true, ref: "Brand" },
   influencerId: { type: String, required: true, ref: "Influencer" },
   campaignId: { type: String, required: true, ref: "Campaign" },
-
+  milestoneId: { type: String, required: true, ref: "Milestone" },
   title: { type: String, required: true },
   description: { type: String, default: "" },
 
   status: {
     type: String,
-    enum: ["pending", "changes", "approved"],
+    enum: ["pending", "revision", "approved"],
     default: "pending",
   },
 

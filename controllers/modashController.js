@@ -703,18 +703,18 @@ async function frontendUsers(req, res) {
           // Express/JSON will simply omit undefined keys)
           const engagementRate = toNum(
             raw.engagementRate ||
-              (raw.stats && raw.stats.engagementRate)
+            (raw.stats && raw.stats.engagementRate)
           );
 
           const engagements = toNum(
             raw.engagements ||
-              (raw.stats &&
-                (raw.stats.avgEngagements || raw.stats.avgLikes))
+            (raw.stats &&
+              (raw.stats.avgEngagements || raw.stats.avgLikes))
           );
 
           const averageViews = toNum(
             raw.averageViews ||
-              (raw.stats && raw.stats.avgViews)
+            (raw.stats && raw.stats.avgViews)
           );
 
           // Final URL: prefer Modash URL, otherwise build from handle
@@ -724,8 +724,8 @@ async function frontendUsers(req, res) {
               p === 'instagram'
                 ? `https://instagram.com/${username}`
                 : p === 'tiktok'
-                ? `https://www.tiktok.com/@${username}`
-                : `https://www.youtube.com/@${username}`;
+                  ? `https://www.tiktok.com/@${username}`
+                  : `https://www.youtube.com/@${username}`;
           }
 
           const u = {
@@ -1441,37 +1441,118 @@ function groupCategories(categoryLinks) {
 
 async function getSavedInfluencers(req, res) {
   try {
-    const provider = cleanStr(req.query.provider || req.query.platform || '').toLowerCase();
+    const provider = cleanStr(req.query.provider || req.query.platform || "").toLowerCase();
 
     // ✅ support q OR search
-    const qRaw = cleanStr(req.query.q || req.query.search || '');
-    const influencerId = cleanStr(req.query.influencerId || req.query.influencer_id || '');
+    const qRaw = cleanStr(req.query.q || req.query.search || "");
+    const influencerId = cleanStr(req.query.influencerId || req.query.influencer_id || "");
 
     const page = Math.max(0, parseInt(req.query.page, 10) || 0);
     const limitRaw = parseInt(req.query.limit, 10);
     const limit = Math.min(100, Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 20));
 
-    const sortKey = cleanStr(req.query.sort || 'updatedAt').toLowerCase();
-    const dirParam = cleanStr(req.query.dir || 'desc').toLowerCase();
-    const dir = dirParam === 'asc' ? 1 : -1;
+    const sortKey = cleanStr(req.query.sort || "updatedAt").toLowerCase();
+    const dirParam = cleanStr(req.query.dir || "desc").toLowerCase();
+    const dir = dirParam === "asc" ? 1 : -1;
 
     if (provider && !ALLOWED_PLATFORMS.has(provider)) {
-      return res.status(400).json({ error: 'provider must be instagram|tiktok|youtube' });
+      return res.status(400).json({ error: "provider must be instagram|tiktok|youtube" });
     }
 
+    // ---------- FILTER ----------
     const filter = {};
     if (provider) filter.provider = provider;
     if (influencerId) filter.influencerId = influencerId;
 
+    // Followers Min / Max (supports many param names + 10k/2.5m/10,000)
+    const followersMinRaw =
+      req.query.followersMin ??
+      req.query.followers_min ??
+      req.query.minFollowers ??
+      req.query.min_followers;
+
+    const followersMaxRaw =
+      req.query.followersMax ??
+      req.query.followers_max ??
+      req.query.maxFollowers ??
+      req.query.max_followers;
+
+    const toNumber = (v) => {
+      if (v === undefined || v === null || v === "") return null;
+      const s = String(v).trim().toLowerCase().replace(/,/g, "");
+
+      if (/^\d+(\.\d+)?k$/.test(s)) return Number(s.replace("k", "")) * 1000;
+      if (/^\d+(\.\d+)?m$/.test(s)) return Number(s.replace("m", "")) * 1000000;
+
+      const n = Number(s);
+      return Number.isFinite(n) ? n : null;
+    };
+
+    let min = toNumber(followersMinRaw);
+    let max = toNumber(followersMaxRaw);
+
+    if (min !== null || max !== null) {
+      if (min !== null && max !== null && min > max) [min, max] = [max, min];
+      filter.followers = {};
+      if (min !== null) filter.followers.$gte = min;
+      if (max !== null) filter.followers.$lte = max;
+    }
+
+    // Country (supports: country=India OR country=India,USA)
+    const countryRaw = cleanStr(req.query.country || req.query.countries || "").trim();
+    if (countryRaw) {
+      const countries = countryRaw
+        .split(",")
+        .map((c) => cleanStr(c).trim())
+        .filter(Boolean);
+
+      const toExactRx = (c) => new RegExp(`^${escapeRegex(c)}$`, "i");
+
+      filter.country =
+        countries.length === 1
+          ? toExactRx(countries[0])
+          : { $in: countries.map(toExactRx) };
+    }
+
+    // ✅ Category filter
+    // supports: category=Fitness OR category=Fitness,Beauty
+    // also supports: category[]=Fitness&category[]=Beauty (common in querystring libraries)
+    const categoryParam =
+      req.query.category ??
+      req.query.categories ??
+      req.query.niche ??
+      req.query.niches ??
+      req.query.category_name ??
+      req.query.categoryName;
+
+    if (categoryParam) {
+      const rawList = Array.isArray(categoryParam) ? categoryParam : String(categoryParam).split(",");
+
+      const categories = rawList
+        .map((c) => cleanStr(c).trim())
+        .filter(Boolean);
+
+      if (categories.length) {
+        const toExactRx = (c) => new RegExp(`^${escapeRegex(c)}$`, "i");
+
+        // If your schema uses `category` as string:
+        // filter.category = categories.length === 1 ? toExactRx(categories[0]) : { $in: categories.map(toExactRx) };
+
+        // If your schema uses `category` as array of strings (recommended):
+        filter.category =
+          categories.length === 1
+            ? { $elemMatch: toExactRx(categories[0]) }
+            : { $in: categories.map(toExactRx) };
+      }
+    }
+
     // ✅ SEARCH
     if (qRaw) {
-      // normalize handle searches
       const q = qRaw.trim();
-      const qNoAt = q.replace(/^@/, '').trim();
+      const qNoAt = q.replace(/^@/, "").trim();
 
-      // safe regex
-      const rx = new RegExp(escapeRegex(q), 'i');
-      const rxNoAt = qNoAt ? new RegExp(escapeRegex(qNoAt), 'i') : null;
+      const rx = new RegExp(escapeRegex(q), "i");
+      const rxNoAt = qNoAt ? new RegExp(escapeRegex(qNoAt), "i") : null;
 
       filter.$or = [
         { username: rx },
@@ -1480,11 +1561,10 @@ async function getSavedInfluencers(req, res) {
         { url: rx },
         { userId: rx },
         { influencerId: rx },
-
-        // ✅ extra: if user typed @something but db stores without @ (or vice versa)
         ...(rxNoAt ? [{ username: rxNoAt }, { handle: rxNoAt }] : []),
       ];
     }
+    // ---------- /FILTER ----------
 
     // Keep list payload light
     const projection = {
@@ -1511,6 +1591,8 @@ async function getSavedInfluencers(req, res) {
       ageGroup: 1,
       language: 1,
 
+      category: 1, // ✅ include category in results
+
       influencerId: 1,
       influencer: 1,
 
@@ -1519,8 +1601,8 @@ async function getSavedInfluencers(req, res) {
     };
 
     const sort = (() => {
-      if (sortKey === 'followers') return { followers: dir, updatedAt: -1 };
-      if (sortKey === 'createdat') return { createdAt: dir };
+      if (sortKey === "followers") return { followers: dir, updatedAt: -1 };
+      if (sortKey === "createdat") return { createdAt: dir };
       return { updatedAt: dir };
     })();
 
@@ -1536,8 +1618,8 @@ async function getSavedInfluencers(req, res) {
 
     return res.json({ page, limit, total, results });
   } catch (err) {
-    console.error('[getSavedInfluencers] Error:', err);
-    return res.status(500).json({ error: 'Internal error' });
+    console.error("[getSavedInfluencers] Error:", err);
+    return res.status(500).json({ error: "Internal error" });
   }
 }
 
