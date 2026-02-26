@@ -1441,7 +1441,9 @@ function groupCategories(categoryLinks) {
 
 async function getSavedInfluencers(req, res) {
   try {
+    // ✅ single provider OR multiple platforms
     const provider = cleanStr(req.query.provider || req.query.platform || "").toLowerCase();
+    const platformsRaw = cleanStr(req.query.platforms || "").trim();
 
     // ✅ support q OR search
     const qRaw = cleanStr(req.query.q || req.query.search || "");
@@ -1455,16 +1457,28 @@ async function getSavedInfluencers(req, res) {
     const dirParam = cleanStr(req.query.dir || "desc").toLowerCase();
     const dir = dirParam === "asc" ? 1 : -1;
 
-    if (provider && !ALLOWED_PLATFORMS.has(provider)) {
-      return res.status(400).json({ error: "provider must be instagram|tiktok|youtube" });
-    }
-
     // ---------- FILTER ----------
     const filter = {};
-    if (provider) filter.provider = provider;
+
+    // ✅ provider / platforms handling (matches your frontend params)
+    if (provider) {
+      if (!ALLOWED_PLATFORMS.has(provider)) {
+        return res.status(400).json({ error: "provider must be instagram|tiktok|youtube" });
+      }
+      filter.provider = provider;
+    } else if (platformsRaw) {
+      const platforms = platformsRaw
+        .split(",")
+        .map((x) => cleanStr(x).toLowerCase())
+        .filter(Boolean)
+        .filter((x) => ALLOWED_PLATFORMS.has(x));
+
+      if (platforms.length) filter.provider = { $in: platforms };
+    }
+
     if (influencerId) filter.influencerId = influencerId;
 
-    // Followers Min / Max (supports many param names + 10k/2.5m/10,000)
+    // Followers Min / Max
     const followersMinRaw =
       req.query.followersMin ??
       req.query.followers_min ??
@@ -1480,10 +1494,8 @@ async function getSavedInfluencers(req, res) {
     const toNumber = (v) => {
       if (v === undefined || v === null || v === "") return null;
       const s = String(v).trim().toLowerCase().replace(/,/g, "");
-
       if (/^\d+(\.\d+)?k$/.test(s)) return Number(s.replace("k", "")) * 1000;
       if (/^\d+(\.\d+)?m$/.test(s)) return Number(s.replace("m", "")) * 1000000;
-
       const n = Number(s);
       return Number.isFinite(n) ? n : null;
     };
@@ -1508,15 +1520,11 @@ async function getSavedInfluencers(req, res) {
 
       const toExactRx = (c) => new RegExp(`^${escapeRegex(c)}$`, "i");
 
-      filter.country =
-        countries.length === 1
-          ? toExactRx(countries[0])
-          : { $in: countries.map(toExactRx) };
+      filter.country = countries.length === 1 ? toExactRx(countries[0]) : { $in: countries.map(toExactRx) };
     }
 
-    // ✅ Category filter
-    // supports: category=Fitness OR category=Fitness,Beauty
-    // also supports: category[]=Fitness&category[]=Beauty (common in querystring libraries)
+    // ✅✅ Category filter (FIXED: NO $elemMatch)
+    // Works if `category` is: string OR array of strings
     const categoryParam =
       req.query.category ??
       req.query.categories ??
@@ -1535,14 +1543,10 @@ async function getSavedInfluencers(req, res) {
       if (categories.length) {
         const toExactRx = (c) => new RegExp(`^${escapeRegex(c)}$`, "i");
 
-        // If your schema uses `category` as string:
-        // filter.category = categories.length === 1 ? toExactRx(categories[0]) : { $in: categories.map(toExactRx) };
-
-        // If your schema uses `category` as array of strings (recommended):
-        filter.category =
-          categories.length === 1
-            ? { $elemMatch: toExactRx(categories[0]) }
-            : { $in: categories.map(toExactRx) };
+        // ✅ simplest + correct:
+        // - if category is string => regex matches
+        // - if category is array => ANY element matching regex works
+        filter.category = categories.length === 1 ? toExactRx(categories[0]) : { $in: categories.map(toExactRx) };
       }
     }
 
@@ -1591,7 +1595,7 @@ async function getSavedInfluencers(req, res) {
       ageGroup: 1,
       language: 1,
 
-      category: 1, // ✅ include category in results
+      category: 1, // ✅ included
 
       influencerId: 1,
       influencer: 1,
@@ -1607,12 +1611,7 @@ async function getSavedInfluencers(req, res) {
     })();
 
     const [results, total] = await Promise.all([
-      ModashProfile.find(filter)
-        .select(projection)
-        .sort(sort)
-        .skip(page * limit)
-        .limit(limit)
-        .lean(),
+      ModashProfile.find(filter).select(projection).sort(sort).skip(page * limit).limit(limit).lean(),
       ModashProfile.countDocuments(filter),
     ]);
 
