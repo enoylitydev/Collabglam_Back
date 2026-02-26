@@ -133,7 +133,7 @@ async function notifyBrandDraftReady(campaign) {
     message: `Admin has drafted "${campaign.productOrServiceName}". Please review and confirm.`,
     entityType: "campaign",
     entityId: String(campaign.campaignsId),
-    actionPath: { brand: `/brand/campaigns/view?id=${campaign.campaignsId}` },
+    actionPath: { brand: `/brand/review-campaigns/view?id=${campaign.campaignsId}` },
   });
 }
 
