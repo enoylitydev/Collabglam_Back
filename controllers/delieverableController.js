@@ -3,7 +3,7 @@ const Delieverable = require("../models/delieverable");
 const CampaignInvite = require("../models/campaignInvitation");
 const Campaign = require("../models/campaign");
 const Influencer = require("../models/influencer");
-const milestone = require("../models/milestone");
+const Milestone = require("../models/milestone");
 
 // helper to remove mongo fields from any object
 const stripMongo = (obj) => {
@@ -12,34 +12,80 @@ const stripMongo = (obj) => {
   return rest;
 };
 
-// 1) POST: Create deliverable approval (PENDING) - using campaignsId (UUID)
+// 1) POST: Create deliverable approval (PENDING)
 exports.createDeliverableApproval = async (req, res) => {
   try {
     const {
       brandId,
       influencerId,
-      campaignId,   // ✅ use campaignId
+      campaignId,
       title,
       description,
       url,
-      milestoneId,
+      milestoneHistoryId, // ✅ REQUIRED (we fetch title using this)
     } = req.body;
 
-    if (!brandId || !influencerId || !campaignId || !title) {
+    if (!brandId || !influencerId || !campaignId || !title || !milestoneHistoryId) {
       return res.status(400).json({
         success: false,
-        message: "brandId, influencerId, campaignId, and title are required.",
+        message:
+          "brandId, influencerId, campaignId, title, and milestoneHistoryId are required.",
       });
     }
 
+    const mHistoryId = String(milestoneHistoryId);
+
+    // ✅ Find milestone document that contains this milestoneHistoryId
+    const msDoc = await Milestone.findOne({
+      "milestoneHistory.milestoneHistoryId": mHistoryId,
+    })
+      .select("milestoneId milestoneHistory")
+      .lean();
+
+    if (!msDoc) {
+      return res.status(404).json({
+        success: false,
+        message: "Milestone history not found for given milestoneHistoryId.",
+      });
+    }
+
+    // ✅ Extract exact history item
+    const historyItem = (msDoc.milestoneHistory || []).find(
+      (h) => String(h.milestoneHistoryId) === mHistoryId
+    );
+
+    if (!historyItem) {
+      return res.status(404).json({
+        success: false,
+        message: "Milestone history item not found.",
+      });
+    }
+
+    // ✅ Safety checks (optional but recommended)
+    if (String(historyItem.campaignId) !== String(campaignId)) {
+      return res.status(400).json({
+        success: false,
+        message: "campaignId does not match milestone history campaignId.",
+      });
+    }
+
+    if (String(historyItem.influencerId) !== String(influencerId)) {
+      return res.status(400).json({
+        success: false,
+        message: "influencerId does not match milestone history influencerId.",
+      });
+    }
+
+    // ✅ Store BOTH milestoneId + milestoneHistoryId in Deliverable
     const doc = await Delieverable.create({
       brandId,
       influencerId,
-      campaignId, // ✅ now schema requirement is satisfied
+      campaignId,
       title,
-      milestoneId,
       description: description || "",
       url: Array.isArray(url) ? url : url ? [url] : [],
+      milestoneId: String(msDoc.milestoneId),      // ✅ store milestoneId (root)
+      milestoneHistoryId: mHistoryId,              // ✅ store milestoneHistoryId
       status: "pending",
       approvedRole: "",
       comments: "",
@@ -146,18 +192,50 @@ exports.listDeliverablesByCampaign = async (req, res) => {
           .lean()
       : [];
 
-    // 4) Map influencerId -> influencer
     const infMap = new Map(influencers.map((i) => [String(i.influencerId), i]));
 
-    // 5) Attach influencerName + influencerHandle (optional)
+    // ✅ 4) Collect unique milestoneHistoryIds FROM deliverables
+    const milestoneHistoryIds = [
+      ...new Set(
+        docs
+          .map((d) => (d?.milestoneHistoryId ? String(d.milestoneHistoryId) : null))
+          .filter(Boolean)
+      ),
+    ];
+
+    // ✅ 5) Fetch milestone titles using milestoneHistoryId
+    const rows = milestoneHistoryIds.length
+      ? await Milestone.aggregate([
+          { $match: { "milestoneHistory.milestoneHistoryId": { $in: milestoneHistoryIds } } },
+          { $unwind: "$milestoneHistory" },
+          { $match: { "milestoneHistory.milestoneHistoryId": { $in: milestoneHistoryIds } } },
+          {
+            $project: {
+              _id: 0,
+              milestoneId: 1,
+              milestoneHistoryId: "$milestoneHistory.milestoneHistoryId",
+              milestoneTitle: "$milestoneHistory.milestoneTitle",
+            },
+          },
+        ])
+      : [];
+
+    const titleByHistoryId = new Map(
+      rows.map((r) => [String(r.milestoneHistoryId), r.milestoneTitle])
+    );
+
+    // 6) Attach influencer + milestoneTitle
     const data = docs.map((d) => {
       const inf = infMap.get(String(d.influencerId));
 
       const influencerName = inf?.fullName || inf?.name || inf?.username || "";
-      const influencerHandle = inf?.username || ""; // if you want handle
+      const influencerHandle = inf?.username || "";
+
+      const mhId = d?.milestoneHistoryId ? String(d.milestoneHistoryId) : "";
 
       return {
         ...d,
+        milestoneTitle: titleByHistoryId.get(mhId) || "", // ✅ from milestoneHistoryId
         influencerName,
         influencerHandle,
         influencer: inf
