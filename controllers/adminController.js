@@ -339,6 +339,22 @@ exports.getList = async (req, res) => {
 };
 
 
+exports.verifyAdminToken = (req, res, next) => {
+  const authHeader = req.headers["authorization"];
+  if (!authHeader) return res.status(403).json({ message: "Token required" });
+
+  const token = authHeader.split(" ")[1];
+  if (!token) return res.status(403).json({ message: "Token required" });
+
+  jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
+    if (err) return res.status(403).json({ message: "Invalid or expired token" });
+
+    // your login token payload: { adminId, email }
+    req.admin = decoded;
+    next();
+  });
+};
+
 exports.getAllCampaigns = async (req, res) => {
   try {
     // 1) Parse pagination, search, sort & status from body
