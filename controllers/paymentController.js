@@ -740,6 +740,7 @@ exports.previewInvoiceByInvoiceNumber = async (req, res) => {
 exports.getInvoicesByUserId = async (req, res) => {
   try {
     const { userId, role } = req.body || {};
+
     if (!userId || !role) {
       return res.status(400).json({ success: false, message: "userId and role are required" });
     }
@@ -747,7 +748,8 @@ exports.getInvoicesByUserId = async (req, res) => {
       return res.status(400).json({ success: false, message: 'role must be "Brand" or "Influencer"' });
     }
 
-    const planInvoices = await Payment.find({
+    // Plans (optional: also return amount for consistency)
+    const planInvoicesRaw = await Payment.find({
       userId: String(userId),
       role: String(role),
       status: "paid",
@@ -755,22 +757,34 @@ exports.getInvoicesByUserId = async (req, res) => {
     })
       .sort({ paidAt: -1, createdAt: -1 })
       .select(
-        "invoiceNumber invoiceIssuedAt paidAt status planName role userId currency subtotalCents discountCents taxCents totalCents billingAddress customerLegalName customerEmail customerTaxId invoiceFilePath invoiceEmailTo invoiceEmailSentAt"
+        "invoiceNumber invoiceIssuedAt paidAt status planName role userId currency amount subtotalCents discountCents taxCents totalCents billingAddress customerLegalName customerEmail customerTaxId invoiceFilePath invoiceEmailTo invoiceEmailSentAt"
       )
       .lean();
 
+    const planInvoices = planInvoicesRaw.map((inv) => ({
+      ...inv,
+      // amount in cents (fallback)
+      amount: Number(inv.amount ?? inv.totalCents ?? inv.subtotalCents ?? 0),
+    }));
+
+    // Milestones (Brand only)
     let milestoneInvoices = [];
     if (String(role) === "Brand") {
-      milestoneInvoices = await MilestonePayment.find({
+      const milestoneInvoicesRaw = await MilestonePayment.find({
         brandId: String(userId),
         status: "paid",
         invoiceNumber: { $exists: true, $ne: "" },
       })
         .sort({ paidAt: -1, createdAt: -1 })
         .select(
-          "invoiceNumber invoiceIssuedAt paidAt status campaignId campaignName milestoneTitle currency subtotalCents discountCents taxCents totalCents billingAddress customerLegalName customerEmail customerTaxId invoiceFilePath invoiceEmailTo invoiceEmailSentAt"
+          "invoiceNumber invoiceIssuedAt paidAt status campaignId campaignName milestoneTitle currency amount subtotalCents discountCents taxCents totalCents billingAddress customerLegalName customerEmail customerTaxId invoiceFilePath invoiceEmailTo invoiceEmailSentAt"
         )
         .lean();
+
+      milestoneInvoices = milestoneInvoicesRaw.map((inv) => ({
+        ...inv,
+        amount: Number(inv.amount ?? inv.totalCents ?? inv.subtotalCents ?? 0),
+      }));
     }
 
     return res.json({
