@@ -791,31 +791,70 @@ exports.createCampaign = (req, res) => {
     if (err) return res.status(500).json({ message: "Error uploading files." });
 
     try {
-      let { brandId, productOrServiceName, description = "", targetAudience, categories, goal, campaignType, creativeBriefText, budget = 0, influencerBudget = 0, timeline, additionalNotes = "" } = req.body;
+      let {
+        brandId,
+        productOrServiceName,
+        description = "",
+        targetAudience,
+        categories,
+        goal,
+        campaignType,
+        creativeBriefText,
+        budget = 0,
+        influencerBudget = 0,
+        timeline,
+        additionalNotes = "",
+      } = req.body;
 
-      if (!brandId || !productOrServiceName || !goal) return res.status(400).json({ message: "Missing required fields." });
+      if (!brandId || !productOrServiceName || !goal) {
+        return res.status(400).json({ message: "Missing required fields." });
+      }
 
       const brand = await Brand.findOne({ brandId });
       if (!brand) return res.status(404).json({ message: "Brand not found." });
+
+      // ✅ Resolve actor (admin OR brand)
+      const actor = await resolveActorFromPayload(req, brandId);
+      const actorIsAdmin = actor.role === "admin" || isAdminRequest(req);
+
+      // ✅ Optional but recommended security:
+      // If not admin, ensure brand can only create for itself
+      if (!actorIsAdmin) {
+        const authBrandId = String(req.user?.brandId || "").trim();
+        if (authBrandId && authBrandId !== String(brandId)) {
+          return res.status(403).json({ message: "Forbidden: brandId mismatch." });
+        }
+      }
 
       // Target Audience
       let audienceData = { age: { MinAge: 0, MaxAge: 0 }, gender: 2, locations: [] };
       if (targetAudience) {
         let ta = typeof targetAudience === "string" ? JSON.parse(targetAudience) : targetAudience;
-        if (ta.age?.MinAge) audienceData.age.MinAge = Number(ta.age.MinAge);
-        if (ta.age?.MaxAge) audienceData.age.MaxAge = Number(ta.age.MaxAge);
+
+        if (ta.age?.MinAge != null) audienceData.age.MinAge = Number(ta.age.MinAge) || 0;
+        if (ta.age?.MaxAge != null) audienceData.age.MaxAge = Number(ta.age.MaxAge) || 0;
+
         if ([0, 1, 2].includes(Number(ta.gender))) audienceData.gender = Number(ta.gender);
+
         const rawLocs = Array.isArray(ta.locations) ? ta.locations : ta.location ? [ta.location] : [];
         for (const loc of rawLocs) {
-          const cId = typeof loc === 'string' ? loc : loc?.countryId;
-          const country = await Country.findById(cId);
-          if (country) audienceData.locations.push({ countryId: country._id, countryName: country.countryName });
+          const cId = typeof loc === "string" ? loc : loc?.countryId;
+          const country = await Country.findById(cId).lean();
+          if (country) {
+            audienceData.locations.push({ countryId: country._id, countryName: country.countryName });
+          }
         }
       }
 
+      // Categories
       let categoriesData = [];
-      try { categoriesData = await normalizeCategoriesPayload(categories); } catch (e) { return res.status(400).json({ message: e.message }); }
+      try {
+        categoriesData = await normalizeCategoriesPayload(categories);
+      } catch (e) {
+        return res.status(400).json({ message: e.message });
+      }
 
+      // Timeline
       let tlData = {};
       if (timeline) {
         let tl = typeof timeline === "string" ? JSON.parse(timeline) : timeline;
@@ -823,47 +862,78 @@ exports.createCampaign = (req, res) => {
         if (tl.endDate) tlData.endDate = new Date(tl.endDate);
       }
 
-      const imagesUploaded = await uploadToGridFS(req.files.image || [], { prefix: "campaign_image", metadata: { kind: "campaign_image", brandId }, req });
-      const creativeUploaded = await uploadToGridFS(req.files.creativeBrief || [], { prefix: "campaign_brief", metadata: { kind: "campaign_brief", brandId }, req });
+      // Files (✅ avoid crashes if req.files missing)
+      const imagesUploaded = await uploadToGridFS(req.files?.image || [], {
+        prefix: "campaign_image",
+        metadata: { kind: "campaign_image", brandId },
+        req,
+      });
 
-      const actor = await resolveActorFromPayload(req, brandId);
+      const creativeUploaded = await uploadToGridFS(req.files?.creativeBrief || [], {
+        prefix: "campaign_brief",
+        metadata: { kind: "campaign_brief", brandId },
+        req,
+      });
 
-      // ✅ STANDARD LIVE CREATION
+      // ✅ Direct publish (Admin or Brand)
       const baseData = {
-        brandId, brandName: brand.name, productOrServiceName, description,
-        targetAudience: audienceData, categories: categoriesData, goal,
-        campaignType: campaignType || "", creativeBriefText,
+        brandId,
+        brandName: brand.name,
+        productOrServiceName,
+        description,
+        targetAudience: audienceData,
+        categories: categoriesData,
+        goal,
+        campaignType: campaignType || "",
+        creativeBriefText,
         budget: toNum(budget),
         influencerBudget: toNum(influencerBudget),
-        timeline: tlData, additionalNotes,
+        timeline: tlData,
+        additionalNotes,
+
         isActive: computeIsActive(tlData),
         isDraft: 0,
-        publishStatus: "published", // Standard direct create is automatically published
-        campaignStatus: 'open',
+        publishStatus: "published",
+        campaignStatus: "open",
         statusUpdatedAt: new Date(),
+
+        // ✅ this is the key part you asked for (admin role stored)
         createdBy: actor,
-        approvalMode: actor.role === "admin" ? "admin_review" : "direct"
+        approvalMode: actorIsAdmin ? "admin_review" : "direct",
       };
 
-      const newCampaign = new Campaign({ ...baseData, images: imagesUploaded.map(f => f.filename), creativeBrief: creativeUploaded.map(f => f.filename) });
+      const newCampaign = new Campaign({
+        ...baseData,
+        images: imagesUploaded.map((f) => f.filename),
+        creativeBrief: creativeUploaded.map((f) => f.filename),
+      });
+
       const campaignDoc = await newCampaign.save();
 
-      // Notifications
+      // ✅ Notify matching influencers (same as before)
       try {
-        const subIds = Array.from(new Set(categoriesData.map(c => String(c.subcategoryId))));
-        const catNumIds = Array.from(new Set(categoriesData.map(c => Number(c.categoryId)).filter(Number.isFinite)));
+        const subIds = Array.from(new Set(categoriesData.map((c) => String(c.subcategoryId))));
+        const catNumIds = Array.from(new Set(categoriesData.map((c) => Number(c.categoryId)).filter(Number.isFinite)));
+
         if (subIds.length || catNumIds.length) {
           const influencers = await findMatchingInfluencers({ subIds, catNumIds });
-          if (influencers.length) {
-            await Promise.all(influencers.map(inf => createAndEmit({
-              influencerId: String(inf.influencerId), type: "campaign.match",
-              title: "New campaign matches your profile", message: `${campaignDoc.brandName} posted "${campaignDoc.productOrServiceName}".`,
-              entityType: "campaign", entityId: String(campaignDoc.campaignsId),
-              actionPath: `/influencer/dashboard/view-campaign?id=${campaignDoc.campaignsId}`,
-            }).catch(() => null)));
+          if (Array.isArray(influencers) && influencers.length) {
+            await Promise.all(
+              influencers.map((inf) =>
+                createAndEmit({
+                  influencerId: String(inf.influencerId),
+                  type: "campaign.match",
+                  title: "New campaign matches your profile",
+                  message: `${campaignDoc.brandName} posted "${campaignDoc.productOrServiceName}".`,
+                  entityType: "campaign",
+                  entityId: String(campaignDoc.campaignsId),
+                  actionPath: `/influencer/dashboard/view-campaign?id=${campaignDoc.campaignsId}`,
+                }).catch(() => null)
+              )
+            );
           }
         }
-      } catch (e) { }
+      } catch (e) {}
 
       return res.status(201).json({ message: "Campaign created successfully.", campaign: campaignDoc });
     } catch (error) {
@@ -1597,19 +1667,28 @@ exports.rejectCampaignPendingUpdate = async (req, res) => {
 exports.getAdminCampaigns = async (req, res) => {
   try {
     const { brandId } = req.params;
-    console.log("Admin fetching campaigns for brandId:", brandId);
+
     const limit = Math.min(parseInt(req.query.limit || "20", 10), 100);
     const page = Math.max(parseInt(req.query.page || "1", 10), 1);
     const skip = (page - 1) * limit;
 
+    // optional: include old drafts if you ever need them
+    const includeDrafts = String(req.query.includeDrafts || "0") === "1";
+
     const filter = {
-      brandId: String(brandId),
-      "createdBy.role": "admin",
+      ...(brandId ? { brandId: String(brandId) } : {}),
+      // admin-created (robust for old data)
+      $or: [
+        { "createdBy.role": "admin" },
+        { "createdBy.role": { $regex: /^admin$/i } },
+        { approvalMode: "admin_review" },
+      ],
+      ...(includeDrafts ? {} : { isDraft: { $ne: 1 } }), // hide drafts by default
     };
 
     const [data, total] = await Promise.all([
       Campaign.find(filter)
-        .sort({ createdAt: -1 }) // or { ctredatedat: -1 } if that's your field
+        .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
         .lean(),
@@ -1621,6 +1700,7 @@ exports.getAdminCampaigns = async (req, res) => {
       page,
       limit,
       total,
+      totalPages: Math.ceil(total / limit),
       data,
     });
   } catch (err) {

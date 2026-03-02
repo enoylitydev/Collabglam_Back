@@ -7,7 +7,8 @@ const {
   updateDeliverableApprovalStatus,
   listDeliverablesByCampaign,
   listInfluencerDeliverablesByCampaign,
-  listInfluencerDeliverablesByCampaign2
+  listInfluencerDeliverablesByCampaign2,
+  getAllDeliverables,
 } = require("../controllers/delieverableController");
 
 // 1) POST - create (always pending)
@@ -20,5 +21,6 @@ router.patch("/:delieverableApprovalId/status", updateDeliverableApprovalStatus)
 router.get("/campaign/:campaignId", listDeliverablesByCampaign);
 router.get("/influencer/:influencerId", listInfluencerDeliverablesByCampaign);
 router.get("/influencer/campaign/:campaignId", listInfluencerDeliverablesByCampaign2);
+router.get("/getall", getAllDeliverables);
 
 module.exports = router;

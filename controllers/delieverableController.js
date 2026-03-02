@@ -3,8 +3,11 @@ const Delieverable = require("../models/delieverable");
 const CampaignInvite = require("../models/campaignInvitation");
 const Campaign = require("../models/campaign");
 const Influencer = require("../models/influencer");
-const milestone = require("../models/milestone");
+const Milestone = require("../models/milestone");
+const Notification = require("../models/notification");
 
+
+const escapeRegex = (s = "") => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // helper to remove mongo fields from any object
 const stripMongo = (obj) => {
   if (!obj) return obj;
@@ -12,38 +15,125 @@ const stripMongo = (obj) => {
   return rest;
 };
 
-// 1) POST: Create deliverable approval (PENDING) - using campaignsId (UUID)
+const createNotificationSafe = async (payload) => {
+  try {
+    await Notification.create(payload);
+  } catch (err) {
+    console.error("Notification create failed:", err?.message || err);
+  }
+};
+
+// 1) POST: Create deliverable approval (PENDING)
 exports.createDeliverableApproval = async (req, res) => {
   try {
     const {
       brandId,
       influencerId,
-      campaignId,   // ✅ use campaignId
+      campaignId,
       title,
       description,
       url,
-      milestoneId,
+      milestoneHistoryId, // ✅ REQUIRED (we fetch title using this)
     } = req.body;
 
-    if (!brandId || !influencerId || !campaignId || !title) {
+    if (!brandId || !influencerId || !campaignId || !title || !milestoneHistoryId) {
       return res.status(400).json({
         success: false,
-        message: "brandId, influencerId, campaignId, and title are required.",
+        message:
+          "brandId, influencerId, campaignId, title, and milestoneHistoryId are required.",
       });
     }
 
+    const mHistoryId = String(milestoneHistoryId);
+
+    // ✅ Find milestone document that contains this milestoneHistoryId
+    const msDoc = await Milestone.findOne({
+      "milestoneHistory.milestoneHistoryId": mHistoryId,
+    })
+      .select("milestoneId milestoneHistory")
+      .lean();
+
+    if (!msDoc) {
+      return res.status(404).json({
+        success: false,
+        message: "Milestone history not found for given milestoneHistoryId.",
+      });
+    }
+
+    // ✅ Extract exact history item
+    const historyItem = (msDoc.milestoneHistory || []).find(
+      (h) => String(h.milestoneHistoryId) === mHistoryId
+    );
+
+    if (!historyItem) {
+      return res.status(404).json({
+        success: false,
+        message: "Milestone history item not found.",
+      });
+    }
+
+    // ✅ Safety checks (optional but recommended)
+    if (String(historyItem.campaignId) !== String(campaignId)) {
+      return res.status(400).json({
+        success: false,
+        message: "campaignId does not match milestone history campaignId.",
+      });
+    }
+
+    if (String(historyItem.influencerId) !== String(influencerId)) {
+      return res.status(400).json({
+        success: false,
+        message: "influencerId does not match milestone history influencerId.",
+      });
+    }
+
+    // ✅ Store BOTH milestoneId + milestoneHistoryId in Deliverable
     const doc = await Delieverable.create({
       brandId,
       influencerId,
-      campaignId, // ✅ now schema requirement is satisfied
+      campaignId,
       title,
-      milestoneId,
       description: description || "",
       url: Array.isArray(url) ? url : url ? [url] : [],
+      milestoneId: String(msDoc.milestoneId),      // ✅ store milestoneId (root)
+      milestoneHistoryId: mHistoryId,              // ✅ store milestoneHistoryId
       status: "pending",
       approvedRole: "",
       comments: "",
       approvalId: "",
+    });
+
+
+    // ✅ After deliverable created, notify BRAND
+    const influencerDoc = await Influencer.findOne({ influencerId: String(influencerId) })
+      .select("fullName name username")
+      .lean();
+
+    const influencerName =
+      influencerDoc?.fullName || influencerDoc?.name || influencerDoc?.username || "Influencer";
+
+    // optional: campaign name
+    const campaignDoc = await Campaign.findOne({ campaignsId: String(campaignId) })
+      .select("productOrServiceName")
+      .lean();
+
+    const campaignName = campaignDoc?.productOrServiceName || "Campaign";
+
+    const milestoneTitle = historyItem?.milestoneTitle || "";
+
+    const deliverableEntityId =
+      doc?.delieverableApprovalId || doc?.deliverableApprovalId || doc?.notificationId || null;
+
+    await createNotificationSafe({
+      brandId: String(brandId),
+      type: "deliverable.submitted",
+      title: "New deliverable submitted",
+      message: `${influencerName} submitted a deliverable for ${campaignName}${milestoneTitle ? ` (Milestone: ${milestoneTitle})` : ""
+        }.`,
+      entityType: "deliverable",
+      entityId: deliverableEntityId ? String(deliverableEntityId) : String(campaignId),
+      actionPath: `brand/deleverables?campaignId=${campaignId}`,
+      isRead: false,
     });
 
     return res.status(201).json({
@@ -93,7 +183,37 @@ exports.updateDeliverableApprovalStatus = async (req, res) => {
       { $set: update },
       { new: true }
     ).lean();
+    // ✅ Notify INFLUENCER when status changes
+    const campaignDoc = await Campaign.findOne({ campaignsId: String(doc.campaignId) })
+      .select("productOrServiceName")
+      .lean();
 
+    const campaignName = campaignDoc?.productOrServiceName || "Campaign";
+
+    const statusLabel = status === "approved" ? "Approved" : "Revision requested";
+    const notifTitle =
+      status === "approved" ? "Deliverable approved ✅" : "Deliverable needs changes ✏️";
+
+    const byRole = approvedRole || doc.approvedRole || "Brand";
+
+    const commentLine =
+      typeof comments === "string" && comments.trim()
+        ? ` Comment: ${comments.trim()}`
+        : "";
+
+    const deliverableEntityId =
+      doc?.delieverableApprovalId || doc?.deliverableApprovalId || doc?.notificationId || null;
+
+    await createNotificationSafe({
+      influencerId: String(doc.influencerId),
+      type: "deliverable.status.updated",
+      title: notifTitle,
+      message: `${byRole} marked your deliverable "${doc.title}" as ${statusLabel} in ${campaignName}.${commentLine}`,
+      entityType: "deliverable",
+      entityId: deliverableEntityId ? String(deliverableEntityId) : String(doc.campaignId),
+      actionPath: `/influencer/campaigns-invite/${doc.campaignId}`,
+      isRead: false,
+    });
     if (!doc) {
       return res.status(404).json({
         success: false,
@@ -142,31 +262,63 @@ exports.listDeliverablesByCampaign = async (req, res) => {
     // 3) Fetch influencers
     const influencers = influencerIds.length
       ? await Influencer.find({ influencerId: { $in: influencerIds } })
-          .select("-_id influencerId name fullName username")
-          .lean()
+        .select("-_id influencerId name fullName username")
+        .lean()
       : [];
 
-    // 4) Map influencerId -> influencer
     const infMap = new Map(influencers.map((i) => [String(i.influencerId), i]));
 
-    // 5) Attach influencerName + influencerHandle (optional)
+    // ✅ 4) Collect unique milestoneHistoryIds FROM deliverables
+    const milestoneHistoryIds = [
+      ...new Set(
+        docs
+          .map((d) => (d?.milestoneHistoryId ? String(d.milestoneHistoryId) : null))
+          .filter(Boolean)
+      ),
+    ];
+
+    // ✅ 5) Fetch milestone titles using milestoneHistoryId
+    const rows = milestoneHistoryIds.length
+      ? await Milestone.aggregate([
+        { $match: { "milestoneHistory.milestoneHistoryId": { $in: milestoneHistoryIds } } },
+        { $unwind: "$milestoneHistory" },
+        { $match: { "milestoneHistory.milestoneHistoryId": { $in: milestoneHistoryIds } } },
+        {
+          $project: {
+            _id: 0,
+            milestoneId: 1,
+            milestoneHistoryId: "$milestoneHistory.milestoneHistoryId",
+            milestoneTitle: "$milestoneHistory.milestoneTitle",
+          },
+        },
+      ])
+      : [];
+
+    const titleByHistoryId = new Map(
+      rows.map((r) => [String(r.milestoneHistoryId), r.milestoneTitle])
+    );
+
+    // 6) Attach influencer + milestoneTitle
     const data = docs.map((d) => {
       const inf = infMap.get(String(d.influencerId));
 
       const influencerName = inf?.fullName || inf?.name || inf?.username || "";
-      const influencerHandle = inf?.username || ""; // if you want handle
+      const influencerHandle = inf?.username || "";
+
+      const mhId = d?.milestoneHistoryId ? String(d.milestoneHistoryId) : "";
 
       return {
         ...d,
+        milestoneTitle: titleByHistoryId.get(mhId) || "", // ✅ from milestoneHistoryId
         influencerName,
         influencerHandle,
         influencer: inf
           ? {
-              influencerId: inf.influencerId,
-              name: influencerName,
-              username: inf.username || "",
-              fullName: inf.fullName || "",
-            }
+            influencerId: inf.influencerId,
+            name: influencerName,
+            username: inf.username || "",
+            fullName: inf.fullName || "",
+          }
           : null,
       };
     });
@@ -203,8 +355,8 @@ exports.listInfluencerDeliverablesByCampaign = async (req, res) => {
     // 3) Fetch campaigns by campaignsId (UUID field)
     const campaigns = campaignsIds.length
       ? await Campaign.find({ campaignsId: { $in: campaignsIds } })
-          .select("-_id campaignsId productOrServiceName")
-          .lean()
+        .select("-_id campaignsId productOrServiceName")
+        .lean()
       : [];
 
     // 4) Map campaigns by campaignsId
@@ -261,8 +413,8 @@ exports.listInfluencerDeliverablesByCampaign2 = async (req, res) => {
     // 3) Fetch influencer details (unique list)
     const influencers = influencerIds.length
       ? await Influencer.find({ influencerId: { $in: influencerIds } })
-          .select("name username fullName country socialLinks influencerId")
-          .lean()
+        .select("name username fullName country socialLinks influencerId")
+        .lean()
       : [];
 
     // ✅ Build map: influencerId -> { platforms:Set, createdAtLatest }
@@ -328,6 +480,213 @@ exports.listInfluencerDeliverablesByCampaign2 = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Failed to fetch totals + influencer list.",
+      error: err.message,
+    });
+  }
+};
+
+
+// ✅ NEW: GET ALL deliverables by brandId OR influencerId
+exports.getAllDeliverables = async (req, res) => {
+  try {
+    const {
+      brandId,
+      influencerId,
+      status,
+      campaignId,
+      search, // ✅ NEW
+      page = 1,
+      limit = 20,
+    } = req.query;
+
+    if (!brandId && !influencerId) {
+      return res.status(400).json({
+        success: false,
+        message: "brandId or influencerId is required.",
+      });
+    }
+
+    const p = Math.max(1, parseInt(page, 10));
+    const l = Math.max(1, parseInt(limit, 10));
+
+    const query = {};
+    if (brandId) query.brandId = String(brandId);
+    if (influencerId) query.influencerId = String(influencerId);
+    if (status) query.status = String(status);
+    if (campaignId) query.campaignId = String(campaignId);
+
+    // ✅ SEARCH (title/desc/comments + campaignName + milestoneTitle)
+    const term = String(search || "").trim();
+    if (term) {
+      const rx = new RegExp(escapeRegex(term), "i");
+
+      // 1) campaignIds where productOrServiceName matches
+      const matchedCampaigns = await Campaign.find({
+        productOrServiceName: rx,
+      })
+        .select("campaignsId -_id")
+        .lean();
+
+      const matchedCampaignIds = matchedCampaigns
+        .map((c) => String(c.campaignsId))
+        .filter(Boolean);
+
+      // 2) milestoneHistoryIds where milestoneTitle matches
+      const matchedMilestones = await Milestone.aggregate([
+        { $unwind: "$milestoneHistory" },
+        { $match: { "milestoneHistory.milestoneTitle": rx } },
+        {
+          $project: {
+            _id: 0,
+            milestoneHistoryId: "$milestoneHistory.milestoneHistoryId",
+          },
+        },
+      ]);
+
+      const matchedMilestoneHistoryIds = matchedMilestones
+        .map((m) => String(m.milestoneHistoryId))
+        .filter(Boolean);
+
+      query.$or = [
+        { title: rx },
+        { description: rx },
+        { comments: rx },
+        { delieverableApprovalId: rx },
+        ...(matchedCampaignIds.length
+          ? [{ campaignId: { $in: matchedCampaignIds } }]
+          : []),
+        ...(matchedMilestoneHistoryIds.length
+          ? [{ milestoneHistoryId: { $in: matchedMilestoneHistoryIds } }]
+          : []),
+      ];
+    }
+
+    // 1) Get deliverables (paginated)
+    const [docs, total] = await Promise.all([
+      Delieverable.find(query)
+        .select("-_id -__v")
+        .sort({ createdAt: -1 })
+        .skip((p - 1) * l)
+        .limit(l)
+        .lean(),
+      Delieverable.countDocuments(query),
+    ]);
+
+    // 2) Collect influencerIds
+    const influencerIds = [
+      ...new Set(
+        docs
+          .map((d) => (d?.influencerId ? String(d.influencerId) : null))
+          .filter(Boolean)
+      ),
+    ];
+
+    // 3) Fetch influencers
+    const influencers = influencerIds.length
+      ? await Influencer.find({ influencerId: { $in: influencerIds } })
+          .select("-_id influencerId name fullName username")
+          .lean()
+      : [];
+
+    const infMap = new Map(influencers.map((i) => [String(i.influencerId), i]));
+
+    // 4) Collect campaignIds (UUIDs)
+    const campaignIds = [
+      ...new Set(
+        docs
+          .map((d) => (d?.campaignId ? String(d.campaignId) : null))
+          .filter(Boolean)
+      ),
+    ];
+
+    // 5) Fetch campaigns
+    const campaigns = campaignIds.length
+      ? await Campaign.find({ campaignsId: { $in: campaignIds } })
+          .select("-_id campaignsId productOrServiceName")
+          .lean()
+      : [];
+
+    const campMap = new Map(campaigns.map((c) => [String(c.campaignsId), c]));
+
+    // 6) Collect milestoneHistoryIds
+    const milestoneHistoryIds = [
+      ...new Set(
+        docs
+          .map((d) =>
+            d?.milestoneHistoryId ? String(d.milestoneHistoryId) : null
+          )
+          .filter(Boolean)
+      ),
+    ];
+
+    // 7) Fetch milestone titles by milestoneHistoryId
+    const rows = milestoneHistoryIds.length
+      ? await Milestone.aggregate([
+          {
+            $match: {
+              "milestoneHistory.milestoneHistoryId": { $in: milestoneHistoryIds },
+            },
+          },
+          { $unwind: "$milestoneHistory" },
+          {
+            $match: {
+              "milestoneHistory.milestoneHistoryId": { $in: milestoneHistoryIds },
+            },
+          },
+          {
+            $project: {
+              _id: 0,
+              milestoneHistoryId: "$milestoneHistory.milestoneHistoryId",
+              milestoneTitle: "$milestoneHistory.milestoneTitle",
+            },
+          },
+        ])
+      : [];
+
+    const titleByHistoryId = new Map(
+      rows.map((r) => [String(r.milestoneHistoryId), r.milestoneTitle])
+    );
+
+    // 8) Attach influencer + campaign + milestoneTitle
+    const data = docs.map((d) => {
+      const inf = infMap.get(String(d.influencerId));
+      const camp = campMap.get(String(d.campaignId));
+
+      const influencerName = inf?.fullName || inf?.name || inf?.username || "";
+      const influencerHandle = inf?.username || "";
+
+      const mhId = d?.milestoneHistoryId ? String(d.milestoneHistoryId) : "";
+
+      return {
+        ...d,
+        campaignName: camp?.productOrServiceName || "",
+        milestoneTitle: titleByHistoryId.get(mhId) || "",
+        influencerName,
+        influencerHandle,
+        influencer: inf
+          ? {
+              influencerId: inf.influencerId,
+              name: influencerName,
+              username: inf.username || "",
+              fullName: inf.fullName || "",
+            }
+          : null,
+      };
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Deliverables fetched successfully.",
+      page: p,
+      limit: l,
+      total,
+      count: data.length,
+      data,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch deliverables.",
       error: err.message,
     });
   }

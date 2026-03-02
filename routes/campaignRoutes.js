@@ -5,13 +5,14 @@ const router = express.Router();
 
 const campaignController = require('../controllers/campaignsController');
 const brandController = require('../controllers/brandController');
+const adminController = require('../controllers/adminController');
+const { verifyBrandOrAdmin } = require("../middlewares/verifyBrandOrAdmin");
 
-// All endpoints are protected by verifyToken middleware:
 
 // 1. Create a new campaign
 router.post(
   '/create',
-  brandController.verifyToken,
+  verifyBrandOrAdmin,
   campaignController.createCampaign
 );
 

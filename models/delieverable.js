@@ -1,7 +1,6 @@
 // models/delieverable.js
 const mongoose = require("mongoose");
 const { v4: uuidv4 } = require("uuid");
-const milestone = require("./milestone");
 
 const deliverableUrlSchema = new mongoose.Schema(
   {
@@ -22,7 +21,13 @@ const delieverableSchema = new mongoose.Schema({
   brandId: { type: String, required: true, ref: "Brand" },
   influencerId: { type: String, required: true, ref: "Influencer" },
   campaignId: { type: String, required: true, ref: "Campaign" },
-  milestoneId: { type: String, required: true, ref: "Milestone" },
+
+  // ✅ ROOT milestone document id (Milestone.milestoneId)
+  milestoneId: { type: String, required: true, ref: "Milestone", index: true },
+
+  // ✅ NESTED milestone history id (Milestone.milestoneHistory[].milestoneHistoryId)
+  milestoneHistoryId: { type: String, required: true, index: true },
+
   title: { type: String, required: true },
   description: { type: String, default: "" },
 
@@ -30,21 +35,27 @@ const delieverableSchema = new mongoose.Schema({
     type: String,
     enum: ["pending", "revision", "approved"],
     default: "pending",
+    index: true,
   },
 
   approvedRole: {
-    type: String
-   
+    type: String,
+    default: "",
   },
 
-  approvalId: { type: String, default: "" }, // optional tracking id
+  approvalId: { type: String, default: "" },
   comments: { type: String, default: "" },
 
   url: { type: [deliverableUrlSchema], default: [] },
 
-  createdAt: { type: Date, default: Date.now },
+  createdAt: { type: Date, default: Date.now, index: true },
   updatedDate: { type: Date, default: Date.now },
 });
+
+// ✅ Useful compound indexes for faster listing / filtering
+delieverableSchema.index({ campaignId: 1, createdAt: -1 });
+delieverableSchema.index({ campaignId: 1, status: 1, createdAt: -1 });
+delieverableSchema.index({ influencerId: 1, campaignId: 1 });
 
 delieverableSchema.pre("save", function (next) {
   this.updatedDate = new Date();
