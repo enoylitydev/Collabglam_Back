@@ -21,6 +21,29 @@ const { createAndEmit } = require('../utils/notifier');
 // ===============================
 //  Helpers & Normalizers
 // ===============================
+
+function normalizeCommaString(v) {
+  if (v == null) return "";
+
+  // If frontend sends array
+  if (Array.isArray(v)) {
+    const uniq = [...new Set(v.map(x => String(x).trim()).filter(Boolean))];
+    return uniq.join(",");
+  }
+
+  const s = String(v).trim();
+  if (!s) return "";
+
+  // If frontend sends JSON array as string
+  try {
+    const parsed = JSON.parse(s);
+    if (Array.isArray(parsed)) return normalizeCommaString(parsed);
+  } catch { }
+
+  const uniq = [...new Set(s.split(",").map(x => x.trim()).filter(Boolean))];
+  return uniq.join(",");
+}
+
 function toNum(v, def = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : def;
@@ -44,17 +67,23 @@ function sortCategories(arr = []) {
 
 function normalizeForDiff(obj) {
   const out = { ...obj };
+
   if (out.targetAudience?.locations) {
     out.targetAudience = {
       ...out.targetAudience,
       locations: sortLocations(out.targetAudience.locations),
     };
   }
-  if (out.categories) {
-    out.categories = sortCategories(out.categories);
-  }
+  if (out.categories) out.categories = sortCategories(out.categories);
+
   if (out.budget !== undefined) out.budget = Number(out.budget);
   if (out.influencerBudget !== undefined) out.influencerBudget = Number(out.influencerBudget);
+
+  // ✅ add these
+  if (out.noInfluencers !== undefined) out.noInfluencers = String(out.noInfluencers);
+  if (out.influencerTier !== undefined) out.influencerTier = normalizeCommaString(out.influencerTier);
+  if (out.productCategory !== undefined) out.productCategory = String(out.productCategory);
+
   return out;
 }
 
@@ -417,6 +446,17 @@ exports.updateCampaignStatus = async (req, res) => {
     const current = normalizeStatus(campaign.campaignStatus || CAMPAIGN_STATUS.OPEN);
     if (current === "closed") campaign.campaignStatus = CAMPAIGN_STATUS.PAUSED;
 
+    if (updates.noInfluencers !== undefined) {
+      updates.noInfluencers = toStr(updates.noInfluencers, "1");
+    }
+
+    if (updates.influencerTier !== undefined) {
+      updates.influencerTier = normalizeCommaString(updates.influencerTier);
+    }
+
+    if (updates.productCategory !== undefined) {
+      updates.productCategory = toStr(updates.productCategory, "");
+    }
     if (next === CAMPAIGN_STATUS.OPEN) {
       const activeFlag = computeIsActive(campaign.timeline);
       if (activeFlag === 0) return res.status(400).json({ message: "Campaign timeline ended. Extend endDate to reopen." });
@@ -445,6 +485,9 @@ exports.saveDraftCampaign = (req, res) => {
         _id, brandId, productOrServiceName, description = "",
         targetAudience, categories, goal, campaignType,
         creativeBriefText, budget = 0, influencerBudget = 0, timeline, additionalNotes = "",
+        noInfluencers,
+        influencerTier,
+        productCategory,
       } = req.body;
 
       if (!brandId) return res.status(400).json({ message: "brandId is required." });
@@ -505,6 +548,9 @@ exports.saveDraftCampaign = (req, res) => {
         influencerBudget: toNum(influencerBudget),
         timeline: tlData,
         additionalNotes,
+        noInfluencers: toStr(noInfluencers, "1"),
+        influencerTier: normalizeCommaString(influencerTier),
+        productCategory: toStr(productCategory, ""),
         isActive: 0,
         isDraft: 1,
         publishStatus: "draft",
@@ -804,6 +850,9 @@ exports.createCampaign = (req, res) => {
         influencerBudget = 0,
         timeline,
         additionalNotes = "",
+        noInfluencers,
+        influencerTier,
+        productCategory,
       } = req.body;
 
       if (!brandId || !productOrServiceName || !goal) {
@@ -824,6 +873,10 @@ exports.createCampaign = (req, res) => {
         if (authBrandId && authBrandId !== String(brandId)) {
           return res.status(403).json({ message: "Forbidden: brandId mismatch." });
         }
+      }
+
+      if (!normalizeCommaString(influencerTier)) {
+        return res.status(400).json({ message: "influencerTier is required." });
       }
 
       // Target Audience
@@ -897,6 +950,10 @@ exports.createCampaign = (req, res) => {
         campaignStatus: "open",
         statusUpdatedAt: new Date(),
 
+        noInfluencers: toStr(noInfluencers, "1"),
+        influencerTier: normalizeCommaString(influencerTier),
+        productCategory: toStr(productCategory, ""),
+
         // ✅ this is the key part you asked for (admin role stored)
         createdBy: actor,
         approvalMode: actorIsAdmin ? "admin_review" : "direct",
@@ -933,7 +990,7 @@ exports.createCampaign = (req, res) => {
             );
           }
         }
-      } catch (e) {}
+      } catch (e) { }
 
       return res.status(201).json({ message: "Campaign created successfully.", campaign: campaignDoc });
     } catch (error) {
