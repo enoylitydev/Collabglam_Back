@@ -933,7 +933,7 @@ exports.createCampaign = (req, res) => {
             );
           }
         }
-      } catch (e) {}
+      } catch (e) { }
 
       return res.status(201).json({ message: "Campaign created successfully.", campaign: campaignDoc });
     } catch (error) {
@@ -1384,21 +1384,61 @@ exports.getContractedCampaignsByInfluencer = async (req, res) => {
 
 exports.getCampaignsByFilter = async (req, res) => {
   try {
-    const { subcategoryIds = [], categoryIds = [], gender, minAge, maxAge, ageMode = 'containment', countryId, goal, minBudget, maxBudget, search = '', page = 1, limit = 10, sortBy = 'createdAt', sortOrder = 'desc' } = req.body;
-    const filter = addInfluencerOpenStatusGate({ isActive: 1, isDraft: { $ne: 1 } }); // hide drafts
+    const {
+      subcategoryIds = [],
+      categoryIds = [],
+      gender,
+      minAge,
+      maxAge,
+      ageMode = 'containment',
+      countryId,
+      goal,
+      minBudget,
+      maxBudget,
+      search = '',
+      page = 1,
+      limit = 10,
+      sortBy = 'createdAt',
+      sortOrder = 'desc'
+    } = req.body;
 
-    if (Array.isArray(subcategoryIds) && subcategoryIds.length) filter['categories.subcategoryId'] = { $in: subcategoryIds.map(String) };
-    if (Array.isArray(categoryIds) && categoryIds.length) {
-      const nums = categoryIds.map(v => Number(v)).filter(n => Number.isFinite(n));
-      const maybeObjIds = categoryIds.filter(v => typeof v === 'string' && mongoose.Types.ObjectId.isValid(v));
-      let fromObj = [];
-      if (maybeObjIds.length) { const rows = await Category.find({ _id: { $in: maybeObjIds } }, 'id').lean(); fromObj = rows.map(r => r.id).filter(n => Number.isFinite(n)); }
-      const combined = [...new Set([...nums, ...fromObj])];
-      if (combined.length) filter['categories.categoryId'] = { $in: combined };
+    const filter = addInfluencerOpenStatusGate({
+      isActive: 1,
+      isDraft: { $ne: 1 }
+    });
+
+    // hide admin-created campaigns
+    filter['createdBy.role'] = { $ne: 'admin' };
+
+    if (Array.isArray(subcategoryIds) && subcategoryIds.length) {
+      filter['categories.subcategoryId'] = { $in: subcategoryIds.map(String) };
     }
 
-    if ([0, 1].includes(Number(gender))) filter['targetAudience.gender'] = Number(gender);
-    const minA = Number(minAge); const maxA = Number(maxAge);
+    if (Array.isArray(categoryIds) && categoryIds.length) {
+      const nums = categoryIds.map(v => Number(v)).filter(n => Number.isFinite(n));
+      const maybeObjIds = categoryIds.filter(
+        v => typeof v === 'string' && mongoose.Types.ObjectId.isValid(v)
+      );
+
+      let fromObj = [];
+      if (maybeObjIds.length) {
+        const rows = await Category.find({ _id: { $in: maybeObjIds } }, 'id').lean();
+        fromObj = rows.map(r => r.id).filter(n => Number.isFinite(n));
+      }
+
+      const combined = [...new Set([...nums, ...fromObj])];
+      if (combined.length) {
+        filter['categories.categoryId'] = { $in: combined };
+      }
+    }
+
+    if ([0, 1].includes(Number(gender))) {
+      filter['targetAudience.gender'] = Number(gender);
+    }
+
+    const minA = Number(minAge);
+    const maxA = Number(maxAge);
+
     if (!isNaN(minA) || !isNaN(maxA)) {
       if (ageMode === 'containment') {
         if (!isNaN(minA)) filter['targetAudience.age.MinAge'] = { $gte: minA };
@@ -1410,28 +1450,64 @@ exports.getCampaignsByFilter = async (req, res) => {
     }
 
     if (Array.isArray(countryId) && countryId.length) {
-      const validIds = countryId.filter((id) => mongoose.Types.ObjectId.isValid(id)).map((id) => new mongoose.Types.ObjectId(id));
-      if (validIds.length) filter['targetAudience.locations'] = { $elemMatch: { countryId: { $in: validIds } } };
+      const validIds = countryId
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      if (validIds.length) {
+        filter['targetAudience.locations'] = {
+          $elemMatch: { countryId: { $in: validIds } }
+        };
+      }
     } else if (countryId && mongoose.Types.ObjectId.isValid(countryId)) {
-      filter['targetAudience.locations'] = { $elemMatch: { countryId: new mongoose.Types.ObjectId(countryId) } };
+      filter['targetAudience.locations'] = {
+        $elemMatch: { countryId: new mongoose.Types.ObjectId(countryId) }
+      };
     }
 
-    if (goal && ['Brand Awareness', 'Sales', 'Engagement'].includes(goal)) filter.goal = goal;
-    const minB = Number(minBudget); const maxB = Number(maxBudget);
+    if (goal && ['Brand Awareness', 'Sales', 'Engagement'].includes(goal)) {
+      filter.goal = goal;
+    }
+
+    const minB = Number(minBudget);
+    const maxB = Number(maxBudget);
     if (!isNaN(minB) || !isNaN(maxB)) {
       filter.budget = {};
       if (!isNaN(minB)) filter.budget.$gte = minB;
       if (!isNaN(maxB)) filter.budget.$lte = maxB;
     }
-    if (typeof search === 'string' && search.trim()) filter.$or = buildSearchOr(search.trim());
 
-    const skip = (Math.max(1, parseInt(page, 10)) - 1) * Math.max(1, parseInt(limit, 10));
-    const sortObj = { [['createdAt', 'budget', 'goal', 'brandName'].includes(sortBy) ? sortBy : 'createdAt']: sortOrder === 'asc' ? 1 : -1 };
+    if (typeof search === 'string' && search.trim()) {
+      filter.$or = buildSearchOr(search.trim());
+    }
 
-    const [total, campaigns] = await Promise.all([Campaign.countDocuments(filter), Campaign.find(filter).sort(sortObj).skip(skip).limit(Math.max(1, parseInt(limit, 10))).lean()]);
-    return res.json({ data: campaigns, pagination: { total, page: Math.max(1, parseInt(page, 10)), limit: Math.max(1, parseInt(limit, 10)), totalPages: Math.ceil(total / Math.max(1, parseInt(limit, 10))) } });
+    const safePage = Math.max(1, parseInt(page, 10));
+    const safeLimit = Math.max(1, parseInt(limit, 10));
+    const skip = (safePage - 1) * safeLimit;
+
+    const sortObj = {
+      [['createdAt', 'budget', 'goal', 'brandName'].includes(sortBy) ? sortBy : 'createdAt']:
+        sortOrder === 'asc' ? 1 : -1
+    };
+
+    const [total, campaigns] = await Promise.all([
+      Campaign.countDocuments(filter),
+      Campaign.find(filter).sort(sortObj).skip(skip).limit(safeLimit).lean()
+    ]);
+
+    return res.json({
+      data: campaigns,
+      pagination: {
+        total,
+        page: safePage,
+        limit: safeLimit,
+        totalPages: Math.ceil(total / safeLimit)
+      }
+    });
   } catch (err) {
-    return res.status(500).json({ message: 'Internal server error while filtering campaigns.' });
+    return res.status(500).json({
+      message: 'Internal server error while filtering campaigns.'
+    });
   }
 };
 
