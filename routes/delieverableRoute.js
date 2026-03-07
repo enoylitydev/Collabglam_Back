@@ -29,6 +29,6 @@ router.get(
   listBrandShortlistedCampaigns
 );
 
-router.post("/updateRevision", updateDeliverableRevision);
+router.post("/updateRevision", updateDeliverableRevision);  
 
 module.exports = router;
