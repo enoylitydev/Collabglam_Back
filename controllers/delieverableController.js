@@ -5,6 +5,7 @@ const Campaign = require("../models/campaign");
 const Influencer = require("../models/influencer");
 const Milestone = require("../models/milestone");
 const Notification = require("../models/notification");
+const Modash = require("../models/modash");
 
 
 const escapeRegex = (s = "") => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -395,43 +396,58 @@ exports.listInfluencerDeliverablesByCampaign2 = async (req, res) => {
     const { campaignId } = req.params;
     const campaignIdStr = String(campaignId);
 
-    // 1) Get invites by campaignsId (STRING) + include platform + createdAt
+    // 1) Get invites
     const invites = await CampaignInvite.find({ campaignsId: campaignIdStr })
       .select("influencerId deliverables platform createdAt")
       .sort({ createdAt: -1 })
       .lean();
 
-    // 2) Collect unique influencer UUIDs (STRING)
+    // 2) Unique influencerIds
     const influencerIds = [
       ...new Set(
         invites
-          .map((x) => x.influencerId)
+          .map((x) => x?.influencerId)
           .filter(Boolean)
           .map((id) => String(id))
       ),
     ];
 
-    // 3) Fetch influencer details (unique list)
+    // 3) Fetch influencer details
     const influencers = influencerIds.length
       ? await Influencer.find({ influencerId: { $in: influencerIds } })
-        .select("name username fullName country socialLinks influencerId")
-        .lean()
+          .select(`
+            influencerId
+            name
+            email
+            country
+            primaryPlatform
+            onboarding.categoryId
+            onboarding.categoryName
+          `)
+          .lean()
       : [];
 
-    // ✅ Build map: influencerId -> { platforms:Set, createdAtLatest }
+    // 4) Fetch modash details for handle
+    const modashProfiles = influencerIds.length
+      ? await Modash.find({ influencerId: { $in: influencerIds } })
+          .select("influencerId provider handle username fullname")
+          .lean()
+      : [];
+
+    // 5) Build invite meta map
     const metaByInfluencer = new Map();
 
     for (const inv of invites) {
       const infId = inv?.influencerId ? String(inv.influencerId) : null;
       if (!infId) continue;
 
-      const p = inv?.platform ? String(inv.platform) : null;
+      const p = inv?.platform ? String(inv.platform).toLowerCase() : null;
       const c = inv?.createdAt || null;
 
       if (!metaByInfluencer.has(infId)) {
         metaByInfluencer.set(infId, {
           platforms: new Set(),
-          createdAt: c, // since invites sorted desc, first is latest
+          createdAt: c,
         });
       }
 
@@ -439,25 +455,84 @@ exports.listInfluencerDeliverablesByCampaign2 = async (req, res) => {
 
       if (p) meta.platforms.add(p);
 
-      // safety: ensure latest createdAt (if sort ever changes)
       if (c && (!meta.createdAt || new Date(c) > new Date(meta.createdAt))) {
         meta.createdAt = c;
       }
     }
 
-    // ✅ Attach platforms + createdAt to each influencer
+    // 6) Build modash map by influencerId
+    const modashByInfluencer = new Map();
+
+    for (const row of modashProfiles) {
+      const infId = row?.influencerId ? String(row.influencerId) : null;
+      if (!infId) continue;
+
+      if (!modashByInfluencer.has(infId)) {
+        modashByInfluencer.set(infId, []);
+      }
+
+      modashByInfluencer.get(infId).push(row);
+    }
+
+    const normalizeHandle = (value) => {
+      if (!value) return null;
+      const v = String(value).trim();
+      if (!v) return null;
+      return v.startsWith("@") ? v : `@${v}`;
+    };
+
+    const pickHandleFromModash = (modashRows, preferredPlatform) => {
+      if (!Array.isArray(modashRows) || !modashRows.length) return null;
+
+      const preferred = preferredPlatform
+        ? modashRows.find(
+            (m) =>
+              String(m?.provider || "").toLowerCase() ===
+              String(preferredPlatform).toLowerCase()
+          )
+        : null;
+
+      const chosen = preferred || modashRows[0];
+
+      return (
+        normalizeHandle(chosen?.handle) ||
+        normalizeHandle(chosen?.username) ||
+        null
+      );
+    };
+
+    // 7) Final influencer response
     const influencersWithMeta = influencers.map((inf) => {
       const id = String(inf.influencerId);
       const meta = metaByInfluencer.get(id);
+      const platforms = meta ? Array.from(meta.platforms) : [];
+      const modashRows = modashByInfluencer.get(id) || [];
+
+      const preferredPlatform =
+        (inf?.primaryPlatform || "").toLowerCase() ||
+        (platforms[0] || "").toLowerCase() ||
+        null;
+
+      const handle =
+        pickHandleFromModash(modashRows, preferredPlatform) ||
+        null;
 
       return {
-        ...inf,
-        platforms: meta ? Array.from(meta.platforms) : [],
-        createdAt: meta?.createdAt || null, // ✅ latest invite createdAt
+        influencerId: inf.influencerId,
+        name: inf.name || null,
+        handle,
+        country: inf.country || null,
+        primaryPlatform: inf.primaryPlatform || null,
+        category: {
+          categoryId: inf?.onboarding?.categoryId || null,
+          categoryName: inf?.onboarding?.categoryName || null,
+        },
+        platforms,
+        createdAt: meta?.createdAt || null,
       };
     });
 
-    // ✅ TOTALS
+    // 8) Totals
     const totalInvites = invites.length;
     const totalInfluencers = influencerIds.length;
 
@@ -475,7 +550,7 @@ exports.listInfluencerDeliverablesByCampaign2 = async (req, res) => {
         influencers: totalInfluencers,
         deliverables: totalDeliverables,
       },
-      influencers: influencersWithMeta, // ✅ now includes platforms + createdAt
+      influencers: influencersWithMeta,
     });
   } catch (err) {
     return res.status(500).json({
@@ -485,7 +560,6 @@ exports.listInfluencerDeliverablesByCampaign2 = async (req, res) => {
     });
   }
 };
-
 
 // ✅ NEW: GET ALL deliverables by brandId OR influencerId
 exports.getAllDeliverables = async (req, res) => {

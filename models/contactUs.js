@@ -35,6 +35,6 @@ const contactUsSchema = new mongoose.Schema({
 });
 
 const ContactUs = mongoose.models.ContactUs ||
-                  mongoose.model('ContactUs', contactUsSchema);
+  mongoose.model('ContactUs', contactUsSchema);
 
 module.exports = ContactUs;
