@@ -65,6 +65,9 @@ const campaignSchema = new mongoose.Schema({
     enum: ['Brand Awareness', 'Sales', 'Engagement'],
     required: true
   },
+noInfluencers: { type: String, required: true, default: "1", trim: true, match: /^\d+$/ },
+  influencerTier: { type: String, required: true, trim: true },
+  productCategory: { type: String, default: "", trim: true },
   campaignType: { type: String, default: '' },
   creativeBriefText: { type: String, default: '' },
   budget: { type: Number, default: 0 },
@@ -80,9 +83,9 @@ const campaignSchema = new mongoose.Schema({
   isActive: { type: Number, enum: [0, 1], default: 1 },
   applicantCount: { type: Number, default: 0 },
   hasApplied: { type: Number, enum: [0, 1], default: 0 },
-  
+
   isDraft: { type: Number, enum: [0, 1], default: 0 },
-  
+
   // ✅ ENFORCES THE NEW WORKFLOW STATES
   publishStatus: {
     type: String,
@@ -90,7 +93,7 @@ const campaignSchema = new mongoose.Schema({
     default: "published",
     index: true
   },
-  
+
   createdAt: { type: Date, default: Date.now },
   createdBy: { type: actorSchema, default: null },
   approvalMode: { type: String, enum: ["direct", "admin_review"], default: "direct", index: true },

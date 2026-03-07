@@ -59,7 +59,7 @@ app.set('broadcastToRoom', sockets.legacyBroadcastToRoom);
 
 // ====== Express middleware ======
 app.use(cors({
-  origin: process.env.FRONTEND_ORIGIN || ['https://collabglam.com','http://localhost:3000','http://localhost:3001'],
+  origin: process.env.FRONTEND_ORIGIN || ['https://collabglam.com','http://localhost:3000','http://localhost:3001','https://mhd.sharemitra.com'],
   credentials: true
 }));
 
