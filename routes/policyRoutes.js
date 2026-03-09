@@ -9,5 +9,6 @@ router.post('/create', policyController.createPolicy);
 router.post('/update', policyController.updatePolicy);
 router.post('/delete', policyController.deletePolicy);
 router.post('/getlist', policyController.getPolicy);
+router.get('/all', policyController.getAllPolicies);
 
 module.exports = router;

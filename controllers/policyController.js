@@ -1,20 +1,35 @@
-// controllers/policyController.js
-
-const Policy = require('../models/policy');
+const { Policy } = require('../models/policy');
 
 /**
- * Create a new policy
+ * Create policy
  * POST /api/policy/create
- * Body: { policyType, effectiveDate, content }
+ * Body: { policyKey, title, fileName, effectiveDate, content, isPublished? }
  */
 exports.createPolicy = async (req, res) => {
   try {
-    const { policyType, effectiveDate, content } = req.body;
-    const existing = await Policy.findOne({ policyType });
+    const {
+      policyKey,
+      title,
+      fileName,
+      effectiveDate,
+      content,
+      isPublished
+    } = req.body;
+
+    const existing = await Policy.findOne({ policyKey });
     if (existing) {
-      return res.status(400).json({ error: 'Policy type already exists' });
+      return res.status(400).json({ error: 'Policy already exists for this policyKey' });
     }
-    const policy = new Policy({ policyType, effectiveDate, content });
+
+    const policy = new Policy({
+      policyKey,
+      title,
+      fileName,
+      effectiveDate,
+      content,
+      isPublished
+    });
+
     await policy.save();
     return res.status(201).json(policy);
   } catch (err) {
@@ -24,24 +39,41 @@ exports.createPolicy = async (req, res) => {
 };
 
 /**
- * Update an existing policy
+ * Update policy
  * POST /api/policy/update
- * Body: { policyType, effectiveDate?, content? }
+ * Body: { policyKey, title?, fileName?, effectiveDate?, content?, isPublished? }
  */
 exports.updatePolicy = async (req, res) => {
   try {
-    const { policyType, effectiveDate, content } = req.body;
-    const update = {};
-    if (effectiveDate) update.effectiveDate = effectiveDate;
-    if (content) update.content = content;
+    const {
+      policyKey,
+      title,
+      fileName,
+      effectiveDate,
+      content,
+      isPublished
+    } = req.body;
+
+    const update = {
+      updatedDate: new Date()
+    };
+
+    if (title !== undefined) update.title = title;
+    if (fileName !== undefined) update.fileName = fileName;
+    if (effectiveDate !== undefined) update.effectiveDate = effectiveDate;
+    if (content !== undefined) update.content = content;
+    if (isPublished !== undefined) update.isPublished = isPublished;
+
     const policy = await Policy.findOneAndUpdate(
-      { policyType },
+      { policyKey },
       { $set: update },
       { new: true }
     );
+
     if (!policy) {
       return res.status(404).json({ error: 'Policy not found' });
     }
+
     return res.json(policy);
   } catch (err) {
     console.error('updatePolicy error', err);
@@ -50,18 +82,20 @@ exports.updatePolicy = async (req, res) => {
 };
 
 /**
- * Delete a policy
+ * Delete policy
  * POST /api/policy/delete
- * Body: { policyType }
+ * Body: { policyKey }
  */
 exports.deletePolicy = async (req, res) => {
   try {
-    const { policyType } = req.body;
-    const result = await Policy.findOneAndDelete({ policyType });
+    const { policyKey } = req.body;
+
+    const result = await Policy.findOneAndDelete({ policyKey });
     if (!result) {
       return res.status(404).json({ error: 'Policy not found' });
     }
-    return res.json({ message: 'Policy deleted' });
+
+    return res.json({ message: 'Policy deleted successfully' });
   } catch (err) {
     console.error('deletePolicy error', err);
     return res.status(500).json({ error: 'Server error' });
@@ -69,20 +103,36 @@ exports.deletePolicy = async (req, res) => {
 };
 
 /**
- * Retrieve a policy
+ * Get single policy
  * POST /api/policy/get
- * Body: { policyType }
+ * Body: { policyKey }
  */
 exports.getPolicy = async (req, res) => {
   try {
-    const { policyType } = req.body;
-    const policy = await Policy.findOne({ policyType });
+    const { policyKey } = req.body;
+
+    const policy = await Policy.findOne({ policyKey });
     if (!policy) {
       return res.status(404).json({ error: 'Policy not found' });
     }
+
     return res.json(policy);
   } catch (err) {
     console.error('getPolicy error', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+};
+
+/**
+ * Get all policies
+ * GET /api/policy/all
+ */
+exports.getAllPolicies = async (req, res) => {
+  try {
+    const policies = await Policy.find({}).sort({ createdAt: 1 });
+    return res.json(policies);
+  } catch (err) {
+    console.error('getAllPolicies error', err);
     return res.status(500).json({ error: 'Server error' });
   }
 };
