@@ -17,7 +17,7 @@ const {
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-const clientUrl = (process.env.CAMPAIGN_BASE_URL || "https://collabglam.com").replace(/\/$/, "");
+const clientUrl = (process.env.CAMPAIGN_BASE_URL || "http://localhost:3000").replace(/\/$/, "");
 const brandSuccessPath = process.env.STRIPE_BRAND_SUCCESS_PATH || "/brand/subscriptions";
 const influencerSuccessPath = process.env.STRIPE_INFLUENCER_SUCCESS_PATH || "/influencer/subscriptions";
 const milestoneSuccessPath =
